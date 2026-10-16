@@ -1,0 +1,170 @@
+MRuby::Gem::Specification.new('mruby-compiler') do |spec|
+  spec.license = 'MIT'
+  spec.author  = 'mruby and PicoRuby developers'
+  spec.summary = 'mruby compiler using Prism'
+
+  lib_dir = "#{dir}/lib"
+  prism_dir = "#{lib_dir}/prism"
+  prism_templates_dir = "#{prism_dir}/templates"
+
+  cc.include_paths << "#{dir}/include"
+  cc.include_paths << "#{build.build_root}/prism/include"
+  cc.include_paths << "#{prism_dir}/include"
+
+  cc.defines.flatten!
+  cc.defines << 'PRISM_XALLOCATOR'
+  # Prism is a recursive-descent parser and mruby has no machine-stack-overflow
+  # backstop, so its default nesting cap of 10000 overflows the C stack (a
+  # crash) before the limit trips -- e.g. an ASan build dies around 400-500
+  # deep. Cap nesting to match the codegen's own MRC_CODEGEN_LEVEL_MAX (256):
+  # the codegen cannot compile an expression nested deeper than that anyway, so
+  # this rejects nothing compilable while staying well below the stack limit.
+  # Targets on a tiny stack can lower it; those that raise it must also raise
+  # MRC_CODEGEN_LEVEL_MAX and have the C stack to match.
+  unless cc.defines.any? { |d| d.match?(/\APRISM_DEPTH_MAXIMUM(=|\z)/) }
+    cc.defines << 'PRISM_DEPTH_MAXIMUM=256'
+  end
+  if cc.defines.include?('PICORB_VM_MRUBY')
+    cc.defines << 'MRC_TARGET_MRUBY'
+  elsif cc.defines.include?('PICORB_VM_MRUBYC')
+    cc.defines << 'MRC_TARGET_MRUBYC'
+  elsif !cc.defines.include?('MRB_NO_GEMS')
+    cc.defines << 'MRC_TARGET_MRUBY'
+  end
+  # Prism allocates the tree it parses, and the walk that gives the tree back
+  # costs a C frame per level of it; a tree deep enough to run that off the
+  # stack is written in ordinary source, so the tree is taken from an arena
+  # and given back in one piece instead (see include/prism_xallocator.h).
+  #
+  # A C++ ABI build takes the arena's blocks from libc.  Prism is compiled as
+  # C there, so it reaches the arena through the C linkage the header gives
+  # it; what it must not reach is mrb_malloc(), which raises on failure and
+  # would throw through Prism's frames.  Nothing is lost by it: that build
+  # already had every Prism allocation outside mrb_malloc().
+  cc.defines << 'MRC_PRISM_ARENA'
+  cc.defines << 'MRC_PRISM_ARENA_LIBC' if build.cxx_abi_enabled?
+  cc.defines << 'MRC_DEBUG' if cc.has_define?('MRB_DEBUG')
+  cc.defines << 'PRISM_BUILD_MINIMAL' unless cc.defines.include?('MRC_DEBUG')
+  # PRISM_BUILD_MINIMAL stubs out pm_prettyprint(), so `mruby -v` can only dump
+  # the AST where it is compiled in
+  cc.defines << 'MRC_DUMP_PRETTY' if cc.defines.include?('MRC_DEBUG')
+
+  # The compiler glue is built as C++ under MRB_USE_CXX_ABI, and mruby.h
+  # requires __STDC_LIMIT_MACROS / __STDC_CONSTANT_MACROS before <stdint.h> in
+  # C++ mode -- some libc stdint.h (e.g. mingw) only define UINTPTR_MAX and
+  # friends when they are set. Define them on the command line so they apply no
+  # matter which header pulls in <stdint.h> first.
+  if build.cxx_abi_enabled?
+    cc.defines += %w(__STDC_LIMIT_MACROS __STDC_CONSTANT_MACROS)
+  end
+
+  # Skip the Prism template generation and object registration only when the
+  # invocation is purely cleaning. Checking just the first task would also skip
+  # it for "rake clean test" (clean followed by a build in one process), which
+  # would leave the Prism objects out of objs and break the link.
+  next if (Rake.application.top_level_tasks - %w(clean deep_clean)).empty?
+
+  prism_template_names = %w[
+    ext/prism/api_node.c
+    include/prism/ast.h
+    include/prism/diagnostic.h
+    src/diagnostic.c
+    src/node.c
+    src/prettyprint.c
+    src/serialize.c
+    src/token_type.c
+  ]
+  # Written where the build writes, not into the submodule: a checkout is not
+  # the build's to change, and an out-of-source build left it holding the
+  # generated sources. `build_root` rather than `build_dir` because every
+  # target of the config reads the same ones, the mrbc sub-build included.
+  prism_gen_dir = "#{build.build_root}/prism"
+  prism_generated_files = prism_template_names.map { |path| "#{prism_gen_dir}/#{path}" }
+
+  task :prism_submodule do
+    next if File.exist?("#{prism_dir}/templates/template.rb")
+
+    FileUtils.cd dir do
+      sh 'git submodule update --init lib/prism'
+    end
+  end
+
+  task prism_templates: :prism_submodule do
+    missing = prism_generated_files.reject { |path| File.exist?(path) }
+    unless missing.empty?
+      FileUtils.cd prism_dir do
+        prism_template_names.each do |name|
+          sh "#{RbConfig.ruby} templates/template.rb #{name} #{prism_gen_dir}/#{name}"
+        end
+      end
+    end
+
+    # The templates write #line directives that name themselves against the
+    # root of the prism repository ("prism/templates/..."), a path that
+    # resolves to nothing from where mruby compiles: diagnostics point at a
+    # file the editor cannot open, and ccache drops its direct mode over the
+    # missing dependency. Rewrite the prefix to the name the compile is given
+    # for the gem's location, which is the one every other source is named
+    # by, and the gem's path where the build compiles by paths.
+    prism_compile_dir = build.compile_path(prism_dir)
+    prism_generated_files.each do |path|
+      source = File.binread(path)
+      rewritten = source.gsub(/^(#line \d+ ")prism\//) { "#{$1}#{prism_compile_dir}/" }
+      File.binwrite(path, rewritten) unless rewritten == source
+    end
+  end
+
+  Rake::Task[:prism_templates].invoke
+
+  %w(node prettyprint serialize token_type).each do |name|
+    dst = "#{prism_gen_dir}/src/#{name}.c"
+    file dst => ["#{prism_templates_dir}/src/#{name}.c.erb", "#{prism_templates_dir}/template.rb"] do
+      Rake::Task[:prism_templates].invoke
+    end
+  end
+
+  # Prism is a vendored C library and must be compiled as C: neither g++ (its
+  # generated diagnostic table uses non-trivial designated initializers) nor
+  # clang++ (its implicit void* conversions) can build it as C++. In an
+  # MRB_USE_CXX_ABI build the rest of mruby compiles as C++, so strip the C++
+  # compile flag here to keep these sources on the C compiler; mrc_common.h
+  # wraps the Prism header in extern "C" so the C++ glue links against them.
+  # Prism's allocator is the arena, which the header declares with C linkage
+  # so that these C objects resolve it; its blocks come from libc there, so
+  # nothing here reaches a C++-linkage symbol (see MRC_PRISM_ARENA_LIBC).
+  # The compiler is derived when a rule is first resolved (not here) so cc is
+  # already fully populated with the build's generated-header include flags.
+  #
+  # The objects go through the rules like every other object of the gem, so
+  # that a change to a Prism header or to the compile flags rebuilds them.
+  prism_src_dir = "#{prism_dir}/src"
+  prism_obj_dir = "#{build_dir}/lib"
+  prism_cc = nil
+  cc.define_rules(prism_obj_dir, prism_src_dir) do
+    prism_cc ||= if build.cxx_abi_enabled?
+      cc.clone.tap do |c|
+        c.flags = cc.flags.flatten - [cc.cxx_compile_flag].flatten
+        c.defines = cc.defines
+      end
+    else
+      cc
+    end
+  end
+  prism_gen_src_dir = "#{prism_gen_dir}/src"
+  cc.define_rules(prism_obj_dir, prism_gen_src_dir) do
+    prism_cc ||= if build.cxx_abi_enabled?
+      cc.clone.tap do |c|
+        c.flags = cc.flags.flatten - [cc.cxx_compile_flag].flatten
+        c.defines = cc.defines
+      end
+    else
+      cc
+    end
+  end
+  Dir.glob("#{prism_src_dir}/**/*.c").each do |src|
+    objs << objfile(src.relative_path_from(prism_src_dir).pathmap("#{prism_obj_dir}/%X"))
+  end
+  Dir.glob("#{prism_gen_src_dir}/**/*.c").each do |src|
+    objs << objfile(src.relative_path_from(prism_gen_src_dir).pathmap("#{prism_obj_dir}/%X"))
+  end
+end

@@ -1,0 +1,29 @@
+[package]
+edition = "2024"
+name = "mruby-compiler2-sys"
+version = "0.5.0"
+authors = [
+    "Uchio Kondo <udzura@udzura.jp>",
+    "Hitoshi Hasumi",
+    "prism developers",
+]
+build = "build.rs"
+description = "mruby-compiler2 bindings for Rust (Windows/Cross-platform patched)"
+license-file = "LICENSE"
+
+[features]
+default = ["std"]
+no-std = []
+std = ["dep:libc"]
+
+[lib]
+name = "mruby_compiler2_sys"
+path = "src/lib.rs"
+
+[dependencies.libc]
+version = "0.2"
+optional = true
+
+[build-dependencies]
+cc = "1.0"
+glob = "0.3"
