@@ -553,17 +553,23 @@ fn register_engine_api(
                 Box::new(|_vm, _args| Ok(Rc::new(RObject::nil()))),
             );
         }
+        let sprites_for_headless = sprites.clone();
         let emoji_for_headless = emoji_atlas.clone();
         mrb_define_cmethod(
             vm,
             obj_class.clone(),
             "spr",
             Box::new(move |_vm, args| {
-                if let Some(first) = args.first()
-                    && let Ok(s) = String::try_from(first.as_ref())
-                {
-                    let _ = emoji_for_headless.borrow_mut().get_or_insert(&s, false);
+                if let Some(first) = args.first() {
+                    if matches!(first.value, RValue::String(_, _)) {
+                        if let Ok(s) = String::try_from(first.as_ref()) {
+                            let _ = emoji_for_headless.borrow_mut().get_or_insert(&s, false);
+                        }
+                        return Ok(Rc::new(RObject::nil()));
+                    }
                 }
+                let id = arg_i32(args, 0, 0);
+                let _ = sprites_for_headless.borrow().get(&id);
                 Ok(Rc::new(RObject::nil()))
             }),
         );
@@ -632,6 +638,7 @@ fn register_engine_api(
             let flip_y = arg_bool(args, 4, false);
 
             if let Some(first) = args.first()
+                && matches!(first.value, RValue::String(_, _))
                 && let Ok(emoji_str) = String::try_from(first.as_ref())
             {
                 let mut atlas_ref = emoji_for_spr.borrow_mut();
