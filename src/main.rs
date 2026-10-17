@@ -705,7 +705,14 @@ impl BitmapFont {
         }
     }
 
-    pub fn draw_text_crisp(&self, text: &str, x: f32, y: f32, color: Color) {
+    pub fn draw_text_crisp(
+        &self,
+        text: &str,
+        x: f32,
+        y: f32,
+        color: Color,
+        emoji_atlas: &RefCell<emoji::EmojiAtlas>,
+    ) {
         let Some(ref texture) = self.texture else {
             return;
         };
@@ -713,13 +720,29 @@ impl BitmapFont {
         let mut cur_y = y.floor();
         let start_x = cur_x;
 
-        for ch in text.chars() {
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
             if ch == '\n' {
                 cur_x = start_x;
                 cur_y += FONT_CHAR_H as f32;
                 continue;
             }
             let code = ch as u32;
+            // Variation Selector (FE0E, FE0F), Zero Width Joiner (200D), スキントーン修飾子は単体では幅を進めない
+            if code == 0xFE0E
+                || code == 0xFE0F
+                || code == 0x200D
+                || (0x1F3FB..=0x1F3FF).contains(&code)
+            {
+                continue;
+            }
+
+            // 直後に Variation Selector が続く場合は先読みして消費する
+            let next_vs = match chars.peek().copied() {
+                Some('\u{FE0F}') | Some('\u{FE0E}') => chars.next(),
+                _ => None,
+            };
+
             if (0x20..=0x7E).contains(&code) {
                 let idx = (code - 0x20) as usize;
                 let col = idx % FONT_ATLAS_COLS;
@@ -740,7 +763,40 @@ impl BitmapFont {
                     },
                 );
                 cur_x += FONT_CHAR_W as f32;
-            } else if code <= 0xFFFF {
+                continue;
+            }
+
+            // 絵文字判定:
+            // - テキスト異体字セレクタ (FE0E) が明示されていない
+            // - 絵文字アトラスに収録されており、以下のいずれかを満たす:
+            //   1) 非BMP文字 (code > 0xFFFF, 例: 🐰, 🐢, 🍎)
+            //   2) 絵文字異体字セレクタ (FE0F) が付与されている (例: ⚔️, ❤️, ☀️)
+            //   3) 0x2300 以上の絵文字記号または美咲フォントに存在しない絵文字コードポイント (例: ⭐, ✨)
+            let prefer_emoji = next_vs != Some('\u{FE0E}')
+                && emoji::is_emoji_codepoint(code)
+                && (code > 0xFFFF
+                    || next_vs == Some('\u{FE0F}')
+                    || code >= 0x2300
+                    || lookup_misaki_glyph(code as u16).is_none());
+
+            if prefer_emoji {
+                let mut atlas_ref = emoji_atlas.borrow_mut();
+                if let Some(sprite) = atlas_ref.get_or_insert_8x8_by_cp(code, true)
+                    && let Some(ref emoji_tex) = sprite.texture
+                {
+                    draw_texture_ex(
+                        emoji_tex,
+                        cur_x,
+                        cur_y,
+                        WHITE,
+                        DrawTextureParams::default(),
+                    );
+                }
+                cur_x += 8.0;
+                continue;
+            }
+
+            if code <= 0xFFFF {
                 let cp = code as u16;
                 if cp != 0x3000 {
                     // 全角空白以外ならグリフテクスチャを取得または生成して描画
@@ -810,8 +866,8 @@ fn register_engine_api(
     let obj_class = vm.object_class.clone();
 
     if headless {
-        // ヘッドレステスト用スタブ登録 (spr に絵文字が渡された場合はキャッシュ抽出も検証可能にする)
-        for name in ["cls", "pset", "rectfill", "print_text"] {
+        // ヘッドレステスト用スタブ登録 (spr / print_text に絵文字が渡された場合はキャッシュ抽出も検証可能にする)
+        for name in ["cls", "pset", "rectfill"] {
             mrb_define_cmethod(
                 vm,
                 obj_class.clone(),
@@ -819,6 +875,26 @@ fn register_engine_api(
                 Box::new(|_vm, _args| Ok(Rc::new(RObject::nil()))),
             );
         }
+        let emoji_for_headless_print = emoji_atlas.clone();
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            "print_text",
+            Box::new(move |_vm, args| {
+                if let Some(first) = args.first()
+                    && let Ok(text) = String::try_from(first.as_ref())
+                {
+                    let mut atlas = emoji_for_headless_print.borrow_mut();
+                    for ch in text.chars() {
+                        let cp = ch as u32;
+                        if emoji::is_emoji_codepoint(cp) {
+                            let _ = atlas.get_or_insert_8x8_by_cp(cp, false);
+                        }
+                    }
+                }
+                Ok(Rc::new(RObject::nil()))
+            }),
+        );
         let sprites_for_headless = sprites.clone();
         let emoji_for_headless = emoji_atlas.clone();
         mrb_define_cmethod(
@@ -967,8 +1043,9 @@ fn register_engine_api(
         }),
     );
 
-    // print_text(text, x = 0, y = 0, col = 7): 1-bit ピクセルフォントでくっきりテキスト描画
+    // print_text(text, x = 0, y = 0, col = 7): 1-bit ピクセルフォント + 8x8 縮小絵文字でくっきりテキスト描画
     let font_for_print = bitmap_font.clone();
+    let emoji_for_print = emoji_atlas.clone();
     mrb_define_cmethod(
         vm,
         obj_class,
@@ -981,7 +1058,7 @@ fn register_engine_api(
             let x = arg_i32(args, 1, 0) as f32;
             let y = arg_i32(args, 2, 0) as f32;
             let col = arg_i32(args, 3, 7);
-            font_for_print.draw_text_crisp(&text, x, y, palette_color(col));
+            font_for_print.draw_text_crisp(&text, x, y, palette_color(col), &emoji_for_print);
             Ok(Rc::new(RObject::nil()))
         }),
     );
@@ -1767,6 +1844,31 @@ __END__
                 "Glyph '{}' should have non-zero pixel rows",
                 ch
             );
+        }
+    }
+
+    #[test]
+    fn test_print_text_with_emoji_8x8() {
+        let script = r#"
+def update
+end
+
+def draw
+  print_text("🐰うさぎと🐢かめ⚔️❤️⭐", 8, 8, 7)
+end
+"#;
+        let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
+        let mut runtime = GameRuntime::new(&tail, &mrb, true).unwrap();
+        runtime.call_draw();
+
+        let mut atlas = runtime.emoji_atlas.borrow_mut();
+        for emoji in ["🐰", "🐢", "⚔️", "❤️", "⭐"] {
+            let cp = emoji::resolve_emoji_codepoint(emoji).unwrap();
+            let sp8 = atlas
+                .get_or_insert_8x8_by_cp(cp, false)
+                .expect("8x8 emoji should be cached");
+            assert_eq!(sp8.width, 8);
+            assert_eq!(sp8.height, 8);
         }
     }
 }

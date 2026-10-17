@@ -9,6 +9,11 @@ include!("emoji_table.rs");
 /// 事前生成された Twemoji (CC-BY 4.0) ベースの 16x16 絵文字アトラス PNG (SFC RGB555 減色・1bit透過済み)
 pub const EMOJI_ATLAS_PNG: &[u8] = include_bytes!("../assets/emoji_atlas.png");
 
+/// 指定した Unicode コードポイントが絵文字アトラスに含まれているか判定する。
+pub fn is_emoji_codepoint(cp: u32) -> bool {
+    EMOJI_CODEPOINTS.binary_search(&cp).is_ok()
+}
+
 /// 文字列（絵文字リテラル `"🐰"`, `"⚔️"` 等）から対応する絵文字コードポイントを解決する。
 /// Variation Selector (`\u{FE0F}`, `\u{FE0E}`) 等が含まれていても自動的にベース絵文字を特定する。
 pub fn resolve_emoji_codepoint(s: &str) -> Option<u32> {
@@ -17,18 +22,19 @@ pub fn resolve_emoji_codepoint(s: &str) -> Option<u32> {
         if cp == 0xFE0F || cp == 0xFE0E || cp == 0x200D {
             continue;
         }
-        if EMOJI_CODEPOINTS.binary_search(&cp).is_ok() {
+        if is_emoji_codepoint(cp) {
             return Some(cp);
         }
     }
     None
 }
 
-/// 16x16 絵文字スプライトのアトラス管理・オンデマンド抽出キャッシュ
+/// 16x16 絵文字スプライトおよびテキスト描画用 8x8 縮小絵文字のアトラス管理・オンデマンド抽出キャッシュ
 pub struct EmojiAtlas {
     atlas_width: usize,
     atlas_rgba: Vec<u8>,
     cache: HashMap<u32, SpriteData>,
+    cache_8x8: HashMap<u32, SpriteData>,
 }
 
 impl Default for EmojiAtlas {
@@ -45,12 +51,18 @@ impl EmojiAtlas {
             atlas_width: img.width as usize,
             atlas_rgba: img.bytes,
             cache: HashMap::new(),
+            cache_8x8: HashMap::new(),
         }
     }
 
     /// 指定した絵文字文字列（例: `"🐰"`, `"🐢"`, `"⚔️"`）に対応する 16x16 `SpriteData` を切り出して返す。
     pub fn extract_sprite(&self, emoji_str: &str) -> Option<SpriteData> {
         let cp = resolve_emoji_codepoint(emoji_str)?;
+        self.extract_sprite_by_cp(cp)
+    }
+
+    /// 指定した絵文字コードポイントに対応する 16x16 `SpriteData` を切り出して返す。
+    pub fn extract_sprite_by_cp(&self, cp: u32) -> Option<SpriteData> {
         let tile_idx = EMOJI_CODEPOINTS.binary_search(&cp).ok()?;
         let tile_col = tile_idx % EMOJI_ATLAS_COLS;
         let tile_row = tile_idx / EMOJI_ATLAS_COLS;
@@ -75,17 +87,99 @@ impl EmojiAtlas {
         ))
     }
 
-    /// キャッシュから絵文字スプライトを取得し、未生成であれば切り出して（必要に応じGPUテクスチャ化して）返す。
+    /// 指定した絵文字文字列に対応する 8x8 縮小 `SpriteData` を生成して返す。
+    pub fn extract_sprite_8x8(&self, emoji_str: &str) -> Option<SpriteData> {
+        let cp = resolve_emoji_codepoint(emoji_str)?;
+        self.extract_sprite_8x8_by_cp(cp)
+    }
+
+    /// 指定した絵文字コードポイントの 16x16 タイルを 2x2 ボックスフィルタで 8x8 に縮小した `SpriteData` を返す。
+    pub fn extract_sprite_8x8_by_cp(&self, cp: u32) -> Option<SpriteData> {
+        let tile_idx = EMOJI_CODEPOINTS.binary_search(&cp).ok()?;
+        let tile_col = tile_idx % EMOJI_ATLAS_COLS;
+        let tile_row = tile_idx / EMOJI_ATLAS_COLS;
+
+        let downscale_with_threshold = |min_opaque: u32| -> (Vec<u8>, usize) {
+            let mut rgba = vec![0u8; 8 * 8 * 4];
+            let mut visible_pixels = 0usize;
+            for oy in 0..8 {
+                for ox in 0..8 {
+                    let mut sum_r = 0u32;
+                    let mut sum_g = 0u32;
+                    let mut sum_b = 0u32;
+                    let mut opaque = 0u32;
+
+                    for sy in 0..2 {
+                        for sx in 0..2 {
+                            let src_x = tile_col * SPRITE_SIZE + ox * 2 + sx;
+                            let src_y = tile_row * SPRITE_SIZE + oy * 2 + sy;
+                            let src_off = (src_y * self.atlas_width + src_x) * 4;
+                            if src_off + 4 <= self.atlas_rgba.len() {
+                                let a = self.atlas_rgba[src_off + 3];
+                                if a > 0 {
+                                    sum_r += self.atlas_rgba[src_off] as u32;
+                                    sum_g += self.atlas_rgba[src_off + 1] as u32;
+                                    sum_b += self.atlas_rgba[src_off + 2] as u32;
+                                    opaque += 1;
+                                }
+                            }
+                        }
+                    }
+
+                    if opaque >= min_opaque {
+                        let r = (sum_r / opaque) as u8;
+                        let g = (sum_g / opaque) as u8;
+                        let b = (sum_b / opaque) as u8;
+                        let qr = (r & 0xF8) | (r >> 5);
+                        let qg = (g & 0xF8) | (g >> 5);
+                        let qb = (b & 0xF8) | (b >> 5);
+                        let dst_off = (oy * 8 + ox) * 4;
+                        rgba[dst_off] = qr;
+                        rgba[dst_off + 1] = qg;
+                        rgba[dst_off + 2] = qb;
+                        rgba[dst_off + 3] = 255;
+                        visible_pixels += 1;
+                    }
+                }
+            }
+            (rgba, visible_pixels)
+        };
+
+        let (mut rgba, visible) = downscale_with_threshold(2);
+        if visible < 4 {
+            (rgba, _) = downscale_with_threshold(1);
+        }
+
+        Some(SpriteData::from_rgba(8, 8, rgba))
+    }
+
+    /// キャッシュから 16x16 絵文字スプライトを取得し、未生成であれば切り出して（必要に応じGPUテクスチャ化して）返す。
     pub fn get_or_insert(&mut self, emoji_str: &str, build_texture: bool) -> Option<&SpriteData> {
         let cp = resolve_emoji_codepoint(emoji_str)?;
         if !self.cache.contains_key(&cp) {
-            let mut sprite = self.extract_sprite(emoji_str)?;
+            let mut sprite = self.extract_sprite_by_cp(cp)?;
             if build_texture {
                 sprite.build_texture();
             }
             self.cache.insert(cp, sprite);
         }
         self.cache.get(&cp)
+    }
+
+    /// キャッシュから 8x8 縮小絵文字スプライトを取得し、未生成であれば縮小生成して（必要に応じGPUテクスチャ化して）返す。
+    pub fn get_or_insert_8x8_by_cp(
+        &mut self,
+        cp: u32,
+        build_texture: bool,
+    ) -> Option<&SpriteData> {
+        if !self.cache_8x8.contains_key(&cp) {
+            let mut sprite = self.extract_sprite_8x8_by_cp(cp)?;
+            if build_texture {
+                sprite.build_texture();
+            }
+            self.cache_8x8.insert(cp, sprite);
+        }
+        self.cache_8x8.get(&cp)
     }
 }
 
@@ -112,6 +206,25 @@ mod tests {
                 "Emoji {} should have visible pixels (got {})",
                 emoji,
                 non_transparent
+            );
+
+            // 8x8 縮小ビットマップ抽出の検証
+            let sprite_8x8 = atlas
+                .extract_sprite_8x8(emoji)
+                .unwrap_or_else(|| panic!("8x8 Emoji {} should be supported", emoji));
+            assert_eq!(sprite_8x8.width, 8);
+            assert_eq!(sprite_8x8.height, 8);
+            assert_eq!(sprite_8x8.rgba.len(), 8 * 8 * 4);
+            let non_transparent_8x8 = sprite_8x8
+                .rgba
+                .chunks_exact(4)
+                .filter(|px| px[3] > 0)
+                .count();
+            assert!(
+                non_transparent_8x8 >= 4,
+                "8x8 Emoji {} should have visible pixels (got {})",
+                emoji,
+                non_transparent_8x8
             );
         }
     }
