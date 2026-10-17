@@ -1267,6 +1267,107 @@ pub fn rasterize_circfill(cx: i32, cy: i32, r: i32) -> Vec<PixelSpan> {
     spans
 }
 
+fn trace_midpoint_ellipse(rx: i32, ry: i32, mut f: impl FnMut(i32, i32)) {
+    let rx64 = rx.min(4096) as i64;
+    let ry64 = ry.min(4096) as i64;
+    let rx2 = rx64 * rx64;
+    let ry2 = ry64 * ry64;
+
+    let mut x = 0i64;
+    let mut y = ry64;
+
+    // Region 1: 接線の傾きの絶対値 < 1 (ry^2 * x < rx^2 * y)
+    let mut d1 = 4 * ry2 + rx2 * (1 - 4 * ry64);
+    while ry2 * x < rx2 * y {
+        f(x as i32, y as i32);
+        x += 1;
+        if d1 < 0 {
+            d1 += 4 * ry2 * (2 * x + 1);
+        } else {
+            y -= 1;
+            d1 += 4 * ry2 * (2 * x + 1) - 8 * rx2 * y;
+        }
+    }
+
+    // Region 2: 接線の傾きの絶対値 >= 1 (y >= 0 まで降下)
+    let mut d2 = ry2 * (2 * x + 1) * (2 * x + 1) + 4 * rx2 * (y - 1) * (y - 1) - 4 * rx2 * ry2;
+    while y >= 0 {
+        f(x as i32, y as i32);
+        y -= 1;
+        if d2 > 0 {
+            d2 += 4 * rx2 * (1 - 2 * y);
+        } else {
+            x += 1;
+            d2 += 8 * ry2 * x + 4 * rx2 * (1 - 2 * y);
+        }
+    }
+}
+
+/// ミッドポイント楕円アルゴリズムによる 1px 楕円枠 `(cx, cy, rx, ry)` のラスタライズ
+pub fn rasterize_oval(cx: i32, cy: i32, rx: i32, ry: i32) -> Vec<PixelSpan> {
+    if rx < 0 || ry < 0 {
+        return Vec::new();
+    }
+    if rx == ry {
+        return rasterize_circ(cx, cy, rx);
+    }
+    let rx = rx.min(4096);
+    let ry = ry.min(4096);
+    if ry == 0 {
+        return vec![PixelSpan::new(cx - rx, cy, 2 * rx + 1, 1)];
+    }
+    if rx == 0 {
+        return vec![PixelSpan::new(cx, cy - ry, 1, 2 * ry + 1)];
+    }
+
+    let mut points = Vec::with_capacity(((rx + ry) as usize) * 4);
+    trace_midpoint_ellipse(rx, ry, |dx, dy| {
+        points.extend_from_slice(&[
+            (cx + dx, cy + dy),
+            (cx - dx, cy + dy),
+            (cx + dx, cy - dy),
+            (cx - dx, cy - dy),
+        ]);
+    });
+
+    points_to_horizontal_spans(points)
+}
+
+/// ミッドポイント楕円アルゴリズムによる塗りつぶし楕円 `(cx, cy, rx, ry)` の水平スパンラスタライズ（重複なし）
+pub fn rasterize_ovalfill(cx: i32, cy: i32, rx: i32, ry: i32) -> Vec<PixelSpan> {
+    if rx < 0 || ry < 0 {
+        return Vec::new();
+    }
+    if rx == ry {
+        return rasterize_circfill(cx, cy, rx);
+    }
+    let rx = rx.min(4096);
+    let ry = ry.min(4096);
+    if ry == 0 {
+        return vec![PixelSpan::new(cx - rx, cy, 2 * rx + 1, 1)];
+    }
+    if rx == 0 {
+        return (cy - ry..=cy + ry)
+            .map(|y| PixelSpan::new(cx, y, 1, 1))
+            .collect();
+    }
+
+    let mut max_dx = vec![0i32; (ry as usize) + 1];
+    trace_midpoint_ellipse(rx, ry, |dx, dy| {
+        let yu = dy as usize;
+        if dx > max_dx[yu] {
+            max_dx[yu] = dx;
+        }
+    });
+
+    let mut spans = Vec::with_capacity((2 * ry + 1) as usize);
+    for dy in -ry..=ry {
+        let half = max_dx[dy.unsigned_abs() as usize];
+        spans.push(PixelSpan::new(cx - half, cy + dy, 2 * half + 1, 1));
+    }
+    spans
+}
+
 /// 三角形枠線 `(x0, y0) - (x1, y1) - (x2, y2)` のラスタライズ
 pub fn rasterize_tri(x0: i32, y0: i32, x1: i32, y1: i32, x2: i32, y2: i32) -> Vec<PixelSpan> {
     let mut points = Vec::new();
@@ -1450,6 +1551,40 @@ fn register_engine_api(
                     let r = arg_i32(args, 2, 4);
                     let spans = rasterize_circfill(x, y, r);
                     let _ = state_for_circfill.borrow().transform_and_clip_spans(&spans);
+                    Ok(Rc::new(RObject::nil()))
+                }),
+            );
+        }
+        for name in ["oval", "ellipse"] {
+            let state_for_oval = draw_state.clone();
+            mrb_define_cmethod(
+                vm,
+                obj_class.clone(),
+                name,
+                Box::new(move |_vm, args| {
+                    let x = arg_i32(args, 0, 0);
+                    let y = arg_i32(args, 1, 0);
+                    let rx = arg_i32(args, 2, 6);
+                    let ry = arg_i32(args, 3, 4);
+                    let spans = rasterize_oval(x, y, rx, ry);
+                    let _ = state_for_oval.borrow().transform_and_clip_spans(&spans);
+                    Ok(Rc::new(RObject::nil()))
+                }),
+            );
+        }
+        for name in ["ovalfill", "ellipsefill"] {
+            let state_for_ovalfill = draw_state.clone();
+            mrb_define_cmethod(
+                vm,
+                obj_class.clone(),
+                name,
+                Box::new(move |_vm, args| {
+                    let x = arg_i32(args, 0, 0);
+                    let y = arg_i32(args, 1, 0);
+                    let rx = arg_i32(args, 2, 6);
+                    let ry = arg_i32(args, 3, 4);
+                    let spans = rasterize_ovalfill(x, y, rx, ry);
+                    let _ = state_for_ovalfill.borrow().transform_and_clip_spans(&spans);
                     Ok(Rc::new(RObject::nil()))
                 }),
             );
@@ -1710,6 +1845,48 @@ fn register_engine_api(
                 let col = arg_i32(args, 3, 7);
                 let raw = rasterize_circfill(x, y, r);
                 let spans = state_for_circfill.borrow().transform_and_clip_spans(&raw);
+                draw_spans(&spans, palette_color(col));
+                Ok(Rc::new(RObject::nil()))
+            }),
+        );
+    }
+
+    // oval(x = 0, y = 0, rx = 6, ry = 4, col = 7) / ellipse(x = 0, y = 0, rx = 6, ry = 4, col = 7): 枠線のみの楕円
+    for name in ["oval", "ellipse"] {
+        let state_for_oval = draw_state.clone();
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            name,
+            Box::new(move |_vm, args| {
+                let x = arg_i32(args, 0, 0);
+                let y = arg_i32(args, 1, 0);
+                let rx = arg_i32(args, 2, 6);
+                let ry = arg_i32(args, 3, 4);
+                let col = arg_i32(args, 4, 7);
+                let raw = rasterize_oval(x, y, rx, ry);
+                let spans = state_for_oval.borrow().transform_and_clip_spans(&raw);
+                draw_spans(&spans, palette_color(col));
+                Ok(Rc::new(RObject::nil()))
+            }),
+        );
+    }
+
+    // ovalfill(x = 0, y = 0, rx = 6, ry = 4, col = 7) / ellipsefill(x = 0, y = 0, rx = 6, ry = 4, col = 7): 塗りつぶし楕円
+    for name in ["ovalfill", "ellipsefill"] {
+        let state_for_ovalfill = draw_state.clone();
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            name,
+            Box::new(move |_vm, args| {
+                let x = arg_i32(args, 0, 0);
+                let y = arg_i32(args, 1, 0);
+                let rx = arg_i32(args, 2, 6);
+                let ry = arg_i32(args, 3, 4);
+                let col = arg_i32(args, 4, 7);
+                let raw = rasterize_ovalfill(x, y, rx, ry);
+                let spans = state_for_ovalfill.borrow().transform_and_clip_spans(&raw);
                 draw_spans(&spans, palette_color(col));
                 Ok(Rc::new(RObject::nil()))
             }),
@@ -2901,4 +3078,83 @@ end
         assert_eq!(runtime.draw_state.borrow().cam_y, 0);
         assert_eq!(runtime.draw_state.borrow().clip, None);
     }
+
+    #[test]
+    fn test_oval_and_ovalfill_rasterization() {
+        // 負の半径は空
+        assert!(rasterize_oval(10, 10, -1, 5).is_empty());
+        assert!(rasterize_oval(10, 10, 5, -1).is_empty());
+        assert!(rasterize_ovalfill(10, 10, -1, 5).is_empty());
+        assert!(rasterize_ovalfill(10, 10, 5, -1).is_empty());
+
+        // 半径 (0, 0) は 1x1 点
+        assert_eq!(rasterize_oval(10, 20, 0, 0), vec![PixelSpan::new(10, 20, 1, 1)]);
+        assert_eq!(
+            rasterize_ovalfill(10, 20, 0, 0),
+            vec![PixelSpan::new(10, 20, 1, 1)]
+        );
+
+        // ry = 0 は水平線分、rx = 0 は垂直線分
+        assert_eq!(rasterize_oval(10, 20, 4, 0), vec![PixelSpan::new(6, 20, 9, 1)]);
+        assert_eq!(
+            rasterize_ovalfill(10, 20, 4, 0),
+            vec![PixelSpan::new(6, 20, 9, 1)]
+        );
+        assert_eq!(rasterize_oval(10, 20, 0, 3), vec![PixelSpan::new(10, 17, 1, 7)]);
+        assert_eq!(rasterize_ovalfill(10, 20, 0, 3).len(), 7);
+
+        // rx == ry の場合は circ / circfill と完全一致すること
+        assert_eq!(rasterize_oval(50, 60, 8, 8), rasterize_circ(50, 60, 8));
+        assert_eq!(
+            rasterize_ovalfill(50, 60, 8, 8),
+            rasterize_circfill(50, 60, 8)
+        );
+
+        // 横長楕円 (rx = 12, ry = 6) および縦長楕円 (rx = 5, ry = 11) の対称性と包含関係
+        for &(cx, cy, rx, ry) in &[(100, 120, 12, 6), (80, 90, 5, 11)] {
+            let outline = rasterize_oval(cx, cy, rx, ry);
+            let filled = rasterize_ovalfill(cx, cy, rx, ry);
+
+            // 塗りつぶし楕円のスパン数は 2 * ry + 1 本（各スキャンライン1本）
+            assert_eq!(filled.len(), (2 * ry + 1) as usize);
+
+            // 四端および中心が含まれること
+            assert!(outline.iter().any(|s| s.contains(cx - rx, cy)));
+            assert!(outline.iter().any(|s| s.contains(cx + rx, cy)));
+            assert!(outline.iter().any(|s| s.contains(cx, cy - ry)));
+            assert!(outline.iter().any(|s| s.contains(cx, cy + ry)));
+            assert!(!outline.iter().any(|s| s.contains(cx, cy)));
+            assert!(filled.iter().any(|s| s.contains(cx, cy)));
+
+            // 枠線上の全ピクセルが上下左右対称であり、かつ塗りつぶし領域に含まれること
+            for span in &outline {
+                for py in span.y..(span.y + span.h) {
+                    for px in span.x..(span.x + span.w) {
+                        let dx = px - cx;
+                        let dy = py - cy;
+                        assert!(outline.iter().any(|s| s.contains(cx - dx, cy + dy)));
+                        assert!(outline.iter().any(|s| s.contains(cx + dx, cy - dy)));
+                        assert!(outline.iter().any(|s| s.contains(cx - dx, cy - dy)));
+                        assert!(filled.iter().any(|s| s.contains(px, py)));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_oval_example_script() {
+        let (_, tail_data, mrb_bytes) =
+            cli::compile_ruby_script_file(std::path::Path::new("examples/oval.rb"))
+                .expect("examples/oval.rb should compile");
+
+        let mut runtime =
+            GameRuntime::new(&tail_data, &mrb_bytes, true).expect("Example should initialize");
+
+        for _ in 0..5 {
+            runtime.call_update();
+            runtime.call_draw();
+        }
+    }
 }
+
