@@ -3938,7 +3938,91 @@ __END__
             runtime.call_draw();
         }
     }
+
+    #[test]
+    fn test_usakame_survivors_full_simulation() {
+        let (full_src, tail_data, mrb_bytes) =
+            cli::compile_ruby_script_file(std::path::Path::new("game.rb"))
+                .expect("game.rb should compile");
+
+        let mut runtime =
+            GameRuntime::new(&tail_data, &mrb_bytes, true).expect("game.rb should initialize");
+
+        // 1. タイトル画面での update / draw
+        for _ in 0..3 {
+            runtime.call_update();
+            runtime.call_draw();
+        }
+
+        // 2. ゲーム開始・全武器解禁・全敵スポーン・スキル・タッグ切替・描画の総合検証スクリプトを実行
+        let sim_driver = format!(
+            "{}\n{}",
+            full_src.split("__END__").next().unwrap(),
+            r#"
+def run_full_sim
+  start_new_game
+  # 全アップグレードを Lv2 にして全ウェポン(🥕🛡️⚡🔥🌙🧲❤️⭐)を同時稼働させる
+  $upg_lv = [2, 2, 2, 2, 2, 2, 2, 2]
+  # 全種類の敵(0..6)をスポーン
+  spawn_enemy(0, 260, 248)
+  spawn_enemy(1, 230, 248)
+  spawn_enemy(2, 248, 270)
+  spawn_enemy(3, 248, 220)
+  spawn_enemy(4, 280, 260)
+  spawn_enemy(5, 290, 248)
+  spawn_enemy(6, 200, 248)
+
+  # 60フレーム戦闘を進める
+  step = 0
+  while step < 60
+    update
+    draw
+    if step == 10
+      trigger_active_skill
+    elsif step == 20
+      $tag_gauge = 100
+      trigger_tag_switch
+    elsif step == 30
+      trigger_active_skill
+    elsif step == 40
+      break_tile_at(3, 1)
+      break_tile_at(4, 2)
+    end
+    step += 1
+  end
+
+  # 全種類のアイテム回収とレベルアップ遷移・選択の検証
+  spawn_item($px, $py, 0, 5)
+  spawn_item($px, $py, 1, 10)
+  spawn_item($px, $py, 2, 20)
+  spawn_item($px, $py, 3, 25)
+  spawn_item($px, $py, 4, 1)
+  spawn_item($px, $py, 5, 1)
+  update_items
+  if $state == STATE_LEVELUP
+    draw
+    apply_upgrade($choices[0])
+    $state = STATE_PLAY
+  end
+
+  # VICTORY 画面と GAMEOVER 画面の描画検証
+  $state = STATE_VICTORY
+  update
+  draw
+  $state = STATE_GAMEOVER
+  update
+  draw
+end
+"#
+        );
+
+        let (_, sim_mrb) = cli::compile_ruby_script_str(&sim_driver).unwrap();
+        runtime.hot_reload(&tail_data, &sim_mrb).unwrap();
+        mrb_funcall(&mut runtime.vm, None, "run_full_sim", &[])
+            .expect("Full simulation of USAKAME SURVIVORS should succeed without any Ruby error");
+    }
 }
+
 
 
 
