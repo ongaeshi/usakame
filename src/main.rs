@@ -846,7 +846,21 @@ impl BitmapFont {
 // ==========================================
 fn arg_i32(args: &[Rc<RObject>], index: usize, default: i32) -> i32 {
     args.get(index)
-        .and_then(|v| i32::try_from(v.as_ref()).ok())
+        .and_then(|v| match &v.value {
+            RValue::Integer(i) => Some(*i as i32),
+            RValue::Float(f) => Some(*f as i32),
+            _ => i32::try_from(v.as_ref()).ok(),
+        })
+        .unwrap_or(default)
+}
+
+fn arg_f32(args: &[Rc<RObject>], index: usize, default: f32) -> f32 {
+    args.get(index)
+        .and_then(|v| match &v.value {
+            RValue::Integer(i) => Some(*i as f32),
+            RValue::Float(f) => Some(*f as f32),
+            _ => f64::try_from(v.as_ref()).ok().map(|f| f as f32),
+        })
         .unwrap_or(default)
 }
 
@@ -854,6 +868,81 @@ fn arg_bool(args: &[Rc<RObject>], index: usize, default: bool) -> bool {
     args.get(index)
         .and_then(|v| bool::try_from(v.as_ref()).ok())
         .unwrap_or(default)
+}
+
+/// スプライトの元の矩形 `(x, y, w, h)` の中心を基準（ピボット）として、
+/// 回転角 `rotate_deg`（度数法・時計回り）および拡大率 `scale` を適用した描画座標と `DrawTextureParams` を計算する。
+pub fn compute_sprite_draw_params(
+    w: f32,
+    h: f32,
+    x: f32,
+    y: f32,
+    flip_x: bool,
+    flip_y: bool,
+    rotate_deg: f32,
+    scale: f32,
+) -> Option<(f32, f32, DrawTextureParams)> {
+    if !scale.is_finite() || scale.abs() < f32::EPSILON {
+        return None;
+    }
+    let (s, fx, fy) = if scale < 0.0 {
+        (-scale, !flip_x, !flip_y)
+    } else {
+        (scale, flip_x, flip_y)
+    };
+
+    let base_x = x.floor();
+    let base_y = y.floor();
+    let center_x = base_x + w * 0.5;
+    let center_y = base_y + h * 0.5;
+    let scaled_w = w * s;
+    let scaled_h = h * s;
+    let draw_x = center_x - scaled_w * 0.5;
+    let draw_y = center_y - scaled_h * 0.5;
+    let rotation = if rotate_deg.is_finite() {
+        rotate_deg.to_radians()
+    } else {
+        0.0
+    };
+
+    Some((
+        draw_x,
+        draw_y,
+        DrawTextureParams {
+            dest_size: Some(vec2(scaled_w, scaled_h)),
+            rotation,
+            flip_x: fx,
+            flip_y: fy,
+            pivot: Some(vec2(center_x, center_y)),
+            ..Default::default()
+        },
+    ))
+}
+
+fn draw_sprite_transformed(
+    sprite: &SpriteData,
+    x: f32,
+    y: f32,
+    flip_x: bool,
+    flip_y: bool,
+    rotate_deg: f32,
+    scale: f32,
+) {
+    let Some(ref texture) = sprite.texture else {
+        return;
+    };
+    if let Some((draw_x, draw_y, params)) = compute_sprite_draw_params(
+        sprite.width as f32,
+        sprite.height as f32,
+        x,
+        y,
+        flip_x,
+        flip_y,
+        rotate_deg,
+        scale,
+    ) {
+        draw_texture_ex(texture, draw_x, draw_y, WHITE, params);
+    }
 }
 
 fn register_engine_api(
@@ -902,16 +991,45 @@ fn register_engine_api(
             obj_class.clone(),
             "spr",
             Box::new(move |_vm, args| {
+                let x = arg_f32(args, 1, 0.0);
+                let y = arg_f32(args, 2, 0.0);
+                let flip_x = arg_bool(args, 3, false);
+                let flip_y = arg_bool(args, 4, false);
+                let rotate = arg_f32(args, 5, 0.0);
+                let scale = arg_f32(args, 6, 1.0);
+
                 if let Some(first) = args.first() {
                     if matches!(first.value, RValue::String(_, _)) {
                         if let Ok(s) = String::try_from(first.as_ref()) {
-                            let _ = emoji_for_headless.borrow_mut().get_or_insert(&s, false);
+                            if let Some(sp) = emoji_for_headless.borrow_mut().get_or_insert(&s, false) {
+                                let _ = compute_sprite_draw_params(
+                                    sp.width as f32,
+                                    sp.height as f32,
+                                    x,
+                                    y,
+                                    flip_x,
+                                    flip_y,
+                                    rotate,
+                                    scale,
+                                );
+                            }
                         }
                         return Ok(Rc::new(RObject::nil()));
                     }
                 }
                 let id = arg_i32(args, 0, 0);
-                let _ = sprites_for_headless.borrow().get(&id);
+                if let Some(sp) = sprites_for_headless.borrow().get(&id) {
+                    let _ = compute_sprite_draw_params(
+                        sp.width as f32,
+                        sp.height as f32,
+                        x,
+                        y,
+                        flip_x,
+                        flip_y,
+                        rotate,
+                        scale,
+                    );
+                }
                 Ok(Rc::new(RObject::nil()))
             }),
         );
@@ -966,7 +1084,7 @@ fn register_engine_api(
         }),
     );
 
-    // spr(id_or_emoji, x, y, flip_x = false, flip_y = false): スプライトまたは16x16絵文字描画
+    // spr(id_or_emoji, x = 0, y = 0, flip_x = false, flip_y = false, rotate = 0, scale = 1.0): スプライトまたは16x16絵文字描画
     let sprites_for_spr = sprites.clone();
     let emoji_for_spr = emoji_atlas.clone();
     mrb_define_cmethod(
@@ -974,50 +1092,28 @@ fn register_engine_api(
         obj_class.clone(),
         "spr",
         Box::new(move |_vm, args| {
-            let x = arg_i32(args, 1, 0) as f32;
-            let y = arg_i32(args, 2, 0) as f32;
+            let x = arg_f32(args, 1, 0.0);
+            let y = arg_f32(args, 2, 0.0);
             let flip_x = arg_bool(args, 3, false);
             let flip_y = arg_bool(args, 4, false);
+            let rotate = arg_f32(args, 5, 0.0);
+            let scale = arg_f32(args, 6, 1.0);
 
             if let Some(first) = args.first()
                 && matches!(first.value, RValue::String(_, _))
                 && let Ok(emoji_str) = String::try_from(first.as_ref())
             {
                 let mut atlas_ref = emoji_for_spr.borrow_mut();
-                if let Some(sprite) = atlas_ref.get_or_insert(&emoji_str, true)
-                    && let Some(ref texture) = sprite.texture
-                {
-                    draw_texture_ex(
-                        texture,
-                        x.floor(),
-                        y.floor(),
-                        WHITE,
-                        DrawTextureParams {
-                            flip_x,
-                            flip_y,
-                            ..Default::default()
-                        },
-                    );
+                if let Some(sprite) = atlas_ref.get_or_insert(&emoji_str, true) {
+                    draw_sprite_transformed(sprite, x, y, flip_x, flip_y, rotate, scale);
                 }
                 return Ok(Rc::new(RObject::nil()));
             }
 
             let id = arg_i32(args, 0, 0);
             let sprites_ref = sprites_for_spr.borrow();
-            if let Some(sprite) = sprites_ref.get(&id)
-                && let Some(ref texture) = sprite.texture
-            {
-                draw_texture_ex(
-                    texture,
-                    x.floor(),
-                    y.floor(),
-                    WHITE,
-                    DrawTextureParams {
-                        flip_x,
-                        flip_y,
-                        ..Default::default()
-                    },
-                );
+            if let Some(sprite) = sprites_ref.get(&id) {
+                draw_sprite_transformed(sprite, x, y, flip_x, flip_y, rotate, scale);
             }
             Ok(Rc::new(RObject::nil()))
         }),
@@ -1870,5 +1966,51 @@ end
             assert_eq!(sp8.width, 8);
             assert_eq!(sp8.height, 8);
         }
+    }
+
+    #[test]
+    fn test_sprite_rotate_and_scale() {
+        // 16x16 スプライトを座標 (100, 120) に描画する場合、元の中心は (108, 128)
+        let (dx, dy, params) =
+            compute_sprite_draw_params(16.0, 16.0, 100.0, 120.0, false, false, 90.0, 2.0)
+                .expect("Should compute draw params");
+        // scale = 2.0 のときサイズは 32x32、中心 (108, 128) を維持するため左上は (92, 112)
+        assert!((dx - 92.0).abs() < 1e-4);
+        assert!((dy - 112.0).abs() < 1e-4);
+        assert_eq!(params.dest_size, Some(vec2(32.0, 32.0)));
+        assert_eq!(params.pivot, Some(vec2(108.0, 128.0)));
+        assert!((params.rotation - 90.0f32.to_radians()).abs() < 1e-5);
+        assert!(!params.flip_x);
+        assert!(!params.flip_y);
+
+        // scale = 0.0 は描画しない
+        assert!(
+            compute_sprite_draw_params(16.0, 16.0, 100.0, 120.0, false, false, 0.0, 0.0).is_none()
+        );
+
+        // 負の scale は反転として扱う
+        let (_, _, neg_params) =
+            compute_sprite_draw_params(16.0, 16.0, 10.0, 20.0, false, true, 45.0, -1.5).unwrap();
+        assert_eq!(neg_params.dest_size, Some(vec2(24.0, 24.0)));
+        assert!(neg_params.flip_x);
+        assert!(!neg_params.flip_y);
+
+        // Ruby スクリプトから整数・浮動小数点両方で rotate, scale を渡せることを検証
+        let script = r#"
+def update
+end
+
+def draw
+  spr("🐰", 40, 50, false, false, 45, 2)
+  spr("🐢", 80.5, 90.2, true, false, 180.0, 1.5)
+  spr(0, 120, 120, false, false, 270, 0.5)
+end
+__END__
+@SPRITE 0
+1111111111111111
+"#;
+        let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
+        let mut runtime = GameRuntime::new(&tail, &mrb, true).unwrap();
+        runtime.call_draw();
     }
 }
