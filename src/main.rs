@@ -945,6 +945,288 @@ fn draw_sprite_transformed(
     }
 }
 
+/// 整数ピクセル座標系での矩形スパン (`w >= 1, h >= 1`)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PixelSpan {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
+impl PixelSpan {
+    pub const fn new(x: i32, y: i32, w: i32, h: i32) -> Self {
+        Self { x, y, w, h }
+    }
+
+    pub fn contains(&self, px: i32, py: i32) -> bool {
+        px >= self.x && px < self.x + self.w && py >= self.y && py < self.y + self.h
+    }
+
+    pub fn pixel_count(&self) -> usize {
+        if self.w > 0 && self.h > 0 {
+            (self.w as usize) * (self.h as usize)
+        } else {
+            0
+        }
+    }
+}
+
+fn draw_spans(spans: &[PixelSpan], color: Color) {
+    for span in spans {
+        draw_rectangle(
+            span.x as f32,
+            span.y as f32,
+            span.w as f32,
+            span.h as f32,
+            color,
+        );
+    }
+}
+
+fn trace_line_points(x0: i32, y0: i32, x1: i32, y1: i32, mut f: impl FnMut(i32, i32)) {
+    let dx = (x1 - x0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let dy = -(y1 - y0).abs();
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+    let mut x = x0;
+    let mut y = y0;
+
+    loop {
+        f(x, y);
+        if x == x1 && y == y1 {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y += sy;
+        }
+    }
+}
+
+fn points_to_horizontal_spans(mut points: Vec<(i32, i32)>) -> Vec<PixelSpan> {
+    if points.is_empty() {
+        return Vec::new();
+    }
+    points.sort_unstable_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    points.dedup();
+
+    let mut spans: Vec<PixelSpan> = Vec::new();
+    for (px, py) in points {
+        if let Some(last) = spans.last_mut()
+            && last.y == py
+            && px == last.x + last.w
+        {
+            last.w += 1;
+        } else {
+            spans.push(PixelSpan::new(px, py, 1, 1));
+        }
+    }
+    spans
+}
+
+/// ブレゼンハムのアルゴリズムによる 1px 直線ラスタライズ `(x0, y0)` ..= `(x1, y1)`
+pub fn rasterize_line(x0: i32, y0: i32, x1: i32, y1: i32) -> Vec<PixelSpan> {
+    if y0 == y1 {
+        let min_x = x0.min(x1);
+        let w = (x0 - x1).abs() + 1;
+        return vec![PixelSpan::new(min_x, y0, w, 1)];
+    }
+    if x0 == x1 {
+        let min_y = y0.min(y1);
+        let h = (y0 - y1).abs() + 1;
+        return vec![PixelSpan::new(x0, min_y, 1, h)];
+    }
+
+    let dx = (x1 - x0).abs();
+    let dy = -(y1 - y0).abs();
+    let prefer_horizontal = dx >= -dy;
+    let mut spans: Vec<PixelSpan> = Vec::new();
+
+    trace_line_points(x0, y0, x1, y1, |x, y| {
+        if let Some(last) = spans.last_mut() {
+            if prefer_horizontal && last.h == 1 && last.y == y {
+                if x == last.x + last.w {
+                    last.w += 1;
+                } else if x + 1 == last.x {
+                    last.x = x;
+                    last.w += 1;
+                } else {
+                    spans.push(PixelSpan::new(x, y, 1, 1));
+                }
+            } else if !prefer_horizontal && last.w == 1 && last.x == x {
+                if y == last.y + last.h {
+                    last.h += 1;
+                } else if y + 1 == last.y {
+                    last.y = y;
+                    last.h += 1;
+                } else {
+                    spans.push(PixelSpan::new(x, y, 1, 1));
+                }
+            } else {
+                spans.push(PixelSpan::new(x, y, 1, 1));
+            }
+        } else {
+            spans.push(PixelSpan::new(x, y, 1, 1));
+        }
+    });
+
+    spans
+}
+
+/// 枠線のみの矩形 `(x, y, w, h)` を重複のない最大4本の 1px スパンにラスタライズする
+pub fn rasterize_rect(x: i32, y: i32, w: i32, h: i32) -> Vec<PixelSpan> {
+    if w <= 0 || h <= 0 {
+        return Vec::new();
+    }
+    if h == 1 {
+        return vec![PixelSpan::new(x, y, w, 1)];
+    }
+    if w == 1 {
+        return vec![PixelSpan::new(x, y, 1, h)];
+    }
+    if h == 2 {
+        return vec![PixelSpan::new(x, y, w, 1), PixelSpan::new(x, y + 1, w, 1)];
+    }
+    vec![
+        PixelSpan::new(x, y, w, 1),
+        PixelSpan::new(x, y + h - 1, w, 1),
+        PixelSpan::new(x, y + 1, 1, h - 2),
+        PixelSpan::new(x + w - 1, y + 1, 1, h - 2),
+    ]
+}
+
+/// 塗りつぶし矩形 `(x, y, w, h)` をラスタライズする
+pub fn rasterize_rectfill(x: i32, y: i32, w: i32, h: i32) -> Vec<PixelSpan> {
+    if w <= 0 || h <= 0 {
+        return Vec::new();
+    }
+    vec![PixelSpan::new(x, y, w, h)]
+}
+
+/// ミッドポイント円アルゴリズムによる 1px 円枠 `(cx, cy, r)` のラスタライズ
+pub fn rasterize_circ(cx: i32, cy: i32, r: i32) -> Vec<PixelSpan> {
+    if r < 0 {
+        return Vec::new();
+    }
+    if r == 0 {
+        return vec![PixelSpan::new(cx, cy, 1, 1)];
+    }
+    let r = r.min(4096);
+    let mut x = r;
+    let mut y = 0;
+    let mut d = 1 - r;
+    let mut points = Vec::with_capacity((r as usize) * 8);
+
+    while x >= y {
+        points.extend_from_slice(&[
+            (cx + x, cy + y),
+            (cx - x, cy + y),
+            (cx + x, cy - y),
+            (cx - x, cy - y),
+            (cx + y, cy + x),
+            (cx - y, cy + x),
+            (cx + y, cy - x),
+            (cx - y, cy - x),
+        ]);
+        y += 1;
+        if d < 0 {
+            d += 2 * y + 1;
+        } else {
+            x -= 1;
+            d += 2 * (y - x) + 1;
+        }
+    }
+
+    points_to_horizontal_spans(points)
+}
+
+/// ミッドポイント円アルゴリズムによる塗りつぶし円 `(cx, cy, r)` の水平スパンラスタライズ（重複なし）
+pub fn rasterize_circfill(cx: i32, cy: i32, r: i32) -> Vec<PixelSpan> {
+    if r < 0 {
+        return Vec::new();
+    }
+    if r == 0 {
+        return vec![PixelSpan::new(cx, cy, 1, 1)];
+    }
+    let r = r.min(4096);
+    let mut max_dx = vec![0i32; (r as usize) + 1];
+    let mut x = r;
+    let mut y = 0;
+    let mut d = 1 - r;
+
+    while x >= y {
+        let yu = y as usize;
+        let xu = x as usize;
+        if x > max_dx[yu] {
+            max_dx[yu] = x;
+        }
+        if y > max_dx[xu] {
+            max_dx[xu] = y;
+        }
+        y += 1;
+        if d < 0 {
+            d += 2 * y + 1;
+        } else {
+            x -= 1;
+            d += 2 * (y - x) + 1;
+        }
+    }
+
+    let mut spans = Vec::with_capacity((2 * r + 1) as usize);
+    for dy in -r..=r {
+        let half = max_dx[dy.unsigned_abs() as usize];
+        spans.push(PixelSpan::new(cx - half, cy + dy, 2 * half + 1, 1));
+    }
+    spans
+}
+
+/// 三角形枠線 `(x0, y0) - (x1, y1) - (x2, y2)` のラスタライズ
+pub fn rasterize_tri(x0: i32, y0: i32, x1: i32, y1: i32, x2: i32, y2: i32) -> Vec<PixelSpan> {
+    let mut points = Vec::new();
+    trace_line_points(x0, y0, x1, y1, |x, y| points.push((x, y)));
+    trace_line_points(x1, y1, x2, y2, |x, y| points.push((x, y)));
+    trace_line_points(x2, y2, x0, y0, |x, y| points.push((x, y)));
+    points_to_horizontal_spans(points)
+}
+
+/// 塗りつぶし三角形 `(x0, y0) - (x1, y1) - (x2, y2)` の水平スパンラスタライズ
+pub fn rasterize_trifill(x0: i32, y0: i32, x1: i32, y1: i32, x2: i32, y2: i32) -> Vec<PixelSpan> {
+    let min_y = y0.min(y1).min(y2);
+    let max_y = y0.max(y1).max(y2);
+    let height = (max_y - min_y + 1) as usize;
+    let mut row_bounds = vec![(i32::MAX, i32::MIN); height];
+
+    let mut record = |x: i32, y: i32| {
+        let idx = (y - min_y) as usize;
+        let b = &mut row_bounds[idx];
+        if x < b.0 {
+            b.0 = x;
+        }
+        if x > b.1 {
+            b.1 = x;
+        }
+    };
+
+    trace_line_points(x0, y0, x1, y1, &mut record);
+    trace_line_points(x1, y1, x2, y2, &mut record);
+    trace_line_points(x2, y2, x0, y0, &mut record);
+
+    let mut spans = Vec::with_capacity(height);
+    for (i, &(min_x, max_x)) in row_bounds.iter().enumerate() {
+        if min_x <= max_x {
+            spans.push(PixelSpan::new(min_x, min_y + i as i32, max_x - min_x + 1, 1));
+        }
+    }
+    spans
+}
+
 fn register_engine_api(
     vm: &mut VM,
     sprites: Rc<RefCell<HashMap<i32, SpriteData>>>,
@@ -955,8 +1237,8 @@ fn register_engine_api(
     let obj_class = vm.object_class.clone();
 
     if headless {
-        // ヘッドレステスト用スタブ登録 (spr / print_text に絵文字が渡された場合はキャッシュ抽出も検証可能にする)
-        for name in ["cls", "pset", "rectfill"] {
+        // ヘッドレステスト用スタブ登録 (図形ラスタライズ計算および絵文字キャッシュ抽出も検証可能にする)
+        for name in ["cls", "pset"] {
             mrb_define_cmethod(
                 vm,
                 obj_class.clone(),
@@ -964,6 +1246,103 @@ fn register_engine_api(
                 Box::new(|_vm, _args| Ok(Rc::new(RObject::nil()))),
             );
         }
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            "line",
+            Box::new(|_vm, args| {
+                let x0 = arg_i32(args, 0, 0);
+                let y0 = arg_i32(args, 1, 0);
+                let x1 = arg_i32(args, 2, 0);
+                let y1 = arg_i32(args, 3, 0);
+                let _ = rasterize_line(x0, y0, x1, y1);
+                Ok(Rc::new(RObject::nil()))
+            }),
+        );
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            "rect",
+            Box::new(|_vm, args| {
+                let x = arg_i32(args, 0, 0);
+                let y = arg_i32(args, 1, 0);
+                let w = arg_i32(args, 2, 16);
+                let h = arg_i32(args, 3, 16);
+                let _ = rasterize_rect(x, y, w, h);
+                Ok(Rc::new(RObject::nil()))
+            }),
+        );
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            "rectfill",
+            Box::new(|_vm, args| {
+                let x = arg_i32(args, 0, 0);
+                let y = arg_i32(args, 1, 0);
+                let w = arg_i32(args, 2, 16);
+                let h = arg_i32(args, 3, 16);
+                let _ = rasterize_rectfill(x, y, w, h);
+                Ok(Rc::new(RObject::nil()))
+            }),
+        );
+        for name in ["circ", "circle"] {
+            mrb_define_cmethod(
+                vm,
+                obj_class.clone(),
+                name,
+                Box::new(|_vm, args| {
+                    let x = arg_i32(args, 0, 0);
+                    let y = arg_i32(args, 1, 0);
+                    let r = arg_i32(args, 2, 4);
+                    let _ = rasterize_circ(x, y, r);
+                    Ok(Rc::new(RObject::nil()))
+                }),
+            );
+        }
+        for name in ["circfill", "circlefill"] {
+            mrb_define_cmethod(
+                vm,
+                obj_class.clone(),
+                name,
+                Box::new(|_vm, args| {
+                    let x = arg_i32(args, 0, 0);
+                    let y = arg_i32(args, 1, 0);
+                    let r = arg_i32(args, 2, 4);
+                    let _ = rasterize_circfill(x, y, r);
+                    Ok(Rc::new(RObject::nil()))
+                }),
+            );
+        }
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            "tri",
+            Box::new(|_vm, args| {
+                let x0 = arg_i32(args, 0, 0);
+                let y0 = arg_i32(args, 1, 0);
+                let x1 = arg_i32(args, 2, 8);
+                let y1 = arg_i32(args, 3, 0);
+                let x2 = arg_i32(args, 4, 4);
+                let y2 = arg_i32(args, 5, 8);
+                let _ = rasterize_tri(x0, y0, x1, y1, x2, y2);
+                Ok(Rc::new(RObject::nil()))
+            }),
+        );
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            "trifill",
+            Box::new(|_vm, args| {
+                let x0 = arg_i32(args, 0, 0);
+                let y0 = arg_i32(args, 1, 0);
+                let x1 = arg_i32(args, 2, 8);
+                let y1 = arg_i32(args, 3, 0);
+                let x2 = arg_i32(args, 4, 4);
+                let y2 = arg_i32(args, 5, 8);
+                let _ = rasterize_trifill(x0, y0, x1, y1, x2, y2);
+                Ok(Rc::new(RObject::nil()))
+            }),
+        );
         let emoji_for_headless_print = emoji_atlas.clone();
         mrb_define_cmethod(
             vm,
@@ -1054,7 +1433,7 @@ fn register_engine_api(
         }),
     );
 
-    // pset(x, y, col = 7): 1ドット描画
+    // pset(x = 0, y = 0, col = 7): 1ドット描画
     mrb_define_cmethod(
         vm,
         obj_class.clone(),
@@ -1068,18 +1447,127 @@ fn register_engine_api(
         }),
     );
 
-    // rectfill(x, y, w, h, col = 7): 塗りつぶし矩形
+    // line(x0 = 0, y0 = 0, x1 = 0, y1 = 0, col = 7): 直線描画（ブレゼンハム 1px）
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "line",
+        Box::new(|_vm, args| {
+            let x0 = arg_i32(args, 0, 0);
+            let y0 = arg_i32(args, 1, 0);
+            let x1 = arg_i32(args, 2, 0);
+            let y1 = arg_i32(args, 3, 0);
+            let col = arg_i32(args, 4, 7);
+            let spans = rasterize_line(x0, y0, x1, y1);
+            draw_spans(&spans, palette_color(col));
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
+
+    // rect(x = 0, y = 0, w = 16, h = 16, col = 7): 枠線のみの矩形
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "rect",
+        Box::new(|_vm, args| {
+            let x = arg_i32(args, 0, 0);
+            let y = arg_i32(args, 1, 0);
+            let w = arg_i32(args, 2, 16);
+            let h = arg_i32(args, 3, 16);
+            let col = arg_i32(args, 4, 7);
+            let spans = rasterize_rect(x, y, w, h);
+            draw_spans(&spans, palette_color(col));
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
+
+    // rectfill(x = 0, y = 0, w = 16, h = 16, col = 7): 塗りつぶし矩形
     mrb_define_cmethod(
         vm,
         obj_class.clone(),
         "rectfill",
         Box::new(|_vm, args| {
-            let x = arg_i32(args, 0, 0) as f32;
-            let y = arg_i32(args, 1, 0) as f32;
-            let w = arg_i32(args, 2, 16) as f32;
-            let h = arg_i32(args, 3, 16) as f32;
+            let x = arg_i32(args, 0, 0);
+            let y = arg_i32(args, 1, 0);
+            let w = arg_i32(args, 2, 16);
+            let h = arg_i32(args, 3, 16);
             let col = arg_i32(args, 4, 7);
-            draw_rectangle(x, y, w, h, palette_color(col));
+            let spans = rasterize_rectfill(x, y, w, h);
+            draw_spans(&spans, palette_color(col));
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
+
+    // circ(x = 0, y = 0, r = 4, col = 7) / circle(x = 0, y = 0, r = 4, col = 7): 枠線のみの円
+    for name in ["circ", "circle"] {
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            name,
+            Box::new(|_vm, args| {
+                let x = arg_i32(args, 0, 0);
+                let y = arg_i32(args, 1, 0);
+                let r = arg_i32(args, 2, 4);
+                let col = arg_i32(args, 3, 7);
+                let spans = rasterize_circ(x, y, r);
+                draw_spans(&spans, palette_color(col));
+                Ok(Rc::new(RObject::nil()))
+            }),
+        );
+    }
+
+    // circfill(x = 0, y = 0, r = 4, col = 7) / circlefill(x = 0, y = 0, r = 4, col = 7): 塗りつぶし円
+    for name in ["circfill", "circlefill"] {
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            name,
+            Box::new(|_vm, args| {
+                let x = arg_i32(args, 0, 0);
+                let y = arg_i32(args, 1, 0);
+                let r = arg_i32(args, 2, 4);
+                let col = arg_i32(args, 3, 7);
+                let spans = rasterize_circfill(x, y, r);
+                draw_spans(&spans, palette_color(col));
+                Ok(Rc::new(RObject::nil()))
+            }),
+        );
+    }
+
+    // tri(x0 = 0, y0 = 0, x1 = 8, y1 = 0, x2 = 4, y2 = 8, col = 7): 枠線のみの三角形
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "tri",
+        Box::new(|_vm, args| {
+            let x0 = arg_i32(args, 0, 0);
+            let y0 = arg_i32(args, 1, 0);
+            let x1 = arg_i32(args, 2, 8);
+            let y1 = arg_i32(args, 3, 0);
+            let x2 = arg_i32(args, 4, 4);
+            let y2 = arg_i32(args, 5, 8);
+            let col = arg_i32(args, 6, 7);
+            let spans = rasterize_tri(x0, y0, x1, y1, x2, y2);
+            draw_spans(&spans, palette_color(col));
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
+
+    // trifill(x0 = 0, y0 = 0, x1 = 8, y1 = 0, x2 = 4, y2 = 8, col = 7): 塗りつぶし三角形
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "trifill",
+        Box::new(|_vm, args| {
+            let x0 = arg_i32(args, 0, 0);
+            let y0 = arg_i32(args, 1, 0);
+            let x1 = arg_i32(args, 2, 8);
+            let y1 = arg_i32(args, 3, 0);
+            let x2 = arg_i32(args, 4, 4);
+            let y2 = arg_i32(args, 5, 8);
+            let col = arg_i32(args, 6, 7);
+            let spans = rasterize_trifill(x0, y0, x1, y1, x2, y2);
+            draw_spans(&spans, palette_color(col));
             Ok(Rc::new(RObject::nil()))
         }),
     );
@@ -2008,6 +2496,104 @@ end
 __END__
 @SPRITE 0
 1111111111111111
+"#;
+        let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
+        let mut runtime = GameRuntime::new(&tail, &mrb, true).unwrap();
+        runtime.call_draw();
+    }
+
+    #[test]
+    fn test_basic_shape_rasterization() {
+        // 1. line: 水平・垂直・斜め・単一点
+        assert_eq!(rasterize_line(10, 20, 10, 20), vec![PixelSpan::new(10, 20, 1, 1)]);
+        assert_eq!(rasterize_line(15, 20, 10, 20), vec![PixelSpan::new(10, 20, 6, 1)]);
+        assert_eq!(rasterize_line(10, 25, 10, 20), vec![PixelSpan::new(10, 20, 1, 6)]);
+
+        let diag = rasterize_line(0, 0, 3, 3);
+        assert_eq!(diag.len(), 4);
+        for i in 0..=3 {
+            assert!(diag.iter().any(|s| s.contains(i, i)));
+        }
+
+        // 2. rect / rectfill: 枠線と塗りつぶし
+        assert!(rasterize_rect(0, 0, 0, 5).is_empty());
+        assert!(rasterize_rectfill(0, 0, -2, 5).is_empty());
+        assert_eq!(rasterize_rect(5, 6, 1, 1), vec![PixelSpan::new(5, 6, 1, 1)]);
+
+        let rect_spans = rasterize_rect(10, 20, 4, 3);
+        let rect_pixels: usize = rect_spans.iter().map(|s| s.pixel_count()).sum();
+        // 4x3 矩形の外周ピクセル数は 4*3 - 2*1 = 10 ピクセル（重複なし）
+        assert_eq!(rect_pixels, 10);
+        assert!(rect_spans.iter().any(|s| s.contains(10, 20)));
+        assert!(rect_spans.iter().any(|s| s.contains(13, 22)));
+        assert!(!rect_spans.iter().any(|s| s.contains(11, 21)));
+        assert!(!rect_spans.iter().any(|s| s.contains(12, 21)));
+
+        // 3. circ / circfill: 半径負・0・正の対称性と重複なし検証
+        assert!(rasterize_circ(10, 10, -1).is_empty());
+        assert!(rasterize_circfill(10, 10, -1).is_empty());
+        assert_eq!(rasterize_circ(10, 10, 0), vec![PixelSpan::new(10, 10, 1, 1)]);
+        assert_eq!(rasterize_circfill(10, 10, 0), vec![PixelSpan::new(10, 10, 1, 1)]);
+
+        // r = 1 の円枠は上下左右の4ピクセル（中心は含まない）
+        let c1 = rasterize_circ(10, 10, 1);
+        let c1_pixels: usize = c1.iter().map(|s| s.pixel_count()).sum();
+        assert_eq!(c1_pixels, 4);
+        assert!(c1.iter().any(|s| s.contains(10, 9)));
+        assert!(c1.iter().any(|s| s.contains(10, 11)));
+        assert!(c1.iter().any(|s| s.contains(9, 10)));
+        assert!(c1.iter().any(|s| s.contains(11, 10)));
+        assert!(!c1.iter().any(|s| s.contains(10, 10)));
+
+        // r = 4 の塗りつぶし円は 2*4 + 1 = 9 本の水平スパンからなり、中心および四端を含む
+        let cf4 = rasterize_circfill(50, 60, 4);
+        assert_eq!(cf4.len(), 9);
+        assert!(cf4.iter().any(|s| s.contains(50, 60)));
+        assert!(cf4.iter().any(|s| s.contains(50, 56)));
+        assert!(cf4.iter().any(|s| s.contains(50, 64)));
+        assert!(cf4.iter().any(|s| s.contains(46, 60)));
+        assert!(cf4.iter().any(|s| s.contains(54, 60)));
+
+        // 4. tri / trifill: 三角形の枠線と塗りつぶし
+        let tri_outline = rasterize_tri(10, 10, 16, 10, 13, 13);
+        let tri_filled = rasterize_trifill(10, 10, 16, 10, 13, 13);
+        assert_eq!(tri_filled.len(), 4); // y = 10..=13
+        // 枠線上のすべてのピクセルが塗りつぶし三角形にも含まれていること
+        for span in &tri_outline {
+            for py in span.y..(span.y + span.h) {
+                for px in span.x..(span.x + span.w) {
+                    assert!(
+                        tri_filled.iter().any(|fs| fs.contains(px, py)),
+                        "Filled triangle should contain outline pixel ({}, {})",
+                        px,
+                        py
+                    );
+                }
+            }
+        }
+        // 内部ピクセル (13, 11) は trifill に含まれ、tri (枠線) には含まれない
+        assert!(tri_filled.iter().any(|s| s.contains(13, 11)));
+        assert!(!tri_outline.iter().any(|s| s.contains(13, 11)));
+    }
+
+    #[test]
+    fn test_basic_shapes_in_ruby_script() {
+        let script = r#"
+def update
+end
+
+def draw
+  line(0, 0, 255, 255, 8)
+  line(10.5, 20.2, 50.8, 20.2, 12)
+  rect(16, 16, 32, 24, 7)
+  rectfill(20, 20, 24, 16, 1)
+  circ(128, 128, 20, 10)
+  circle(128, 128, 24, 11)
+  circfill(64, 64, 12, 14)
+  circlefill(192, 64, 12, 15)
+  tri(100, 180, 120, 180, 110, 165, 9)
+  trifill(140, 180, 160, 180, 150, 165, 11)
+end
 "#;
         let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
         let mut runtime = GameRuntime::new(&tail, &mrb, true).unwrap();
