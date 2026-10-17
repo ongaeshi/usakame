@@ -2,6 +2,11 @@
 name = "usakame"
 version = "0.1.0"
 edition = "2024"
+default-run = "uk"
+
+[[bin]]
+name = "uk"
+path = "src/main.rs"
 
 [dependencies]
 macroquad = "0.4"
