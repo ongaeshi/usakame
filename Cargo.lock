@@ -354,6 +354,8 @@ dependencies = [
  "macroquad",
  "mruby-compiler2-sys",
  "mrubyedge",
+ "png",
+ "ttf-parser",
 ]
 
 [[package]]

@@ -20,6 +20,11 @@ mruby-compiler2-sys = "0.5"
 [build-dependencies]
 mruby-compiler2-sys = "0.5"
 
+[dev-dependencies]
+ttf-parser = "0.25"
+png = "0.17"
+
 # Windows (MSVC) 等で libclang 無しでもビルドできるようパッチ済みクレートを適用
 [patch.crates-io]
 mruby-compiler2-sys = { path = "vendor/mruby-compiler2-sys" }
+

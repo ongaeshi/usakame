@@ -32,6 +32,12 @@ pub enum CliAction {
         port: Option<u16>,
         open_browser: bool,
     },
+    /// `uk encode <image.png> [--id <start_id>] [--tile <WxH>]` (PNGをBase64スプライト記法に変換)
+    Encode {
+        image_path: PathBuf,
+        start_id: i32,
+        tile_size: Option<(u16, u16)>,
+    },
     /// ヘルプ表示
     Help,
     /// バージョン表示
@@ -47,6 +53,7 @@ USAGE:
     uk run [script.rb]                  Run script natively with live hot-reload (default: game.rb)
     uk build [script.rb] [-o <output>]  Build a standalone single binary from script
     uk browser [script.rb] [-p <port>]  Run script in the browser with live hot-reload
+    uk encode <image.png> [--id <id>]   Encode PNG image/sheet into Base64 (@PNG / @SHEET) for script
     uk --help, -h                       Show this help message
     uk --version, -V                    Show version information"
     );
@@ -172,6 +179,60 @@ where
                 open_browser,
             })
         }
+        "encode" | "import" => {
+            let mut image_path: Option<PathBuf> = None;
+            let mut start_id: i32 = 0;
+            let mut tile_size: Option<(u16, u16)> = None;
+            let mut i = 1;
+            while i < rest.len() {
+                match rest[i].as_str() {
+                    "--id" | "-i" => {
+                        i += 1;
+                        let id_str = rest
+                            .get(i)
+                            .ok_or_else(|| "Missing argument for --id".to_string())?;
+                        start_id = id_str
+                            .parse::<i32>()
+                            .map_err(|_| format!("Invalid sprite ID: {}", id_str))?;
+                    }
+                    "--tile" | "-t" => {
+                        i += 1;
+                        let t_str = rest
+                            .get(i)
+                            .ok_or_else(|| "Missing argument for --tile".to_string())?;
+                        let lower = t_str.to_ascii_lowercase();
+                        let (w_s, h_s) = lower
+                            .split_once('x')
+                            .ok_or_else(|| format!("Invalid tile size `{}` (expected WxH, e.g. 16x16)", t_str))?;
+                        let tw = w_s
+                            .parse::<u16>()
+                            .map_err(|_| format!("Invalid tile width in `{}`", t_str))?;
+                        let th = h_s
+                            .parse::<u16>()
+                            .map_err(|_| format!("Invalid tile height in `{}`", t_str))?;
+                        tile_size = Some((tw, th));
+                    }
+                    arg if arg.starts_with('-') => {
+                        return Err(format!("Unknown option for `uk encode`: {}", arg));
+                    }
+                    arg => {
+                        if image_path.is_none() {
+                            image_path = Some(PathBuf::from(arg));
+                        } else {
+                            return Err(format!("Unexpected extra argument: {}", arg));
+                        }
+                    }
+                }
+                i += 1;
+            }
+            let image_path = image_path
+                .ok_or_else(|| "Missing PNG file path. Usage: `uk encode <image.png> [--id 0]`".to_string())?;
+            Ok(CliAction::Encode {
+                image_path,
+                start_id,
+                tile_size,
+            })
+        }
         other => {
             // `uk game.rb` のように直接 .rb ファイルが渡された場合も `uk run` として扱う
             let candidate = PathBuf::from(other);
@@ -187,6 +248,65 @@ where
             }
         }
     }
+}
+
+/// PNG 画像バイト列を `__END__` セクション用の `@PNG` または `@SHEET` テキストブロックに変換する。
+pub fn encode_png_bytes_to_script_block(
+    png_bytes: &[u8],
+    label: &str,
+    start_id: i32,
+    tile_size: Option<(u16, u16)>,
+) -> Result<String, String> {
+    let img = macroquad::texture::Image::from_file_with_format(
+        png_bytes,
+        Some(macroquad::prelude::ImageFormat::Png),
+    )
+    .map_err(|e| format!("Invalid PNG image `{}`: {:?}", label, e))?;
+
+    let b64 = crate::encode_base64(png_bytes);
+    let mut out = String::new();
+
+    if tile_size.is_none() && img.width == crate::SPRITE_SIZE as u16 && img.height == crate::SPRITE_SIZE as u16 {
+        out.push_str(&format!("# {} ({}x{})\n", label, img.width, img.height));
+        out.push_str(&format!("@PNG {}\n", start_id));
+    } else {
+        let (tw, th) = tile_size.unwrap_or((crate::SPRITE_SIZE as u16, crate::SPRITE_SIZE as u16));
+        let cols = (img.width / tw.max(1)).max(1);
+        let rows = (img.height / th.max(1)).max(1);
+        out.push_str(&format!(
+            "# {} ({}x{}, {}x{} tiles x {})\n",
+            label,
+            img.width,
+            img.height,
+            tw,
+            th,
+            cols * rows
+        ));
+        out.push_str(&format!("@SHEET {} {}x{}\n", start_id, tw, th));
+    }
+
+    for chunk in b64.as_bytes().chunks(76) {
+        out.push_str(std::str::from_utf8(chunk).unwrap_or(""));
+        out.push('\n');
+    }
+
+    Ok(out)
+}
+
+pub fn cmd_encode(
+    image_path: &Path,
+    start_id: i32,
+    tile_size: Option<(u16, u16)>,
+) -> Result<String, String> {
+    let bytes = fs::read(image_path)
+        .map_err(|e| format!("Failed to read PNG `{}`: {}", image_path.display(), e))?;
+    let label = image_path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "sprite.png".to_string());
+    let block = encode_png_bytes_to_script_block(&bytes, &label, start_id, tile_size)?;
+    print!("{}", block);
+    Ok(block)
 }
 
 /// Ruby スクリプト文字列（`__END__` 区切り対応）をコンパイルし `(tail_data, mrb_bytes)` を返す。

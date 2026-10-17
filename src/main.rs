@@ -1,6 +1,7 @@
 pub mod bundle;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cli;
+pub mod emoji;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -13,14 +14,16 @@ use mrubyedge::yamrb::value::{RObject, RValue};
 use mrubyedge::yamrb::vm::VM;
 
 // ==========================================
-// 仮想スクリーン設定 (128x128, 16色パレット)
+// 仮想スクリーン設定 (256x256, ウィンドウ 512x512, 16x16 スプライト)
 // ==========================================
-const SCREEN_WIDTH: u32 = 128;
-const SCREEN_HEIGHT: u32 = 128;
-const SPRITE_SIZE: usize = 8;
+pub const SCREEN_WIDTH: u32 = 256;
+pub const SCREEN_HEIGHT: u32 = 256;
+pub const WINDOW_WIDTH: i32 = 512;
+pub const WINDOW_HEIGHT: i32 = 512;
+pub const SPRITE_SIZE: usize = 16;
 
 /// PICO-8 準拠の16色パレット
-const PALETTE: [Color; 16] = [
+pub const PALETTE: [Color; 16] = [
     Color::from_rgba(0, 0, 0, 255),       // 0: Black (#000000)
     Color::from_rgba(29, 43, 83, 255),    // 1: Dark Blue (#1D2B53)
     Color::from_rgba(126, 37, 83, 255),   // 2: Dark Purple (#7E2553)
@@ -39,8 +42,100 @@ const PALETTE: [Color; 16] = [
     Color::from_rgba(255, 204, 170, 255), // 15 (F): Peach (#FFCCAA)
 ];
 
+const PALETTE_RGBA: [[u8; 4]; 16] = [
+    [0, 0, 0, 255],
+    [29, 43, 83, 255],
+    [126, 37, 83, 255],
+    [0, 135, 81, 255],
+    [171, 82, 54, 255],
+    [95, 87, 79, 255],
+    [194, 195, 199, 255],
+    [255, 241, 232, 255],
+    [255, 0, 77, 255],
+    [255, 163, 0, 255],
+    [255, 236, 39, 255],
+    [0, 228, 54, 255],
+    [41, 173, 255, 255],
+    [131, 118, 156, 255],
+    [255, 119, 168, 255],
+    [255, 204, 170, 255],
+];
+
 fn palette_color(col: i32) -> Color {
     PALETTE[(col.rem_euclid(16)) as usize]
+}
+
+// ==========================================
+// Base64 エンコード / デコード
+// ==========================================
+const B64_CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+pub fn encode_base64(input: &[u8]) -> String {
+    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+
+        out.push(B64_CHARS[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(B64_CHARS[((triple >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(B64_CHARS[((triple >> 6) & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(B64_CHARS[(triple & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+pub fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
+    let mut clean = Vec::with_capacity(input.len());
+    for line in input.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        for b in trimmed.bytes() {
+            if !b.is_ascii_whitespace() {
+                clean.push(b);
+            }
+        }
+    }
+    if clean.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut out = Vec::with_capacity(clean.len() * 3 / 4);
+    let mut buf = 0u32;
+    let mut bits = 0u8;
+
+    for &b in &clean {
+        if b == b'=' {
+            break;
+        }
+        let val = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            _ => return Err(format!("Invalid Base64 character: `{}`", b as char)),
+        };
+        buf = (buf << 6) | (val as u32);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buf >> bits) & 0xFF) as u8);
+        }
+    }
+
+    Ok(out)
 }
 
 // ==========================================
@@ -48,90 +143,347 @@ fn palette_color(col: i32) -> Color {
 // ==========================================
 #[derive(Clone)]
 pub struct SpriteData {
-    pub pixels: [[Option<u8>; SPRITE_SIZE]; SPRITE_SIZE],
+    pub width: u16,
+    pub height: u16,
+    /// RGBA ピクセルデータ (width * height * 4 bytes)
+    pub rgba: Vec<u8>,
     pub texture: Option<Texture2D>,
 }
 
 impl SpriteData {
-    pub fn from_lines(lines: &[&str]) -> Self {
-        let mut pixels = [[None; SPRITE_SIZE]; SPRITE_SIZE];
-
-        for (y, line) in lines.iter().take(SPRITE_SIZE).enumerate() {
-            for (x, ch) in line.chars().take(SPRITE_SIZE).enumerate() {
-                let color_idx = match ch {
-                    '.' | ' ' => None,
-                    c if c.is_ascii_hexdigit() => {
-                        let digit = c.to_digit(16).unwrap() as u8;
-                        Some(digit)
-                    }
-                    _ => None,
-                };
-                pixels[y][x] = color_idx;
-            }
-        }
-
+    pub fn from_rgba(width: u16, height: u16, rgba: Vec<u8>) -> Self {
         Self {
-            pixels,
+            width,
+            height,
+            rgba,
             texture: None,
         }
     }
 
-    pub fn build_texture(&mut self) {
-        let mut image = Image::gen_image_color(
-            SPRITE_SIZE as u16,
-            SPRITE_SIZE as u16,
-            Color::new(0.0, 0.0, 0.0, 0.0),
-        );
-        for y in 0..SPRITE_SIZE {
-            for x in 0..SPRITE_SIZE {
-                if let Some(idx) = self.pixels[y][x] {
-                    image.set_pixel(x as u32, y as u32, PALETTE[idx as usize]);
+    /// 16進数テキスト行 (`0`..`F`, `.` は透明) からスプライトを生成する（基本 16x16）
+    pub fn from_lines(lines: &[&str]) -> Self {
+        let max_cols = lines
+            .iter()
+            .map(|l| l.chars().count())
+            .max()
+            .unwrap_or(SPRITE_SIZE);
+        let width = max_cols.max(SPRITE_SIZE);
+        let height = lines.len().max(SPRITE_SIZE);
+        let mut rgba = vec![0u8; width * height * 4];
+
+        for (y, line) in lines.iter().take(height).enumerate() {
+            for (x, ch) in line.chars().take(width).enumerate() {
+                let color_idx = match ch {
+                    '.' | ' ' => None,
+                    c if c.is_ascii_hexdigit() => c.to_digit(16).map(|d| d as usize),
+                    _ => None,
+                };
+                if let Some(idx) = color_idx {
+                    let off = (y * width + x) * 4;
+                    rgba[off..off + 4].copy_from_slice(&PALETTE_RGBA[idx & 0x0F]);
                 }
             }
         }
+
+        Self {
+            width: width as u16,
+            height: height as u16,
+            rgba,
+            texture: None,
+        }
+    }
+
+    /// Base64 デコード後のバイト列（PNG バイナリ、または 4bit パック済み 16x16 パレットデータ）から生成
+    pub fn from_compressed_bytes(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            let img = Image::from_file_with_format(bytes, Some(ImageFormat::Png))
+                .map_err(|e| format!("Failed to decode PNG sprite: {:?}", e))?;
+            return Ok(Self::from_rgba(img.width, img.height, img.bytes));
+        }
+
+        let total_pixels = SPRITE_SIZE * SPRITE_SIZE;
+        // 128 bytes (4bit nibbles: 0=透明, 1..15=パレット色) または 160 bytes (128B nibbles + 32B 透過ビットマスク)
+        if bytes.len() == total_pixels / 2 || bytes.len() == total_pixels / 2 + total_pixels / 8 {
+            let has_mask = bytes.len() == total_pixels / 2 + total_pixels / 8;
+            let mask_slice = if has_mask {
+                &bytes[total_pixels / 2..]
+            } else {
+                &[][..]
+            };
+            let mut rgba = vec![0u8; total_pixels * 4];
+            for i in 0..total_pixels {
+                let nibble = if i % 2 == 0 {
+                    (bytes[i / 2] >> 4) & 0x0F
+                } else {
+                    bytes[i / 2] & 0x0F
+                };
+                let opaque = if has_mask {
+                    ((mask_slice[i / 8] >> (7 - (i % 8))) & 1) != 0
+                } else {
+                    nibble != 0
+                };
+                if opaque {
+                    let off = i * 4;
+                    rgba[off..off + 4].copy_from_slice(&PALETTE_RGBA[nibble as usize]);
+                }
+            }
+            return Ok(Self::from_rgba(
+                SPRITE_SIZE as u16,
+                SPRITE_SIZE as u16,
+                rgba,
+            ));
+        }
+
+        // 256 bytes (1 byte per pixel: 0..15=パレット色, >=16=透明)
+        if bytes.len() == total_pixels {
+            let mut rgba = vec![0u8; total_pixels * 4];
+            for (i, &b) in bytes.iter().enumerate() {
+                if b < 16 {
+                    let off = i * 4;
+                    rgba[off..off + 4].copy_from_slice(&PALETTE_RGBA[b as usize]);
+                }
+            }
+            return Ok(Self::from_rgba(
+                SPRITE_SIZE as u16,
+                SPRITE_SIZE as u16,
+                rgba,
+            ));
+        }
+
+        Err(format!(
+            "Unsupported binary sprite format ({} bytes). Expected PNG or 16x16 packed palette bytes.",
+            bytes.len()
+        ))
+    }
+
+    pub fn from_base64(b64_text: &str) -> Result<Self, String> {
+        let bytes = decode_base64(b64_text)?;
+        Self::from_compressed_bytes(&bytes)
+    }
+
+    /// 16x16 パレットインデックスを 160 bytes (128B 4bit カラー + 32B 不透明マスク) にパックして Base64 化する
+    pub fn encode_16x16_palette_b64(lines: &[&str]) -> String {
+        let total_pixels = SPRITE_SIZE * SPRITE_SIZE;
+        let mut buf = vec![0u8; total_pixels / 2 + total_pixels / 8];
+        for (y, line) in lines.iter().take(SPRITE_SIZE).enumerate() {
+            for (x, ch) in line.chars().take(SPRITE_SIZE).enumerate() {
+                let i = y * SPRITE_SIZE + x;
+                let color_idx = match ch {
+                    '.' | ' ' => None,
+                    c if c.is_ascii_hexdigit() => c.to_digit(16).map(|d| d as u8),
+                    _ => None,
+                };
+                if let Some(idx) = color_idx {
+                    if i % 2 == 0 {
+                        buf[i / 2] |= (idx & 0x0F) << 4;
+                    } else {
+                        buf[i / 2] |= idx & 0x0F;
+                    }
+                    buf[total_pixels / 2 + i / 8] |= 1 << (7 - (i % 8));
+                }
+            }
+        }
+        encode_base64(&buf)
+    }
+
+    pub fn build_texture(&mut self) {
+        let image = Image {
+            bytes: self.rgba.clone(),
+            width: self.width,
+            height: self.height,
+        };
         let texture = Texture2D::from_image(&image);
         texture.set_filter(FilterMode::Nearest);
         self.texture = Some(texture);
     }
 }
 
-/// `__END__` 以降のスプライト定義 (`@SPRITE <id>`) をパースする
+/// PNG スプライトシート (Base64) を指定タイルサイズ (デフォルト 16x16) で分割して `sprites` に登録する
+pub fn decode_png_sheet_into_sprites(
+    b64_text: &str,
+    start_id: i32,
+    tile_w: u16,
+    tile_h: u16,
+    sprites: &mut HashMap<i32, SpriteData>,
+) -> Result<usize, String> {
+    let bytes = decode_base64(b64_text)?;
+    let img = Image::from_file_with_format(&bytes, Some(ImageFormat::Png))
+        .map_err(|e| format!("Failed to decode @SHEET PNG: {:?}", e))?;
+    let tw = tile_w.max(1) as usize;
+    let th = tile_h.max(1) as usize;
+    let img_w = img.width as usize;
+    let img_h = img.height as usize;
+
+    let cols = img_w / tw;
+    let rows = img_h / th;
+    let mut count = 0usize;
+
+    for ry in 0..rows {
+        for rx in 0..cols {
+            let mut tile_rgba = vec![0u8; tw * th * 4];
+            for y in 0..th {
+                let src_y = ry * th + y;
+                let src_x = rx * tw;
+                let src_off = (src_y * img_w + src_x) * 4;
+                let dst_off = y * tw * 4;
+                let row_bytes = tw * 4;
+                tile_rgba[dst_off..dst_off + row_bytes]
+                    .copy_from_slice(&img.bytes[src_off..src_off + row_bytes]);
+            }
+            let id = start_id + count as i32;
+            sprites.insert(id, SpriteData::from_rgba(tw as u16, th as u16, tile_rgba));
+            count += 1;
+        }
+    }
+
+    Ok(count)
+}
+
+#[derive(Clone, Copy)]
+enum ResourceBlockKind {
+    TextSprite(i32),
+    Base64Sprite(i32),
+    PngSheet {
+        start_id: i32,
+        tile_w: u16,
+        tile_h: u16,
+    },
+}
+
+fn parse_tile_dims(s: &str) -> Option<(u16, u16)> {
+    let lower = s.trim().to_ascii_lowercase();
+    let (w_str, h_str) = lower.split_once('x')?;
+    let w = w_str.trim().parse::<u16>().ok()?;
+    let h = h_str.trim().parse::<u16>().ok()?;
+    if w > 0 && h > 0 { Some((w, h)) } else { None }
+}
+
+fn flush_resource_block(
+    kind: Option<ResourceBlockKind>,
+    lines: &mut Vec<String>,
+    sprites: &mut HashMap<i32, SpriteData>,
+) {
+    let Some(block_kind) = kind else {
+        lines.clear();
+        return;
+    };
+    if lines.is_empty() {
+        return;
+    }
+
+    match block_kind {
+        ResourceBlockKind::TextSprite(id) => {
+            let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+            sprites.insert(id, SpriteData::from_lines(&refs));
+        }
+        ResourceBlockKind::Base64Sprite(id) => {
+            let joined = lines.join("");
+            match SpriteData::from_base64(&joined) {
+                Ok(sp) => {
+                    sprites.insert(id, sp);
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to decode Base64 sprite {}: {}", id, e);
+                }
+            }
+        }
+        ResourceBlockKind::PngSheet {
+            start_id,
+            tile_w,
+            tile_h,
+        } => {
+            let joined = lines.join("");
+            if let Err(e) =
+                decode_png_sheet_into_sprites(&joined, start_id, tile_w, tile_h, sprites)
+            {
+                eprintln!(
+                    "Warning: Failed to decode @SHEET starting at {}: {}",
+                    start_id, e
+                );
+            }
+        }
+    }
+    lines.clear();
+}
+
+/// `__END__` 以降のスプライト定義 (`@SPRITE`, `@PNG`, `@B64`, `@SHEET`) をパースする
 pub fn parse_tail_resources(data_section: &str) -> HashMap<i32, SpriteData> {
     let mut sprites = HashMap::new();
-    let mut current_id: Option<i32> = None;
-    let mut current_lines: Vec<&str> = Vec::new();
+    let mut current_kind: Option<ResourceBlockKind> = None;
+    let mut current_lines: Vec<String> = Vec::new();
+    let mut emoji_atlas: Option<emoji::EmojiAtlas> = None;
 
     for raw_line in data_section.lines() {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if let Some(rest) = line.strip_prefix("@SPRITE") {
-            if let Some(id) = current_id.take() {
-                if !current_lines.is_empty() {
-                    sprites.insert(id, SpriteData::from_lines(&current_lines));
+
+        if let Some(rest) = line
+            .strip_prefix("@SPRITE_B64")
+            .or_else(|| line.strip_prefix("@PNG"))
+            .or_else(|| line.strip_prefix("@B64"))
+        {
+            flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites);
+            let mut parts = rest.split_whitespace();
+            if let Some(id_str) = parts.next()
+                && let Ok(id) = id_str.parse::<i32>()
+            {
+                let inline_b64: String = parts.collect::<Vec<_>>().join("");
+                if !inline_b64.is_empty() {
+                    if let Ok(sp) = SpriteData::from_base64(&inline_b64) {
+                        sprites.insert(id, sp);
+                    }
+                } else {
+                    current_kind = Some(ResourceBlockKind::Base64Sprite(id));
                 }
-                current_lines.clear();
             }
-            if let Ok(id) = rest.trim().parse::<i32>() {
-                current_id = Some(id);
+        } else if let Some(rest) = line.strip_prefix("@SHEET") {
+            flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites);
+            let mut parts = rest.split_whitespace();
+            if let Some(id_str) = parts.next()
+                && let Ok(start_id) = id_str.parse::<i32>()
+            {
+                let (tile_w, tile_h) = parts
+                    .next()
+                    .and_then(parse_tile_dims)
+                    .unwrap_or((SPRITE_SIZE as u16, SPRITE_SIZE as u16));
+                current_kind = Some(ResourceBlockKind::PngSheet {
+                    start_id,
+                    tile_w,
+                    tile_h,
+                });
             }
-        } else if current_id.is_some() {
-            current_lines.push(line);
+        } else if let Some(rest) = line.strip_prefix("@SPRITE") {
+            flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites);
+            let mut parts = rest.split_whitespace();
+            if let Some(id_str) = parts.next()
+                && let Ok(id) = id_str.parse::<i32>()
+            {
+                if let Some(emoji_token) = parts.next() {
+                    let atlas = emoji_atlas.get_or_insert_with(emoji::EmojiAtlas::new);
+                    if let Some(sp) = atlas.extract_sprite(emoji_token) {
+                        sprites.insert(id, sp);
+                    }
+                } else {
+                    current_kind = Some(ResourceBlockKind::TextSprite(id));
+                }
+            }
+        } else if current_kind.is_some() {
+            current_lines.push(line.to_string());
         }
     }
 
-    if let Some(id) = current_id
-        && !current_lines.is_empty()
-    {
-        sprites.insert(id, SpriteData::from_lines(&current_lines));
-    }
-
+    flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites);
     sprites
 }
 
 /// Rubyオブジェクトの2次元配列または文字列配列 (`$SPRITES`) からスプライトをパースする
-pub fn parse_ruby_sprites_global(vm: &VM, sprites: &mut HashMap<i32, SpriteData>) {
+pub fn parse_ruby_sprites_global(
+    vm: &VM,
+    sprites: &mut HashMap<i32, SpriteData>,
+    emoji_atlas: &emoji::EmojiAtlas,
+) {
     let Some(sprites_obj) = vm.globals.get("$SPRITES") else {
         return;
     };
@@ -140,17 +492,30 @@ pub fn parse_ruby_sprites_global(vm: &VM, sprites: &mut HashMap<i32, SpriteData>
     };
 
     for (idx, item) in list_cell.borrow().iter().enumerate() {
-        if let RValue::Array(ref rows_cell) = item.value {
-            let mut lines_owned = Vec::new();
-            for row in rows_cell.borrow().iter() {
-                if let Ok(s) = String::try_from(row.as_ref()) {
-                    lines_owned.push(s);
+        match &item.value {
+            RValue::Array(rows_cell) => {
+                let mut lines_owned = Vec::new();
+                for row in rows_cell.borrow().iter() {
+                    if let Ok(s) = String::try_from(row.as_ref()) {
+                        lines_owned.push(s);
+                    }
+                }
+                if !lines_owned.is_empty() {
+                    let line_refs: Vec<&str> = lines_owned.iter().map(|s| s.as_str()).collect();
+                    sprites.insert(idx as i32, SpriteData::from_lines(&line_refs));
                 }
             }
-            if !lines_owned.is_empty() {
-                let line_refs: Vec<&str> = lines_owned.iter().map(|s| s.as_str()).collect();
-                sprites.insert(idx as i32, SpriteData::from_lines(&line_refs));
+            RValue::String(_, _) => {
+                if let Ok(s) = String::try_from(item.as_ref()) {
+                    let trimmed = s.trim();
+                    if let Some(sp) = emoji_atlas.extract_sprite(trimmed) {
+                        sprites.insert(idx as i32, sp);
+                    } else if let Ok(sp) = SpriteData::from_base64(trimmed) {
+                        sprites.insert(idx as i32, sp);
+                    }
+                }
             }
+            _ => {}
         }
     }
 }
@@ -173,13 +538,14 @@ fn arg_bool(args: &[Rc<RObject>], index: usize, default: bool) -> bool {
 fn register_engine_api(
     vm: &mut VM,
     sprites: Rc<RefCell<HashMap<i32, SpriteData>>>,
+    emoji_atlas: Rc<RefCell<emoji::EmojiAtlas>>,
     headless: bool,
 ) {
     let obj_class = vm.object_class.clone();
 
     if headless {
-        // ヘッドレステスト用スタブ登録
-        for name in ["cls", "pset", "rectfill", "spr", "print_text"] {
+        // ヘッドレステスト用スタブ登録 (spr に絵文字が渡された場合はキャッシュ抽出も検証可能にする)
+        for name in ["cls", "pset", "rectfill", "print_text"] {
             mrb_define_cmethod(
                 vm,
                 obj_class.clone(),
@@ -187,6 +553,20 @@ fn register_engine_api(
                 Box::new(|_vm, _args| Ok(Rc::new(RObject::nil()))),
             );
         }
+        let emoji_for_headless = emoji_atlas.clone();
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            "spr",
+            Box::new(move |_vm, args| {
+                if let Some(first) = args.first()
+                    && let Ok(s) = String::try_from(first.as_ref())
+                {
+                    let _ = emoji_for_headless.borrow_mut().get_or_insert(&s, false);
+                }
+                Ok(Rc::new(RObject::nil()))
+            }),
+        );
         mrb_define_cmethod(
             vm,
             obj_class,
@@ -230,27 +610,50 @@ fn register_engine_api(
         Box::new(|_vm, args| {
             let x = arg_i32(args, 0, 0) as f32;
             let y = arg_i32(args, 1, 0) as f32;
-            let w = arg_i32(args, 2, 8) as f32;
-            let h = arg_i32(args, 3, 8) as f32;
+            let w = arg_i32(args, 2, 16) as f32;
+            let h = arg_i32(args, 3, 16) as f32;
             let col = arg_i32(args, 4, 7);
             draw_rectangle(x, y, w, h, palette_color(col));
             Ok(Rc::new(RObject::nil()))
         }),
     );
 
-    // spr(id, x, y, flip_x = false, flip_y = false): スプライト描画
+    // spr(id_or_emoji, x, y, flip_x = false, flip_y = false): スプライトまたは16x16絵文字描画
     let sprites_for_spr = sprites.clone();
+    let emoji_for_spr = emoji_atlas.clone();
     mrb_define_cmethod(
         vm,
         obj_class.clone(),
         "spr",
         Box::new(move |_vm, args| {
-            let id = arg_i32(args, 0, 0);
             let x = arg_i32(args, 1, 0) as f32;
             let y = arg_i32(args, 2, 0) as f32;
             let flip_x = arg_bool(args, 3, false);
             let flip_y = arg_bool(args, 4, false);
 
+            if let Some(first) = args.first()
+                && let Ok(emoji_str) = String::try_from(first.as_ref())
+            {
+                let mut atlas_ref = emoji_for_spr.borrow_mut();
+                if let Some(sprite) = atlas_ref.get_or_insert(&emoji_str, true)
+                    && let Some(ref texture) = sprite.texture
+                {
+                    draw_texture_ex(
+                        texture,
+                        x.floor(),
+                        y.floor(),
+                        WHITE,
+                        DrawTextureParams {
+                            flip_x,
+                            flip_y,
+                            ..Default::default()
+                        },
+                    );
+                }
+                return Ok(Rc::new(RObject::nil()));
+            }
+
+            let id = arg_i32(args, 0, 0);
             let sprites_ref = sprites_for_spr.borrow();
             if let Some(sprite) = sprites_ref.get(&id)
                 && let Some(ref texture) = sprite.texture
@@ -372,6 +775,7 @@ fn snapshot_globals(vm: &VM) -> HashMap<String, Rc<RObject>> {
 pub struct GameRuntime {
     pub vm: VM,
     pub sprites: Rc<RefCell<HashMap<i32, SpriteData>>>,
+    pub emoji_atlas: Rc<RefCell<emoji::EmojiAtlas>>,
     initial_globals: HashMap<String, Rc<RObject>>,
     headless: bool,
 }
@@ -385,12 +789,13 @@ impl GameRuntime {
         let mut vm = VM::open(&mut rite);
 
         let sprites = Rc::new(RefCell::new(HashMap::new()));
-        register_engine_api(&mut vm, sprites.clone(), headless);
+        let emoji_atlas = Rc::new(RefCell::new(emoji::EmojiAtlas::new()));
+        register_engine_api(&mut vm, sprites.clone(), emoji_atlas.clone(), headless);
 
         vm.run()
             .map_err(|e| format!("Failed to run top-level Ruby script: {:?}", e))?;
 
-        parse_ruby_sprites_global(&vm, &mut sprites_map);
+        parse_ruby_sprites_global(&vm, &mut sprites_map, &emoji_atlas.borrow());
         if !headless {
             for sprite in sprites_map.values_mut() {
                 sprite.build_texture();
@@ -403,6 +808,7 @@ impl GameRuntime {
         Ok(Self {
             vm,
             sprites,
+            emoji_atlas,
             initial_globals,
             headless,
         })
@@ -418,13 +824,18 @@ impl GameRuntime {
             .map_err(|e| format!("Failed to load RITE(.mrb) on reload: {:?}", e))?;
         let mut new_vm = VM::open(&mut new_rite);
 
-        register_engine_api(&mut new_vm, self.sprites.clone(), self.headless);
+        register_engine_api(
+            &mut new_vm,
+            self.sprites.clone(),
+            self.emoji_atlas.clone(),
+            self.headless,
+        );
 
         new_vm
             .run()
             .map_err(|e| format!("Ruby top-level error on reload: {:?}", e))?;
 
-        parse_ruby_sprites_global(&new_vm, &mut new_sprites_map);
+        parse_ruby_sprites_global(&new_vm, &mut new_sprites_map, &self.emoji_atlas.borrow());
         if !self.headless {
             for sprite in new_sprites_map.values_mut() {
                 sprite.build_texture();
@@ -478,8 +889,8 @@ impl GameRuntime {
 fn window_conf_with_title(title: &str) -> Conf {
     Conf {
         window_title: title.to_owned(),
-        window_width: (SCREEN_WIDTH * 4) as i32,
-        window_height: (SCREEN_HEIGHT * 4) as i32,
+        window_width: WINDOW_WIDTH,
+        window_height: WINDOW_HEIGHT,
         window_resizable: true,
         ..Default::default()
     }
@@ -680,6 +1091,16 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        cli::CliAction::Encode {
+            image_path,
+            start_id,
+            tile_size,
+        } => {
+            if let Err(err) = cli::cmd_encode(&image_path, start_id, tile_size) {
+                eprintln!("Error: {}", err);
+                std::process::exit(1);
+            }
+        }
         cli::CliAction::Run { script_path } => {
             let (initial_source, tail_data, mrb_bytes) =
                 match cli::compile_ruby_script_file(&script_path) {
@@ -728,7 +1149,7 @@ pub extern "C" fn uk_notify_reload() {
 
 #[cfg(target_arch = "wasm32")]
 fn window_conf_wasm() -> Conf {
-    window_conf_with_title("Usakame Retro Engine (128x128)")
+    window_conf_with_title("Usakame Retro Engine (256x256)")
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -797,6 +1218,15 @@ mod tests {
     use crate::bundle::{pack_bundle, strip_bundle_from_exe_bytes, unpack_bundle_from_bytes};
 
     #[test]
+    fn test_resolution_and_sprite_constants() {
+        assert_eq!(SCREEN_WIDTH, 256);
+        assert_eq!(SCREEN_HEIGHT, 256);
+        assert_eq!(WINDOW_WIDTH, 512);
+        assert_eq!(WINDOW_HEIGHT, 512);
+        assert_eq!(SPRITE_SIZE, 16);
+    }
+
+    #[test]
     fn test_script_compile_and_sprite_parse() {
         let (_, tail_data, mrb_bytes) =
             cli::compile_ruby_script_file(std::path::Path::new("game.rb"))
@@ -809,6 +1239,8 @@ mod tests {
             let sprites = runtime.sprites.borrow();
             assert!(sprites.contains_key(&0), "Sprite 0 should be parsed");
             assert!(sprites.contains_key(&1), "Sprite 1 should be parsed");
+            assert_eq!(sprites[&0].width, 16);
+            assert_eq!(sprites[&0].height, 16);
         }
 
         runtime.call_update();
@@ -821,6 +1253,69 @@ mod tests {
             .try_into()
             .unwrap();
         assert_eq!(t_val, 1);
+    }
+
+    #[test]
+    fn test_emoji_and_base64_sprites_in_script() {
+        let pattern_lines = [
+            "....77....77....",
+            "...7887..7887...",
+            "...7887..7887...",
+            "...7777..7777...",
+            "...7777777777...",
+            "..777777777777..",
+            ".77707777770777.",
+            ".777777EE777777.",
+            ".77777777777777.",
+            "..777777777777..",
+            "...7777777777...",
+            "..777777777777..",
+            "..777777777777..",
+            "...7777..7777...",
+            "...777....777...",
+            "................",
+        ];
+        let b64_compact = SpriteData::encode_16x16_palette_b64(&pattern_lines);
+
+        let script = format!(
+            r#"
+def update
+end
+
+def draw
+  spr("🐰", 10, 20)
+  spr("🐢", 30, 40, true, false)
+  spr("⚔️", 50, 60)
+  spr(10, 70, 80)
+  spr(20, 90, 100)
+end
+__END__
+@SPRITE 10 🍎
+
+@B64 20
+{}
+"#,
+            b64_compact
+        );
+
+        let (tail, mrb) = cli::compile_ruby_script_str(&script).unwrap();
+        let mut runtime = GameRuntime::new(&tail, &mrb, true).unwrap();
+
+        {
+            let sprites = runtime.sprites.borrow();
+            // @SPRITE 10 🍎 (絵文字エイリアス)
+            assert!(sprites.contains_key(&10));
+            assert_eq!(sprites[&10].width, 16);
+            assert_eq!(sprites[&10].height, 16);
+
+            // @B64 20 (Base64圧縮パレットスプライト)
+            assert!(sprites.contains_key(&20));
+            let expected = SpriteData::from_lines(&pattern_lines);
+            assert_eq!(sprites[&20].rgba, expected.rgba);
+        }
+
+        // draw 内で spr("🐰", ...) 等が呼ばれてもエラーにならないこと
+        runtime.call_draw();
     }
 
     #[test]
@@ -839,7 +1334,7 @@ def draw
 end
 __END__
 @SPRITE 0
-11111111
+1111111111111111
 "#;
         let (tail_v1, mrb_v1) = cli::compile_ruby_script_str(script_v1).unwrap();
         let mut runtime = GameRuntime::new(&tail_v1, &mrb_v1, true).unwrap();
@@ -867,10 +1362,10 @@ def draw
 end
 __END__
 @SPRITE 0
-22222222
+2222222222222222
 
 @SPRITE 2
-33333333
+3333333333333333
 "#;
         let (tail_v2, mrb_v2) = cli::compile_ruby_script_str(script_v2).unwrap();
         runtime.hot_reload(&tail_v2, &mrb_v2).expect("Hot reload should succeed");
@@ -945,5 +1440,37 @@ __END__
                 open_browser: false,
             }
         );
+
+        let encode_act = cli::parse_cli_args(
+            ["uk", "encode", "sheet.png", "--id", "10", "--tile", "16x16"].map(String::from),
+        )
+        .unwrap();
+        assert_eq!(
+            encode_act,
+            cli::CliAction::Encode {
+                image_path: std::path::PathBuf::from("sheet.png"),
+                start_id: 10,
+                tile_size: Some((16, 16)),
+            }
+        );
+    }
+
+    #[test]
+    fn test_png_sheet_encode_and_parse() {
+        // 1x1 透明PNGを最小構成でテスト、または内蔵絵文字アトラスPNGから @SHEET ブロックを生成してパース検証
+        let block = cli::encode_png_bytes_to_script_block(
+            emoji::EMOJI_ATLAS_PNG,
+            "emoji_atlas.png",
+            100,
+            Some((16, 16)),
+        )
+        .expect("Should encode PNG bytes into @SHEET block");
+        assert!(block.contains("@SHEET 100 16x16"));
+
+        let parsed = parse_tail_resources(&block);
+        assert!(parsed.contains_key(&100));
+        assert!(parsed.contains_key(&101));
+        assert_eq!(parsed[&100].width, 16);
+        assert_eq!(parsed[&100].height, 16);
     }
 }
