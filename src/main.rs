@@ -626,8 +626,33 @@ const FONT_5X7: [[u8; 7]; 95] = [
     [0x00, 0x00, 0x08, 0x15, 0x02, 0x00, 0x00], // 0x7E '~'
 ];
 
+const MISAKI_FONT_BIN: &[u8] = include_bytes!("../assets/misaki_font.bin");
+
+/// 美咲フォント（Misaki Gothic 2nd, 8x8 1-bit）のバイナリテーブルから指定Unicodeコードポイントの8行ビットマップを二分探索で取得する
+pub fn lookup_misaki_glyph(cp: u16) -> Option<[u8; 8]> {
+    let count = MISAKI_FONT_BIN.len() / 10;
+    let mut low = 0usize;
+    let mut high = count;
+    while low < high {
+        let mid = (low + high) / 2;
+        let off = mid * 10;
+        let mid_cp = u16::from_le_bytes([MISAKI_FONT_BIN[off], MISAKI_FONT_BIN[off + 1]]);
+        match mid_cp.cmp(&cp) {
+            std::cmp::Ordering::Equal => {
+                let mut rows = [0u8; 8];
+                rows.copy_from_slice(&MISAKI_FONT_BIN[off + 2..off + 10]);
+                return Some(rows);
+            }
+            std::cmp::Ordering::Less => low = mid + 1,
+            std::cmp::Ordering::Greater => high = mid,
+        }
+    }
+    None
+}
+
 pub struct BitmapFont {
     texture: Option<Texture2D>,
+    ja_cache: RefCell<HashMap<u16, Texture2D>>,
 }
 
 impl Default for BitmapFont {
@@ -639,7 +664,10 @@ impl Default for BitmapFont {
 impl BitmapFont {
     pub fn new(build_gpu_texture: bool) -> Self {
         if !build_gpu_texture {
-            return Self { texture: None };
+            return Self {
+                texture: None,
+                ja_cache: RefCell::new(HashMap::new()),
+            };
         }
         let rows = (FONT_5X7.len() + FONT_ATLAS_COLS - 1) / FONT_ATLAS_COLS;
         let atlas_w = FONT_ATLAS_COLS * FONT_CHAR_W;
@@ -673,6 +701,7 @@ impl BitmapFont {
         texture.set_filter(FilterMode::Nearest);
         Self {
             texture: Some(texture),
+            ja_cache: RefCell::new(HashMap::new()),
         }
     }
 
@@ -710,8 +739,48 @@ impl BitmapFont {
                         ..Default::default()
                     },
                 );
+                cur_x += FONT_CHAR_W as f32;
+            } else if code <= 0xFFFF {
+                let cp = code as u16;
+                if cp != 0x3000 {
+                    // 全角空白以外ならグリフテクスチャを取得または生成して描画
+                    if !self.ja_cache.borrow().contains_key(&cp) {
+                        if let Some(rows) = lookup_misaki_glyph(cp) {
+                            let mut rgba = vec![0u8; 8 * 8 * 4];
+                            for (gy, &bits) in rows.iter().enumerate() {
+                                for gx in 0..8 {
+                                    if ((bits >> (7 - gx)) & 1) != 0 {
+                                        let off = (gy * 8 + gx) * 4;
+                                        rgba[off] = 255;
+                                        rgba[off + 1] = 255;
+                                        rgba[off + 2] = 255;
+                                        rgba[off + 3] = 255;
+                                    }
+                                }
+                            }
+                            let image = Image {
+                                bytes: rgba,
+                                width: 8,
+                                height: 8,
+                            };
+                            let tex = Texture2D::from_image(&image);
+                            tex.set_filter(FilterMode::Nearest);
+                            self.ja_cache.borrow_mut().insert(cp, tex);
+                        }
+                    }
+                    if let Some(tex) = self.ja_cache.borrow().get(&cp) {
+                        draw_texture_ex(tex, cur_x, cur_y, color, DrawTextureParams::default());
+                    }
+                }
+                // 半角カタカナ (0xFF61..=0xFF9F) は幅4px、全角文字・記号は幅8px
+                if (0xFF61..=0xFF9F).contains(&cp) {
+                    cur_x += 4.0;
+                } else {
+                    cur_x += 8.0;
+                }
+            } else {
+                cur_x += FONT_CHAR_W as f32;
             }
-            cur_x += FONT_CHAR_W as f32;
         }
     }
 }
@@ -1686,5 +1755,18 @@ __END__
         assert!(parsed.contains_key(&101));
         assert_eq!(parsed[&100].width, 16);
         assert_eq!(parsed[&100].height, 16);
+    }
+
+    #[test]
+    fn test_misaki_japanese_font_lookup() {
+        for ch in ['あ', 'い', 'ウ', 'サ', 'ギ', '兎', '亀', 'ｱ', '！'] {
+            let rows = lookup_misaki_glyph(ch as u16)
+                .unwrap_or_else(|| panic!("Misaki glyph should exist for '{}'", ch));
+            assert!(
+                rows.iter().any(|&b| b != 0),
+                "Glyph '{}' should have non-zero pixel rows",
+                ch
+            );
+        }
     }
 }
