@@ -972,6 +972,86 @@ impl PixelSpan {
     }
 }
 
+/// 画面座標系のクリッピング矩形 `(x, y, w, h)` を仮想画面 `(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT)` と交差させる
+pub fn intersect_screen_clip(x: i32, y: i32, w: i32, h: i32) -> PixelSpan {
+    if w <= 0 || h <= 0 {
+        return PixelSpan::new(0, 0, 0, 0);
+    }
+    let sw = SCREEN_WIDTH as i32;
+    let sh = SCREEN_HEIGHT as i32;
+    let x0 = x.clamp(0, sw);
+    let y0 = y.clamp(0, sh);
+    let x1 = x.saturating_add(w).clamp(0, sw);
+    let y1 = y.saturating_add(h).clamp(0, sh);
+    PixelSpan::new(x0, y0, (x1 - x0).max(0), (y1 - y0).max(0))
+}
+
+/// 描画ステート（カメラオフセットおよび画面クリッピング領域）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DrawState {
+    pub cam_x: i32,
+    pub cam_y: i32,
+    pub clip: Option<PixelSpan>,
+}
+
+impl DrawState {
+    pub fn set_camera(&mut self, x: i32, y: i32) {
+        self.cam_x = x;
+        self.cam_y = y;
+    }
+
+    pub fn reset_camera(&mut self) {
+        self.cam_x = 0;
+        self.cam_y = 0;
+    }
+
+    pub fn set_clip(&mut self, x: i32, y: i32, w: i32, h: i32) {
+        self.clip = Some(intersect_screen_clip(x, y, w, h));
+    }
+
+    pub fn reset_clip(&mut self) {
+        self.clip = None;
+    }
+
+    pub fn is_clip_empty(&self) -> bool {
+        matches!(self.clip, Some(c) if c.w <= 0 || c.h <= 0)
+    }
+
+    /// ワールド座標系のスパン群にカメラオフセット `(-cam_x, -cam_y)` とクリッピング矩形 `clip` を適用する
+    pub fn transform_and_clip_spans(&self, spans: &[PixelSpan]) -> Vec<PixelSpan> {
+        if self.is_clip_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::with_capacity(spans.len());
+        for s in spans {
+            if s.w <= 0 || s.h <= 0 {
+                continue;
+            }
+            let sx = s.x.saturating_sub(self.cam_x);
+            let sy = s.y.saturating_sub(self.cam_y);
+            if let Some(clip) = self.clip {
+                let x0 = sx.max(clip.x);
+                let y0 = sy.max(clip.y);
+                let x1 = sx.saturating_add(s.w).min(clip.x + clip.w);
+                let y1 = sy.saturating_add(s.h).min(clip.y + clip.h);
+                if x1 > x0 && y1 > y0 {
+                    out.push(PixelSpan::new(x0, y0, x1 - x0, y1 - y0));
+                }
+            } else {
+                out.push(PixelSpan::new(sx, sy, s.w, s.h));
+            }
+        }
+        out
+    }
+}
+
+fn apply_gl_scissor(clip: Option<PixelSpan>) {
+    let gl_clip = clip.map(|c| (c.x, c.y, c.w.max(0), c.h.max(0)));
+    unsafe {
+        get_internal_gl().quad_gl.scissor(gl_clip);
+    }
+}
+
 fn draw_spans(spans: &[PixelSpan], color: Color) {
     for span in spans {
         draw_rectangle(
@@ -1232,123 +1312,192 @@ fn register_engine_api(
     sprites: Rc<RefCell<HashMap<i32, SpriteData>>>,
     emoji_atlas: Rc<RefCell<emoji::EmojiAtlas>>,
     bitmap_font: Rc<BitmapFont>,
+    draw_state: Rc<RefCell<DrawState>>,
     headless: bool,
 ) {
     let obj_class = vm.object_class.clone();
 
+    // camera(x = 0, y = 0): カメラオフセットを設定（引数なしで (0, 0) にリセット）
+    let state_for_cam = draw_state.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "camera",
+        Box::new(move |_vm, args| {
+            let x = arg_i32(args, 0, 0);
+            let y = arg_i32(args, 1, 0);
+            state_for_cam.borrow_mut().set_camera(x, y);
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
+
+    // clip(x = nil, y = nil, w = nil, h = nil): 画面座標系での描画クリッピング領域を設定（引数なしまたは nil で解除）
+    let state_for_clip = draw_state.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "clip",
+        Box::new(move |_vm, args| {
+            let mut state = state_for_clip.borrow_mut();
+            if args.is_empty() || matches!(args[0].value, RValue::Nil) {
+                state.reset_clip();
+            } else {
+                let x = arg_i32(args, 0, 0);
+                let y = arg_i32(args, 1, 0);
+                let w = arg_i32(args, 2, SCREEN_WIDTH as i32);
+                let h = arg_i32(args, 3, SCREEN_HEIGHT as i32);
+                state.set_clip(x, y, w, h);
+            }
+            if !headless {
+                apply_gl_scissor(state.clip);
+            }
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
+
     if headless {
-        // ヘッドレステスト用スタブ登録 (図形ラスタライズ計算および絵文字キャッシュ抽出も検証可能にする)
-        for name in ["cls", "pset"] {
-            mrb_define_cmethod(
-                vm,
-                obj_class.clone(),
-                name,
-                Box::new(|_vm, _args| Ok(Rc::new(RObject::nil()))),
-            );
-        }
+        // ヘッドレステスト用スタブ登録 (図形ラスタライズ・カメラ・クリッピング計算および絵文字キャッシュ抽出も検証可能にする)
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            "cls",
+            Box::new(|_vm, _args| Ok(Rc::new(RObject::nil()))),
+        );
+        let state_for_pset = draw_state.clone();
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            "pset",
+            Box::new(move |_vm, args| {
+                let x = arg_i32(args, 0, 0);
+                let y = arg_i32(args, 1, 0);
+                let _ = state_for_pset
+                    .borrow()
+                    .transform_and_clip_spans(&[PixelSpan::new(x, y, 1, 1)]);
+                Ok(Rc::new(RObject::nil()))
+            }),
+        );
+        let state_for_line = draw_state.clone();
         mrb_define_cmethod(
             vm,
             obj_class.clone(),
             "line",
-            Box::new(|_vm, args| {
+            Box::new(move |_vm, args| {
                 let x0 = arg_i32(args, 0, 0);
                 let y0 = arg_i32(args, 1, 0);
                 let x1 = arg_i32(args, 2, 0);
                 let y1 = arg_i32(args, 3, 0);
-                let _ = rasterize_line(x0, y0, x1, y1);
+                let spans = rasterize_line(x0, y0, x1, y1);
+                let _ = state_for_line.borrow().transform_and_clip_spans(&spans);
                 Ok(Rc::new(RObject::nil()))
             }),
         );
+        let state_for_rect = draw_state.clone();
         mrb_define_cmethod(
             vm,
             obj_class.clone(),
             "rect",
-            Box::new(|_vm, args| {
+            Box::new(move |_vm, args| {
                 let x = arg_i32(args, 0, 0);
                 let y = arg_i32(args, 1, 0);
                 let w = arg_i32(args, 2, 16);
                 let h = arg_i32(args, 3, 16);
-                let _ = rasterize_rect(x, y, w, h);
+                let spans = rasterize_rect(x, y, w, h);
+                let _ = state_for_rect.borrow().transform_and_clip_spans(&spans);
                 Ok(Rc::new(RObject::nil()))
             }),
         );
+        let state_for_rectfill = draw_state.clone();
         mrb_define_cmethod(
             vm,
             obj_class.clone(),
             "rectfill",
-            Box::new(|_vm, args| {
+            Box::new(move |_vm, args| {
                 let x = arg_i32(args, 0, 0);
                 let y = arg_i32(args, 1, 0);
                 let w = arg_i32(args, 2, 16);
                 let h = arg_i32(args, 3, 16);
-                let _ = rasterize_rectfill(x, y, w, h);
+                let spans = rasterize_rectfill(x, y, w, h);
+                let _ = state_for_rectfill.borrow().transform_and_clip_spans(&spans);
                 Ok(Rc::new(RObject::nil()))
             }),
         );
         for name in ["circ", "circle"] {
+            let state_for_circ = draw_state.clone();
             mrb_define_cmethod(
                 vm,
                 obj_class.clone(),
                 name,
-                Box::new(|_vm, args| {
+                Box::new(move |_vm, args| {
                     let x = arg_i32(args, 0, 0);
                     let y = arg_i32(args, 1, 0);
                     let r = arg_i32(args, 2, 4);
-                    let _ = rasterize_circ(x, y, r);
+                    let spans = rasterize_circ(x, y, r);
+                    let _ = state_for_circ.borrow().transform_and_clip_spans(&spans);
                     Ok(Rc::new(RObject::nil()))
                 }),
             );
         }
         for name in ["circfill", "circlefill"] {
+            let state_for_circfill = draw_state.clone();
             mrb_define_cmethod(
                 vm,
                 obj_class.clone(),
                 name,
-                Box::new(|_vm, args| {
+                Box::new(move |_vm, args| {
                     let x = arg_i32(args, 0, 0);
                     let y = arg_i32(args, 1, 0);
                     let r = arg_i32(args, 2, 4);
-                    let _ = rasterize_circfill(x, y, r);
+                    let spans = rasterize_circfill(x, y, r);
+                    let _ = state_for_circfill.borrow().transform_and_clip_spans(&spans);
                     Ok(Rc::new(RObject::nil()))
                 }),
             );
         }
+        let state_for_tri = draw_state.clone();
         mrb_define_cmethod(
             vm,
             obj_class.clone(),
             "tri",
-            Box::new(|_vm, args| {
+            Box::new(move |_vm, args| {
                 let x0 = arg_i32(args, 0, 0);
                 let y0 = arg_i32(args, 1, 0);
                 let x1 = arg_i32(args, 2, 8);
                 let y1 = arg_i32(args, 3, 0);
                 let x2 = arg_i32(args, 4, 4);
                 let y2 = arg_i32(args, 5, 8);
-                let _ = rasterize_tri(x0, y0, x1, y1, x2, y2);
+                let spans = rasterize_tri(x0, y0, x1, y1, x2, y2);
+                let _ = state_for_tri.borrow().transform_and_clip_spans(&spans);
                 Ok(Rc::new(RObject::nil()))
             }),
         );
+        let state_for_trifill = draw_state.clone();
         mrb_define_cmethod(
             vm,
             obj_class.clone(),
             "trifill",
-            Box::new(|_vm, args| {
+            Box::new(move |_vm, args| {
                 let x0 = arg_i32(args, 0, 0);
                 let y0 = arg_i32(args, 1, 0);
                 let x1 = arg_i32(args, 2, 8);
                 let y1 = arg_i32(args, 3, 0);
                 let x2 = arg_i32(args, 4, 4);
                 let y2 = arg_i32(args, 5, 8);
-                let _ = rasterize_trifill(x0, y0, x1, y1, x2, y2);
+                let spans = rasterize_trifill(x0, y0, x1, y1, x2, y2);
+                let _ = state_for_trifill.borrow().transform_and_clip_spans(&spans);
                 Ok(Rc::new(RObject::nil()))
             }),
         );
         let emoji_for_headless_print = emoji_atlas.clone();
+        let state_for_headless_print = draw_state.clone();
         mrb_define_cmethod(
             vm,
             obj_class.clone(),
             "print_text",
             Box::new(move |_vm, args| {
+                if state_for_headless_print.borrow().is_clip_empty() {
+                    return Ok(Rc::new(RObject::nil()));
+                }
                 if let Some(first) = args.first()
                     && let Ok(text) = String::try_from(first.as_ref())
                 {
@@ -1365,13 +1514,18 @@ fn register_engine_api(
         );
         let sprites_for_headless = sprites.clone();
         let emoji_for_headless = emoji_atlas.clone();
+        let state_for_headless_spr = draw_state.clone();
         mrb_define_cmethod(
             vm,
             obj_class.clone(),
             "spr",
             Box::new(move |_vm, args| {
-                let x = arg_f32(args, 1, 0.0);
-                let y = arg_f32(args, 2, 0.0);
+                let state = *state_for_headless_spr.borrow();
+                if state.is_clip_empty() {
+                    return Ok(Rc::new(RObject::nil()));
+                }
+                let x = arg_f32(args, 1, 0.0) - state.cam_x as f32;
+                let y = arg_f32(args, 2, 0.0) - state.cam_y as f32;
                 let flip_x = arg_bool(args, 3, false);
                 let flip_y = arg_bool(args, 4, false);
                 let rotate = arg_f32(args, 5, 0.0);
@@ -1421,78 +1575,102 @@ fn register_engine_api(
         return;
     }
 
-    // cls(col = 0): 画面を指定したパレット色でクリア
+    // cls(col = 0): 画面（または現在のクリッピング領域）を指定したパレット色でクリア
+    let state_for_cls = draw_state.clone();
     mrb_define_cmethod(
         vm,
         obj_class.clone(),
         "cls",
-        Box::new(|_vm, args| {
+        Box::new(move |_vm, args| {
             let col = arg_i32(args, 0, 0);
-            clear_background(palette_color(col));
+            let color = palette_color(col);
+            if let Some(clip_rect) = state_for_cls.borrow().clip {
+                if clip_rect.w > 0 && clip_rect.h > 0 {
+                    draw_rectangle(
+                        clip_rect.x as f32,
+                        clip_rect.y as f32,
+                        clip_rect.w as f32,
+                        clip_rect.h as f32,
+                        color,
+                    );
+                }
+            } else {
+                clear_background(color);
+            }
             Ok(Rc::new(RObject::nil()))
         }),
     );
 
     // pset(x = 0, y = 0, col = 7): 1ドット描画
+    let state_for_pset = draw_state.clone();
     mrb_define_cmethod(
         vm,
         obj_class.clone(),
         "pset",
-        Box::new(|_vm, args| {
-            let x = arg_i32(args, 0, 0) as f32;
-            let y = arg_i32(args, 1, 0) as f32;
+        Box::new(move |_vm, args| {
+            let x = arg_i32(args, 0, 0);
+            let y = arg_i32(args, 1, 0);
             let col = arg_i32(args, 2, 7);
-            draw_rectangle(x, y, 1.0, 1.0, palette_color(col));
+            let spans = state_for_pset
+                .borrow()
+                .transform_and_clip_spans(&[PixelSpan::new(x, y, 1, 1)]);
+            draw_spans(&spans, palette_color(col));
             Ok(Rc::new(RObject::nil()))
         }),
     );
 
     // line(x0 = 0, y0 = 0, x1 = 0, y1 = 0, col = 7): 直線描画（ブレゼンハム 1px）
+    let state_for_line = draw_state.clone();
     mrb_define_cmethod(
         vm,
         obj_class.clone(),
         "line",
-        Box::new(|_vm, args| {
+        Box::new(move |_vm, args| {
             let x0 = arg_i32(args, 0, 0);
             let y0 = arg_i32(args, 1, 0);
             let x1 = arg_i32(args, 2, 0);
             let y1 = arg_i32(args, 3, 0);
             let col = arg_i32(args, 4, 7);
-            let spans = rasterize_line(x0, y0, x1, y1);
+            let raw = rasterize_line(x0, y0, x1, y1);
+            let spans = state_for_line.borrow().transform_and_clip_spans(&raw);
             draw_spans(&spans, palette_color(col));
             Ok(Rc::new(RObject::nil()))
         }),
     );
 
     // rect(x = 0, y = 0, w = 16, h = 16, col = 7): 枠線のみの矩形
+    let state_for_rect = draw_state.clone();
     mrb_define_cmethod(
         vm,
         obj_class.clone(),
         "rect",
-        Box::new(|_vm, args| {
+        Box::new(move |_vm, args| {
             let x = arg_i32(args, 0, 0);
             let y = arg_i32(args, 1, 0);
             let w = arg_i32(args, 2, 16);
             let h = arg_i32(args, 3, 16);
             let col = arg_i32(args, 4, 7);
-            let spans = rasterize_rect(x, y, w, h);
+            let raw = rasterize_rect(x, y, w, h);
+            let spans = state_for_rect.borrow().transform_and_clip_spans(&raw);
             draw_spans(&spans, palette_color(col));
             Ok(Rc::new(RObject::nil()))
         }),
     );
 
     // rectfill(x = 0, y = 0, w = 16, h = 16, col = 7): 塗りつぶし矩形
+    let state_for_rectfill = draw_state.clone();
     mrb_define_cmethod(
         vm,
         obj_class.clone(),
         "rectfill",
-        Box::new(|_vm, args| {
+        Box::new(move |_vm, args| {
             let x = arg_i32(args, 0, 0);
             let y = arg_i32(args, 1, 0);
             let w = arg_i32(args, 2, 16);
             let h = arg_i32(args, 3, 16);
             let col = arg_i32(args, 4, 7);
-            let spans = rasterize_rectfill(x, y, w, h);
+            let raw = rasterize_rectfill(x, y, w, h);
+            let spans = state_for_rectfill.borrow().transform_and_clip_spans(&raw);
             draw_spans(&spans, palette_color(col));
             Ok(Rc::new(RObject::nil()))
         }),
@@ -1500,16 +1678,18 @@ fn register_engine_api(
 
     // circ(x = 0, y = 0, r = 4, col = 7) / circle(x = 0, y = 0, r = 4, col = 7): 枠線のみの円
     for name in ["circ", "circle"] {
+        let state_for_circ = draw_state.clone();
         mrb_define_cmethod(
             vm,
             obj_class.clone(),
             name,
-            Box::new(|_vm, args| {
+            Box::new(move |_vm, args| {
                 let x = arg_i32(args, 0, 0);
                 let y = arg_i32(args, 1, 0);
                 let r = arg_i32(args, 2, 4);
                 let col = arg_i32(args, 3, 7);
-                let spans = rasterize_circ(x, y, r);
+                let raw = rasterize_circ(x, y, r);
+                let spans = state_for_circ.borrow().transform_and_clip_spans(&raw);
                 draw_spans(&spans, palette_color(col));
                 Ok(Rc::new(RObject::nil()))
             }),
@@ -1518,16 +1698,18 @@ fn register_engine_api(
 
     // circfill(x = 0, y = 0, r = 4, col = 7) / circlefill(x = 0, y = 0, r = 4, col = 7): 塗りつぶし円
     for name in ["circfill", "circlefill"] {
+        let state_for_circfill = draw_state.clone();
         mrb_define_cmethod(
             vm,
             obj_class.clone(),
             name,
-            Box::new(|_vm, args| {
+            Box::new(move |_vm, args| {
                 let x = arg_i32(args, 0, 0);
                 let y = arg_i32(args, 1, 0);
                 let r = arg_i32(args, 2, 4);
                 let col = arg_i32(args, 3, 7);
-                let spans = rasterize_circfill(x, y, r);
+                let raw = rasterize_circfill(x, y, r);
+                let spans = state_for_circfill.borrow().transform_and_clip_spans(&raw);
                 draw_spans(&spans, palette_color(col));
                 Ok(Rc::new(RObject::nil()))
             }),
@@ -1535,11 +1717,12 @@ fn register_engine_api(
     }
 
     // tri(x0 = 0, y0 = 0, x1 = 8, y1 = 0, x2 = 4, y2 = 8, col = 7): 枠線のみの三角形
+    let state_for_tri = draw_state.clone();
     mrb_define_cmethod(
         vm,
         obj_class.clone(),
         "tri",
-        Box::new(|_vm, args| {
+        Box::new(move |_vm, args| {
             let x0 = arg_i32(args, 0, 0);
             let y0 = arg_i32(args, 1, 0);
             let x1 = arg_i32(args, 2, 8);
@@ -1547,18 +1730,20 @@ fn register_engine_api(
             let x2 = arg_i32(args, 4, 4);
             let y2 = arg_i32(args, 5, 8);
             let col = arg_i32(args, 6, 7);
-            let spans = rasterize_tri(x0, y0, x1, y1, x2, y2);
+            let raw = rasterize_tri(x0, y0, x1, y1, x2, y2);
+            let spans = state_for_tri.borrow().transform_and_clip_spans(&raw);
             draw_spans(&spans, palette_color(col));
             Ok(Rc::new(RObject::nil()))
         }),
     );
 
     // trifill(x0 = 0, y0 = 0, x1 = 8, y1 = 0, x2 = 4, y2 = 8, col = 7): 塗りつぶし三角形
+    let state_for_trifill = draw_state.clone();
     mrb_define_cmethod(
         vm,
         obj_class.clone(),
         "trifill",
-        Box::new(|_vm, args| {
+        Box::new(move |_vm, args| {
             let x0 = arg_i32(args, 0, 0);
             let y0 = arg_i32(args, 1, 0);
             let x1 = arg_i32(args, 2, 8);
@@ -1566,7 +1751,8 @@ fn register_engine_api(
             let x2 = arg_i32(args, 4, 4);
             let y2 = arg_i32(args, 5, 8);
             let col = arg_i32(args, 6, 7);
-            let spans = rasterize_trifill(x0, y0, x1, y1, x2, y2);
+            let raw = rasterize_trifill(x0, y0, x1, y1, x2, y2);
+            let spans = state_for_trifill.borrow().transform_and_clip_spans(&raw);
             draw_spans(&spans, palette_color(col));
             Ok(Rc::new(RObject::nil()))
         }),
@@ -1575,13 +1761,18 @@ fn register_engine_api(
     // spr(id_or_emoji, x = 0, y = 0, flip_x = false, flip_y = false, rotate = 0, scale = 1.0): スプライトまたは16x16絵文字描画
     let sprites_for_spr = sprites.clone();
     let emoji_for_spr = emoji_atlas.clone();
+    let state_for_spr = draw_state.clone();
     mrb_define_cmethod(
         vm,
         obj_class.clone(),
         "spr",
         Box::new(move |_vm, args| {
-            let x = arg_f32(args, 1, 0.0);
-            let y = arg_f32(args, 2, 0.0);
+            let state = *state_for_spr.borrow();
+            if state.is_clip_empty() {
+                return Ok(Rc::new(RObject::nil()));
+            }
+            let x = arg_f32(args, 1, 0.0) - state.cam_x as f32;
+            let y = arg_f32(args, 2, 0.0) - state.cam_y as f32;
             let flip_x = arg_bool(args, 3, false);
             let flip_y = arg_bool(args, 4, false);
             let rotate = arg_f32(args, 5, 0.0);
@@ -1630,17 +1821,22 @@ fn register_engine_api(
     // print_text(text, x = 0, y = 0, col = 7): 1-bit ピクセルフォント + 8x8 縮小絵文字でくっきりテキスト描画
     let font_for_print = bitmap_font.clone();
     let emoji_for_print = emoji_atlas.clone();
+    let state_for_print = draw_state;
     mrb_define_cmethod(
         vm,
         obj_class,
         "print_text",
         Box::new(move |_vm, args| {
+            let state = *state_for_print.borrow();
+            if state.is_clip_empty() {
+                return Ok(Rc::new(RObject::nil()));
+            }
             let text = args
                 .first()
                 .and_then(|v| String::try_from(v.as_ref()).ok())
                 .unwrap_or_default();
-            let x = arg_i32(args, 1, 0) as f32;
-            let y = arg_i32(args, 2, 0) as f32;
+            let x = (arg_i32(args, 1, 0).saturating_sub(state.cam_x)) as f32;
+            let y = (arg_i32(args, 2, 0).saturating_sub(state.cam_y)) as f32;
             let col = arg_i32(args, 3, 7);
             font_for_print.draw_text_crisp(&text, x, y, palette_color(col), &emoji_for_print);
             Ok(Rc::new(RObject::nil()))
@@ -1711,6 +1907,7 @@ pub struct GameRuntime {
     pub sprites: Rc<RefCell<HashMap<i32, SpriteData>>>,
     pub emoji_atlas: Rc<RefCell<emoji::EmojiAtlas>>,
     pub bitmap_font: Rc<BitmapFont>,
+    pub draw_state: Rc<RefCell<DrawState>>,
     initial_globals: HashMap<String, Rc<RObject>>,
     headless: bool,
 }
@@ -1726,11 +1923,13 @@ impl GameRuntime {
         let sprites = Rc::new(RefCell::new(HashMap::new()));
         let emoji_atlas = Rc::new(RefCell::new(emoji::EmojiAtlas::new()));
         let bitmap_font = Rc::new(BitmapFont::new(!headless));
+        let draw_state = Rc::new(RefCell::new(DrawState::default()));
         register_engine_api(
             &mut vm,
             sprites.clone(),
             emoji_atlas.clone(),
             bitmap_font.clone(),
+            draw_state.clone(),
             headless,
         );
 
@@ -1752,6 +1951,7 @@ impl GameRuntime {
             sprites,
             emoji_atlas,
             bitmap_font,
+            draw_state,
             initial_globals,
             headless,
         })
@@ -1767,11 +1967,13 @@ impl GameRuntime {
             .map_err(|e| format!("Failed to load RITE(.mrb) on reload: {:?}", e))?;
         let mut new_vm = VM::open(&mut new_rite);
 
+        *self.draw_state.borrow_mut() = DrawState::default();
         register_engine_api(
             &mut new_vm,
             self.sprites.clone(),
             self.emoji_atlas.clone(),
             self.bitmap_font.clone(),
+            self.draw_state.clone(),
             self.headless,
         );
 
@@ -1821,8 +2023,14 @@ impl GameRuntime {
     }
 
     pub fn call_draw(&mut self) {
+        if !self.headless {
+            apply_gl_scissor(self.draw_state.borrow().clip);
+        }
         if let Err(e) = mrb_funcall(&mut self.vm, None, "draw", &[]) {
             eprintln!("Ruby error in `draw`: {:?}", e);
+        }
+        if !self.headless {
+            apply_gl_scissor(None);
         }
     }
 }
@@ -1851,6 +2059,7 @@ fn create_virtual_screen() -> (RenderTarget, Camera2D) {
 }
 
 fn present_virtual_screen(render_target: &RenderTarget, reload_banner_frames: u32) {
+    apply_gl_scissor(None);
     set_default_camera();
     clear_background(BLACK);
 
@@ -2598,5 +2807,98 @@ end
         let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
         let mut runtime = GameRuntime::new(&tail, &mrb, true).unwrap();
         runtime.call_draw();
+    }
+
+    #[test]
+    fn test_camera_and_clip_state_and_spans() {
+        let mut state = DrawState::default();
+        assert_eq!(state.cam_x, 0);
+        assert_eq!(state.cam_y, 0);
+        assert_eq!(state.clip, None);
+
+        // カメラオフセット (100, 50) の適用検証
+        state.set_camera(100, 50);
+        let raw_rect = rasterize_rectfill(120, 80, 16, 10);
+        let transformed = state.transform_and_clip_spans(&raw_rect);
+        assert_eq!(transformed, vec![PixelSpan::new(20, 30, 16, 10)]);
+
+        // クリッピング領域 (25, 32, 8, 6) を画面座標系で設定
+        state.set_clip(25, 32, 8, 6);
+        assert_eq!(state.clip, Some(PixelSpan::new(25, 32, 8, 6)));
+        let clipped = state.transform_and_clip_spans(&raw_rect);
+        // 画面座標 (20..36, 30..40) と clip (25..33, 32..38) の交差は (25, 32, 8, 6)
+        assert_eq!(clipped, vec![PixelSpan::new(25, 32, 8, 6)]);
+
+        // 画面外にはみ出す clip 指定は (0, 0, 256, 256) にクランプされること
+        state.set_clip(-10, 200, 50, 100);
+        assert_eq!(state.clip, Some(PixelSpan::new(0, 200, 40, 56)));
+
+        // 幅または高さが 0 以下の clip は空領域となり何も描画されないこと
+        state.set_clip(10, 10, 0, 20);
+        assert!(state.is_clip_empty());
+        assert!(state.transform_and_clip_spans(&raw_rect).is_empty());
+
+        // リセット確認
+        state.reset_camera();
+        state.reset_clip();
+        assert_eq!(state, DrawState::default());
+    }
+
+    #[test]
+    fn test_camera_and_clip_in_ruby_script() {
+        let script = r#"
+def update
+  camera(32, 16)
+end
+
+def draw
+  cls(1)
+  rectfill(32, 16, 64, 64, 3)
+  spr("🐰", 48, 32)
+  print_text("WORLD", 40, 20, 7)
+
+  # 画面座標系でのクリッピング設定と部分クリア
+  clip(160, 8, 88, 64)
+  cls(0)
+  camera(100, 50)
+  circfill(140, 80, 24, 11)
+  line(100, 50, 200, 120, 8)
+  spr("🐢", 132, 72)
+
+  # クリッピング解除・カメラを特定オフセットに設定して終了（テスト側で状態検証）
+  clip()
+  camera(12, -8)
+end
+"#;
+        let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
+        let mut runtime = GameRuntime::new(&tail, &mrb, true).unwrap();
+
+        runtime.call_update();
+        assert_eq!(runtime.draw_state.borrow().cam_x, 32);
+        assert_eq!(runtime.draw_state.borrow().cam_y, 16);
+
+        runtime.call_draw();
+        assert_eq!(runtime.draw_state.borrow().cam_x, 12);
+        assert_eq!(runtime.draw_state.borrow().cam_y, -8);
+        assert_eq!(runtime.draw_state.borrow().clip, None);
+    }
+
+    #[test]
+    fn test_camera_clip_example_script() {
+        let (_, tail_data, mrb_bytes) = cli::compile_ruby_script_file(std::path::Path::new(
+            "examples/camera_clip.rb",
+        ))
+        .expect("examples/camera_clip.rb should compile");
+
+        let mut runtime =
+            GameRuntime::new(&tail_data, &mrb_bytes, true).expect("Example should initialize");
+
+        for _ in 0..5 {
+            runtime.call_update();
+            runtime.call_draw();
+        }
+        assert_eq!(runtime.draw_state.borrow().cam_x, 0);
+        assert_eq!(runtime.draw_state.borrow().cam_y, 0);
+        assert_eq!(runtime.draw_state.borrow().clip, None);
     }
 }
