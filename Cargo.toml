@@ -9,7 +9,7 @@ name = "uk"
 path = "src/main.rs"
 
 [dependencies]
-macroquad = "0.4"
+macroquad = { version = "0.4", features = ["audio"] }
 mrubyedge = { version = "2.1", features = ["mruby-random"] }
 
 # ネイティブ環境（開発・1バイナリ実行）では、実行時にも .rb を直接コンパイルできるようにする

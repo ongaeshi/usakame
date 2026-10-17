@@ -2,6 +2,7 @@ pub mod bundle;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cli;
 pub mod emoji;
+pub mod sound;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -1689,6 +1690,89 @@ pub fn rasterize_trifill(x0: i32, y0: i32, x1: i32, y1: i32, x2: i32, y2: i32) -
     spans
 }
 
+/// Ruby 引数から SFX 指定（整数ID / 文字列 / シンボル）を取り出す
+enum SfxArg {
+    Id(i32),
+    Spec(String),
+}
+
+fn arg_sfx(args: &[Rc<RObject>], index: usize) -> Option<SfxArg> {
+    let obj = args.get(index)?;
+    match &obj.value {
+        RValue::Integer(v) => Some(SfxArg::Id(*v as i32)),
+        RValue::Float(v) => Some(SfxArg::Id(*v as i32)),
+        RValue::Symbol(sym) => Some(SfxArg::Spec(sym.name.clone())),
+        RValue::String(_, _) => String::try_from(obj.as_ref()).ok().map(SfxArg::Spec),
+        _ => None,
+    }
+}
+
+/// サウンド API (`sfx`, `stop_sfx`, `music`, `stop_music`) を登録する
+fn register_sound_api(vm: &mut VM, sound_bank: Rc<RefCell<sound::SoundBank>>) {
+    let obj_class = vm.object_class.clone();
+
+    // sfx(id_or_spec, channel = -1, volume = 1.0):
+    //   整数: `@SFX` 定義番号 / シンボル: プリセット (`:jump` 等) / 文字列: インラインMML (`"square c3 e3 g3"`)
+    //   id が -1 の場合は該当チャンネル（-1なら全チャンネル）を停止
+    let bank_for_sfx = sound_bank.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "sfx",
+        Box::new(move |_vm, args| {
+            let channel = arg_i32(args, 1, -1);
+            let volume = arg_f32(args, 2, 1.0);
+            let mut bank = bank_for_sfx.borrow_mut();
+            match arg_sfx(args, 0) {
+                Some(SfxArg::Id(id)) => bank.queue_play_sfx_id(id, channel, volume),
+                Some(SfxArg::Spec(spec)) => bank.queue_play_sfx_inline(&spec, channel, volume),
+                None => {}
+            }
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
+
+    // stop_sfx(channel = -1): 指定チャンネル（省略時は全チャンネル）の効果音を停止
+    let bank_for_stop_sfx = sound_bank.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "stop_sfx",
+        Box::new(move |_vm, args| {
+            let channel = arg_i32(args, 0, -1);
+            bank_for_stop_sfx.borrow_mut().queue_stop_sfx(channel);
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
+
+    // music(id, loop = true, volume = 1.0): `@MUSIC` 定義の BGM を再生（id が -1 なら停止）
+    let bank_for_music = sound_bank.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "music",
+        Box::new(move |_vm, args| {
+            let id = arg_i32(args, 0, 0);
+            let looped = arg_bool(args, 1, true);
+            let volume = arg_f32(args, 2, 1.0);
+            bank_for_music.borrow_mut().queue_play_music(id, looped, volume);
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
+
+    // stop_music(): BGM を停止
+    let bank_for_stop_music = sound_bank;
+    mrb_define_cmethod(
+        vm,
+        obj_class,
+        "stop_music",
+        Box::new(move |_vm, _args| {
+            bank_for_stop_music.borrow_mut().queue_stop_music();
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
+}
+
 fn register_engine_api(
     vm: &mut VM,
     sprites: Rc<RefCell<HashMap<i32, SpriteData>>>,
@@ -2606,6 +2690,7 @@ pub struct GameRuntime {
     pub emoji_atlas: Rc<RefCell<emoji::EmojiAtlas>>,
     pub bitmap_font: Rc<BitmapFont>,
     pub draw_state: Rc<RefCell<DrawState>>,
+    pub sound_bank: Rc<RefCell<sound::SoundBank>>,
     initial_globals: HashMap<String, Rc<RObject>>,
     initial_tail_map: Tilemap,
     headless: bool,
@@ -2615,6 +2700,7 @@ impl GameRuntime {
     pub fn new(tail_data: &str, mrb_bytes: &[u8], headless: bool) -> Result<Self, String> {
         let mut sprites_map = parse_tail_resources(tail_data);
         let tail_map = parse_tail_map(tail_data);
+        let (mut sfx_map, mut music_map) = sound::parse_tail_sounds(tail_data);
 
         let mut rite =
             rite::load(mrb_bytes).map_err(|e| format!("Failed to load RITE(.mrb): {:?}", e))?;
@@ -2625,6 +2711,10 @@ impl GameRuntime {
         let emoji_atlas = Rc::new(RefCell::new(emoji::EmojiAtlas::new()));
         let bitmap_font = Rc::new(BitmapFont::new(!headless));
         let draw_state = Rc::new(RefCell::new(DrawState::default()));
+        let sound_bank = Rc::new(RefCell::new(sound::SoundBank::new(
+            HashMap::new(),
+            HashMap::new(),
+        )));
         register_engine_api(
             &mut vm,
             sprites.clone(),
@@ -2634,12 +2724,17 @@ impl GameRuntime {
             draw_state.clone(),
             headless,
         );
+        register_sound_api(&mut vm, sound_bank.clone());
 
         vm.run()
             .map_err(|e| format!("Failed to run top-level Ruby script: {:?}", e))?;
 
         parse_ruby_sprites_global(&vm, &mut sprites_map, &emoji_atlas.borrow());
         parse_ruby_map_global(&vm, &mut tilemap.borrow_mut());
+        sound::parse_ruby_sounds_globals(&vm, &mut sfx_map, &mut music_map);
+        sound_bank
+            .borrow_mut()
+            .update_definitions(sfx_map, music_map);
         if !headless {
             for sprite in sprites_map.values_mut() {
                 sprite.build_texture();
@@ -2657,6 +2752,7 @@ impl GameRuntime {
             emoji_atlas,
             bitmap_font,
             draw_state,
+            sound_bank,
             initial_globals,
             initial_tail_map,
             headless,
@@ -2669,10 +2765,19 @@ impl GameRuntime {
     pub fn hot_reload(&mut self, new_tail_data: &str, new_mrb_bytes: &[u8]) -> Result<(), String> {
         let mut new_sprites_map = parse_tail_resources(new_tail_data);
         let new_tail_map = parse_tail_map(new_tail_data);
+        let (mut new_sfx_map, mut new_music_map) = sound::parse_tail_sounds(new_tail_data);
 
         let mut new_rite = rite::load(new_mrb_bytes)
             .map_err(|e| format!("Failed to load RITE(.mrb) on reload: {:?}", e))?;
         let mut new_vm = VM::open(&mut new_rite);
+
+        // リロード前に再生中だった BGM を記録（トップレベルの `music(...)` 呼び出しで再スタートさせないため）
+        let (prev_music_id, prev_music_spec, prev_pending_len) = {
+            let bank = self.sound_bank.borrow();
+            let id = bank.current_music_id;
+            let spec = id.and_then(|i| bank.music.get(&i).map(|m| m.spec.clone()));
+            (id, spec, bank.pending_commands.len())
+        };
 
         let temp_tilemap = Rc::new(RefCell::new(new_tail_map));
         *self.draw_state.borrow_mut() = DrawState::default();
@@ -2685,6 +2790,7 @@ impl GameRuntime {
             self.draw_state.clone(),
             self.headless,
         );
+        register_sound_api(&mut new_vm, self.sound_bank.clone());
 
         new_vm
             .run()
@@ -2692,6 +2798,25 @@ impl GameRuntime {
 
         parse_ruby_sprites_global(&new_vm, &mut new_sprites_map, &self.emoji_atlas.borrow());
         parse_ruby_map_global(&new_vm, &mut temp_tilemap.borrow_mut());
+        sound::parse_ruby_sounds_globals(&new_vm, &mut new_sfx_map, &mut new_music_map);
+        {
+            let mut bank = self.sound_bank.borrow_mut();
+            // トップレベル実行中に積まれたサウンドコマンドは破棄し、BGM 状態を復元
+            bank.pending_commands.truncate(prev_pending_len);
+            bank.current_music_id = prev_music_id;
+            bank.update_definitions(new_sfx_map, new_music_map);
+            // 再生中 BGM の定義が書き換わっていたら新しい内容で再生し直す
+            if let Some(id) = prev_music_id {
+                let new_spec = bank.music.get(&id).map(|m| m.spec.clone());
+                if new_spec != prev_music_spec {
+                    if new_spec.is_some() {
+                        bank.queue_play_music(id, true, 1.0);
+                    } else {
+                        bank.queue_stop_music();
+                    }
+                }
+            }
+        }
         if !self.headless {
             for sprite in new_sprites_map.values_mut() {
                 sprite.build_texture();
@@ -2719,7 +2844,7 @@ impl GameRuntime {
 
         // 以前のVMから現在のグローバル変数を引き継ぐ
         for (name, live_val) in &self.vm.globals {
-            if name == "$SPRITES" || name == "$MAP" {
+            if matches!(name.as_str(), "$SPRITES" | "$MAP" | "$SFX" | "$MUSIC") {
                 continue;
             }
             let init_changed = match (
@@ -2758,6 +2883,25 @@ impl GameRuntime {
         if !self.headless {
             apply_gl_scissor(None);
         }
+    }
+
+    /// `@SFX` / `@MUSIC` 定義とプリセットのサウンドを事前ロードする（初回再生の遅延防止）
+    pub async fn preload_audio(&mut self) {
+        if self.headless {
+            return;
+        }
+        let bank = self.sound_bank.clone();
+        bank.borrow_mut().preload_all().await;
+    }
+
+    /// フレーム中に `sfx` / `music` で積まれたコマンドを実際に再生する
+    pub async fn process_audio(&mut self) {
+        if self.headless {
+            self.sound_bank.borrow_mut().pending_commands.clear();
+            return;
+        }
+        let bank = self.sound_bank.clone();
+        bank.borrow_mut().process_audio().await;
     }
 }
 
@@ -2848,6 +2992,7 @@ async fn run_native_with_hot_reload(
     };
 
     let (render_target, virtual_camera) = create_virtual_screen();
+    runtime.preload_audio().await;
     let mut last_source = initial_source;
     let mut last_modified = std::fs::metadata(&script_path)
         .and_then(|m| m.modified())
@@ -2874,6 +3019,7 @@ async fn run_native_with_hot_reload(
                         Ok((new_tail, new_mrb)) => {
                             match runtime.hot_reload(&new_tail, &new_mrb) {
                                 Ok(()) => {
+                                    runtime.preload_audio().await;
                                     println!("[uk run] Hot-reloaded `{}`", script_path.display());
                                     reload_banner_frames = 60;
                                 }
@@ -2899,6 +3045,7 @@ async fn run_native_with_hot_reload(
         }
 
         runtime.call_update();
+        runtime.process_audio().await;
 
         set_camera(&virtual_camera);
         runtime.call_draw();
@@ -2921,9 +3068,11 @@ async fn run_embedded_game(tail_data: String, mrb_bytes: Vec<u8>) {
     };
 
     let (render_target, virtual_camera) = create_virtual_screen();
+    runtime.preload_audio().await;
 
     loop {
         runtime.call_update();
+        runtime.process_audio().await;
 
         set_camera(&virtual_camera);
         runtime.call_draw();
@@ -3057,6 +3206,7 @@ async fn main() {
     let mut runtime = GameRuntime::new(&tail_data, &mrb_bytes, false)
         .expect("Failed to initialize WASM GameRuntime");
     let (render_target, virtual_camera) = create_virtual_screen();
+    runtime.preload_audio().await;
     let mut reload_banner_frames: u32 = 0;
 
     loop {
@@ -3067,6 +3217,7 @@ async fn main() {
             {
                 match runtime.hot_reload(&new_tail, &new_mrb) {
                     Ok(()) => {
+                        runtime.preload_audio().await;
                         reload_banner_frames = 60;
                     }
                     Err(e) => {
@@ -3077,6 +3228,7 @@ async fn main() {
         }
 
         runtime.call_update();
+        runtime.process_audio().await;
 
         set_camera(&virtual_camera);
         runtime.call_draw();
@@ -3626,6 +3778,88 @@ end
         assert_eq!(runtime.draw_state.borrow().cam_x, 0);
         assert_eq!(runtime.draw_state.borrow().cam_y, 0);
         assert_eq!(runtime.draw_state.borrow().clip, None);
+    }
+
+    #[test]
+    fn test_sound_example_script() {
+        let (_, tail_data, mrb_bytes) =
+            cli::compile_ruby_script_file(std::path::Path::new("examples/sound.rb"))
+                .expect("examples/sound.rb should compile");
+
+        let mut runtime =
+            GameRuntime::new(&tail_data, &mrb_bytes, true).expect("Example should initialize");
+        {
+            let bank = runtime.sound_bank.borrow();
+            for id in 0..4 {
+                assert!(bank.sfx.contains_key(&id), "@SFX {} should be parsed", id);
+                assert!(!bank.sfx[&id].pcm.is_empty());
+            }
+            assert!(bank.music.contains_key(&0), "@MUSIC 0 should be parsed");
+            // 約 4 小節 (T140) 以上の長さ
+            assert!(bank.music[&0].pcm.len() > sound::SAMPLE_RATE as usize * 4);
+        }
+        for _ in 0..5 {
+            runtime.call_update();
+            runtime.call_draw();
+        }
+    }
+
+    #[test]
+    fn test_sound_api_queues_commands() {
+        let src = r#"
+$SFX = ["square c2 e2 g2"]
+def update
+  sfx(0)
+  sfx(:jump, 2, 0.5)
+  sfx("tri c3")
+  stop_sfx(1)
+  music(0, false)
+  stop_music
+end
+def draw; end
+__END__
+@MUSIC 0
+ch0 T120 L4 O4 c d e f
+"#;
+        let (tail, mrb) = cli::compile_ruby_script_str(src).unwrap();
+        let mut runtime = GameRuntime::new(&tail, &mrb, true).unwrap();
+        assert!(runtime.sound_bank.borrow().sfx.contains_key(&0));
+        assert!(runtime.sound_bank.borrow().music.contains_key(&0));
+
+        runtime.call_update();
+        {
+            let bank = runtime.sound_bank.borrow();
+            use sound::AudioCommand::*;
+            assert_eq!(bank.pending_commands.len(), 6);
+            assert!(matches!(bank.pending_commands[0], PlaySfxId { id: 0, channel: -1, .. }));
+            assert!(matches!(
+                &bank.pending_commands[1],
+                PlaySfxInline { spec, channel: 2, .. } if spec == "jump"
+            ));
+            assert!(matches!(
+                &bank.pending_commands[2],
+                PlaySfxInline { spec, .. } if spec == "tri c3"
+            ));
+            assert!(matches!(bank.pending_commands[3], StopSfx { channel: 1 }));
+            assert!(matches!(bank.pending_commands[4], PlayMusic { id: 0, looped: false, .. }));
+            assert!(matches!(bank.pending_commands[5], StopMusic));
+            assert!(bank.inline_cache.contains_key("jump"));
+            assert!(bank.inline_cache.contains_key("tri c3"));
+        }
+    }
+
+    #[test]
+    fn test_sound_hot_reload_updates_definitions() {
+        let v1 = "def update; end\ndef draw; end\n__END__\n@SFX 0 c2 e2\n";
+        let v2 = "def update; end\ndef draw; end\n__END__\n@SFX 0 c2 e2 g2 c3\n@SFX 1 :coin\n";
+        let (tail1, mrb1) = cli::compile_ruby_script_str(v1).unwrap();
+        let (tail2, mrb2) = cli::compile_ruby_script_str(v2).unwrap();
+        let mut runtime = GameRuntime::new(&tail1, &mrb1, true).unwrap();
+        let len1 = runtime.sound_bank.borrow().sfx[&0].pcm.len();
+        runtime.hot_reload(&tail2, &mrb2).unwrap();
+        let bank = runtime.sound_bank.borrow();
+        assert!(bank.sfx[&0].pcm.len() > len1);
+        assert!(bank.sfx.contains_key(&1));
     }
 
     #[test]
