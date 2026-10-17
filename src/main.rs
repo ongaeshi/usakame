@@ -61,8 +61,32 @@ const PALETTE_RGBA: [[u8; 4]; 16] = [
     [255, 204, 170, 255],
 ];
 
+pub const DEFAULT_PAL_MAP: [u8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+
 fn palette_color(col: i32) -> Color {
     PALETTE[(col.rem_euclid(16)) as usize]
+}
+
+/// 指定した RGB 値に最も近い PICO-8 16色パレットのインデックス (`0..=15`) を返す
+pub fn nearest_palette_index(r: u8, g: u8, b: u8) -> usize {
+    for (idx, rgba) in PALETTE_RGBA.iter().enumerate() {
+        if rgba[0] == r && rgba[1] == g && rgba[2] == b {
+            return idx;
+        }
+    }
+    let mut best_idx = 0usize;
+    let mut best_dist = i32::MAX;
+    for (idx, rgba) in PALETTE_RGBA.iter().enumerate() {
+        let dr = r as i32 - rgba[0] as i32;
+        let dg = g as i32 - rgba[1] as i32;
+        let db = b as i32 - rgba[2] as i32;
+        let dist = dr * dr + dg * dg + db * db;
+        if dist < best_dist {
+            best_dist = dist;
+            best_idx = idx;
+        }
+    }
+    best_idx
 }
 
 // ==========================================
@@ -148,6 +172,8 @@ pub struct SpriteData {
     /// RGBA ピクセルデータ (width * height * 4 bytes)
     pub rgba: Vec<u8>,
     pub texture: Option<Texture2D>,
+    /// パレット置換・透過設定 `(pal_map, palt_mask)` ごとの変換済みテクスチャキャッシュ
+    pub pal_cache: RefCell<HashMap<([u8; 16], u16), Texture2D>>,
 }
 
 impl SpriteData {
@@ -157,6 +183,7 @@ impl SpriteData {
             height,
             rgba,
             texture: None,
+            pal_cache: RefCell::new(HashMap::new()),
         }
     }
 
@@ -190,6 +217,7 @@ impl SpriteData {
             height: height as u16,
             rgba,
             texture: None,
+            pal_cache: RefCell::new(HashMap::new()),
         }
     }
 
@@ -295,6 +323,61 @@ impl SpriteData {
         let texture = Texture2D::from_image(&image);
         texture.set_filter(FilterMode::Nearest);
         self.texture = Some(texture);
+        self.pal_cache.borrow_mut().clear();
+    }
+
+    /// パレット置換マップ `pal_map` と透過ビットマスク `palt_mask` を適用した RGBA ピクセル配列を生成する
+    pub fn apply_palette(&self, pal_map: &[u8; 16], palt_mask: u16) -> Vec<u8> {
+        if *pal_map == DEFAULT_PAL_MAP && palt_mask == 0 {
+            return self.rgba.clone();
+        }
+        let mut out = self.rgba.clone();
+        for px in out.chunks_exact_mut(4) {
+            if px[3] == 0 {
+                continue;
+            }
+            let src_idx = nearest_palette_index(px[0], px[1], px[2]);
+            if (palt_mask & (1 << src_idx)) != 0 {
+                px[0] = 0;
+                px[1] = 0;
+                px[2] = 0;
+                px[3] = 0;
+            } else {
+                let dst_idx = (pal_map[src_idx] & 0x0F) as usize;
+                if dst_idx != src_idx {
+                    let dst_rgba = PALETTE_RGBA[dst_idx];
+                    px[0] = dst_rgba[0];
+                    px[1] = dst_rgba[1];
+                    px[2] = dst_rgba[2];
+                }
+            }
+        }
+        out
+    }
+
+    /// パレット変換済みの `Texture2D` を取得またはオンデマンド生成してキャッシュから返す
+    pub fn get_or_build_pal_texture(&self, pal_map: &[u8; 16], palt_mask: u16) -> Option<Texture2D> {
+        if *pal_map == DEFAULT_PAL_MAP && palt_mask == 0 {
+            return self.texture.clone();
+        }
+        let key = (*pal_map, palt_mask);
+        if let Some(tex) = self.pal_cache.borrow().get(&key) {
+            return Some(tex.clone());
+        }
+        let transformed_rgba = self.apply_palette(pal_map, palt_mask);
+        let image = Image {
+            bytes: transformed_rgba,
+            width: self.width,
+            height: self.height,
+        };
+        let texture = Texture2D::from_image(&image);
+        texture.set_filter(FilterMode::Nearest);
+        let mut cache = self.pal_cache.borrow_mut();
+        if cache.len() >= 32 {
+            cache.clear();
+        }
+        cache.insert(key, texture.clone());
+        Some(texture)
     }
 }
 
@@ -921,6 +1004,7 @@ pub fn compute_sprite_draw_params(
 
 fn draw_sprite_transformed(
     sprite: &SpriteData,
+    state: &DrawState,
     x: f32,
     y: f32,
     flip_x: bool,
@@ -928,10 +1012,7 @@ fn draw_sprite_transformed(
     rotate_deg: f32,
     scale: f32,
 ) {
-    let Some(ref texture) = sprite.texture else {
-        return;
-    };
-    if let Some((draw_x, draw_y, params)) = compute_sprite_draw_params(
+    let Some((draw_x, draw_y, params)) = compute_sprite_draw_params(
         sprite.width as f32,
         sprite.height as f32,
         x,
@@ -940,8 +1021,15 @@ fn draw_sprite_transformed(
         flip_y,
         rotate_deg,
         scale,
-    ) {
-        draw_texture_ex(texture, draw_x, draw_y, WHITE, params);
+    ) else {
+        return;
+    };
+    if state.is_default_palette() {
+        if let Some(ref texture) = sprite.texture {
+            draw_texture_ex(texture, draw_x, draw_y, WHITE, params);
+        }
+    } else if let Some(texture) = sprite.get_or_build_pal_texture(&state.pal_map, state.palt_mask) {
+        draw_texture_ex(&texture, draw_x, draw_y, WHITE, params);
     }
 }
 
@@ -986,12 +1074,26 @@ pub fn intersect_screen_clip(x: i32, y: i32, w: i32, h: i32) -> PixelSpan {
     PixelSpan::new(x0, y0, (x1 - x0).max(0), (y1 - y0).max(0))
 }
 
-/// 描画ステート（カメラオフセットおよび画面クリッピング領域）
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// 描画ステート（カメラオフセット、画面クリッピング領域、カラーパレット置換・透過設定）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DrawState {
     pub cam_x: i32,
     pub cam_y: i32,
     pub clip: Option<PixelSpan>,
+    pub pal_map: [u8; 16],
+    pub palt_mask: u16,
+}
+
+impl Default for DrawState {
+    fn default() -> Self {
+        Self {
+            cam_x: 0,
+            cam_y: 0,
+            clip: None,
+            pal_map: DEFAULT_PAL_MAP,
+            palt_mask: 0,
+        }
+    }
 }
 
 impl DrawState {
@@ -1015,6 +1117,42 @@ impl DrawState {
 
     pub fn is_clip_empty(&self) -> bool {
         matches!(self.clip, Some(c) if c.w <= 0 || c.h <= 0)
+    }
+
+    pub fn set_pal(&mut self, c0: i32, c1: i32) {
+        let src = (c0.rem_euclid(16)) as usize;
+        let dst = (c1.rem_euclid(16)) as u8;
+        self.pal_map[src] = dst;
+    }
+
+    pub fn reset_pal(&mut self) {
+        self.pal_map = DEFAULT_PAL_MAP;
+    }
+
+    pub fn set_palt(&mut self, col: i32, transparent: bool) {
+        let idx = (col.rem_euclid(16)) as u16;
+        if transparent {
+            self.palt_mask |= 1 << idx;
+        } else {
+            self.palt_mask &= !(1 << idx);
+        }
+    }
+
+    pub fn reset_palt(&mut self) {
+        self.palt_mask = 0;
+    }
+
+    pub fn is_default_palette(&self) -> bool {
+        self.pal_map == DEFAULT_PAL_MAP && self.palt_mask == 0
+    }
+
+    pub fn map_color_index(&self, col: i32) -> usize {
+        let src = (col.rem_euclid(16)) as usize;
+        (self.pal_map[src] & 0x0F) as usize
+    }
+
+    pub fn map_color(&self, col: i32) -> Color {
+        PALETTE[self.map_color_index(col)]
     }
 
     /// ワールド座標系のスパン群にカメラオフセット `(-cam_x, -cam_y)` とクリッピング矩形 `clip` を適用する
@@ -1456,13 +1594,66 @@ fn register_engine_api(
         }),
     );
 
+    // pal(c0 = nil, c1 = nil): パレット色 c0 を c1 に置き換える（引数なしまたは nil でパレット置換と palt をリセット）
+    let state_for_pal = draw_state.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "pal",
+        Box::new(move |_vm, args| {
+            let mut state = state_for_pal.borrow_mut();
+            if args.is_empty() || matches!(args[0].value, RValue::Nil) {
+                state.reset_pal();
+                state.reset_palt();
+            } else if let RValue::Array(ref arr_cell) = args[0].value {
+                for (idx, item) in arr_cell.borrow().iter().take(16).enumerate() {
+                    let dst = match item.value {
+                        RValue::Integer(v) => v as i32,
+                        RValue::Float(v) => v as i32,
+                        _ => idx as i32,
+                    };
+                    state.set_pal(idx as i32, dst);
+                }
+            } else {
+                let c0 = arg_i32(args, 0, 0);
+                let c1 = arg_i32(args, 1, c0);
+                state.set_pal(c0, c1);
+            }
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
+
+    // palt(col = nil, t = false): スプライト描画時にパレット色 col を透明として扱うか設定（引数なしまたは nil でリセット）
+    let state_for_palt = draw_state.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "palt",
+        Box::new(move |_vm, args| {
+            let mut state = state_for_palt.borrow_mut();
+            if args.is_empty() || matches!(args[0].value, RValue::Nil) {
+                state.reset_palt();
+            } else {
+                let col = arg_i32(args, 0, 0);
+                let transparent = arg_bool(args, 1, true);
+                state.set_palt(col, transparent);
+            }
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
+
     if headless {
-        // ヘッドレステスト用スタブ登録 (図形ラスタライズ・カメラ・クリッピング計算および絵文字キャッシュ抽出も検証可能にする)
+        // ヘッドレステスト用スタブ登録 (図形ラスタライズ・カメラ・クリッピング・パレット変換および絵文字キャッシュ抽出も検証可能にする)
+        let state_for_cls = draw_state.clone();
         mrb_define_cmethod(
             vm,
             obj_class.clone(),
             "cls",
-            Box::new(|_vm, _args| Ok(Rc::new(RObject::nil()))),
+            Box::new(move |_vm, args| {
+                let col = arg_i32(args, 0, 0);
+                let _ = state_for_cls.borrow().map_color(col);
+                Ok(Rc::new(RObject::nil()))
+            }),
         );
         let state_for_pset = draw_state.clone();
         mrb_define_cmethod(
@@ -1472,9 +1663,10 @@ fn register_engine_api(
             Box::new(move |_vm, args| {
                 let x = arg_i32(args, 0, 0);
                 let y = arg_i32(args, 1, 0);
-                let _ = state_for_pset
-                    .borrow()
-                    .transform_and_clip_spans(&[PixelSpan::new(x, y, 1, 1)]);
+                let col = arg_i32(args, 2, 7);
+                let state = *state_for_pset.borrow();
+                let _ = state.map_color(col);
+                let _ = state.transform_and_clip_spans(&[PixelSpan::new(x, y, 1, 1)]);
                 Ok(Rc::new(RObject::nil()))
             }),
         );
@@ -1488,8 +1680,11 @@ fn register_engine_api(
                 let y0 = arg_i32(args, 1, 0);
                 let x1 = arg_i32(args, 2, 0);
                 let y1 = arg_i32(args, 3, 0);
+                let col = arg_i32(args, 4, 7);
                 let spans = rasterize_line(x0, y0, x1, y1);
-                let _ = state_for_line.borrow().transform_and_clip_spans(&spans);
+                let state = *state_for_line.borrow();
+                let _ = state.map_color(col);
+                let _ = state.transform_and_clip_spans(&spans);
                 Ok(Rc::new(RObject::nil()))
             }),
         );
@@ -1503,8 +1698,11 @@ fn register_engine_api(
                 let y = arg_i32(args, 1, 0);
                 let w = arg_i32(args, 2, 16);
                 let h = arg_i32(args, 3, 16);
+                let col = arg_i32(args, 4, 7);
                 let spans = rasterize_rect(x, y, w, h);
-                let _ = state_for_rect.borrow().transform_and_clip_spans(&spans);
+                let state = *state_for_rect.borrow();
+                let _ = state.map_color(col);
+                let _ = state.transform_and_clip_spans(&spans);
                 Ok(Rc::new(RObject::nil()))
             }),
         );
@@ -1518,8 +1716,11 @@ fn register_engine_api(
                 let y = arg_i32(args, 1, 0);
                 let w = arg_i32(args, 2, 16);
                 let h = arg_i32(args, 3, 16);
+                let col = arg_i32(args, 4, 7);
                 let spans = rasterize_rectfill(x, y, w, h);
-                let _ = state_for_rectfill.borrow().transform_and_clip_spans(&spans);
+                let state = *state_for_rectfill.borrow();
+                let _ = state.map_color(col);
+                let _ = state.transform_and_clip_spans(&spans);
                 Ok(Rc::new(RObject::nil()))
             }),
         );
@@ -1533,8 +1734,11 @@ fn register_engine_api(
                     let x = arg_i32(args, 0, 0);
                     let y = arg_i32(args, 1, 0);
                     let r = arg_i32(args, 2, 4);
+                    let col = arg_i32(args, 3, 7);
                     let spans = rasterize_circ(x, y, r);
-                    let _ = state_for_circ.borrow().transform_and_clip_spans(&spans);
+                    let state = *state_for_circ.borrow();
+                    let _ = state.map_color(col);
+                    let _ = state.transform_and_clip_spans(&spans);
                     Ok(Rc::new(RObject::nil()))
                 }),
             );
@@ -1549,8 +1753,11 @@ fn register_engine_api(
                     let x = arg_i32(args, 0, 0);
                     let y = arg_i32(args, 1, 0);
                     let r = arg_i32(args, 2, 4);
+                    let col = arg_i32(args, 3, 7);
                     let spans = rasterize_circfill(x, y, r);
-                    let _ = state_for_circfill.borrow().transform_and_clip_spans(&spans);
+                    let state = *state_for_circfill.borrow();
+                    let _ = state.map_color(col);
+                    let _ = state.transform_and_clip_spans(&spans);
                     Ok(Rc::new(RObject::nil()))
                 }),
             );
@@ -1566,8 +1773,11 @@ fn register_engine_api(
                     let y = arg_i32(args, 1, 0);
                     let rx = arg_i32(args, 2, 6);
                     let ry = arg_i32(args, 3, 4);
+                    let col = arg_i32(args, 4, 7);
                     let spans = rasterize_oval(x, y, rx, ry);
-                    let _ = state_for_oval.borrow().transform_and_clip_spans(&spans);
+                    let state = *state_for_oval.borrow();
+                    let _ = state.map_color(col);
+                    let _ = state.transform_and_clip_spans(&spans);
                     Ok(Rc::new(RObject::nil()))
                 }),
             );
@@ -1583,8 +1793,11 @@ fn register_engine_api(
                     let y = arg_i32(args, 1, 0);
                     let rx = arg_i32(args, 2, 6);
                     let ry = arg_i32(args, 3, 4);
+                    let col = arg_i32(args, 4, 7);
                     let spans = rasterize_ovalfill(x, y, rx, ry);
-                    let _ = state_for_ovalfill.borrow().transform_and_clip_spans(&spans);
+                    let state = *state_for_ovalfill.borrow();
+                    let _ = state.map_color(col);
+                    let _ = state.transform_and_clip_spans(&spans);
                     Ok(Rc::new(RObject::nil()))
                 }),
             );
@@ -1601,8 +1814,11 @@ fn register_engine_api(
                 let y1 = arg_i32(args, 3, 0);
                 let x2 = arg_i32(args, 4, 4);
                 let y2 = arg_i32(args, 5, 8);
+                let col = arg_i32(args, 6, 7);
                 let spans = rasterize_tri(x0, y0, x1, y1, x2, y2);
-                let _ = state_for_tri.borrow().transform_and_clip_spans(&spans);
+                let state = *state_for_tri.borrow();
+                let _ = state.map_color(col);
+                let _ = state.transform_and_clip_spans(&spans);
                 Ok(Rc::new(RObject::nil()))
             }),
         );
@@ -1618,8 +1834,11 @@ fn register_engine_api(
                 let y1 = arg_i32(args, 3, 0);
                 let x2 = arg_i32(args, 4, 4);
                 let y2 = arg_i32(args, 5, 8);
+                let col = arg_i32(args, 6, 7);
                 let spans = rasterize_trifill(x0, y0, x1, y1, x2, y2);
-                let _ = state_for_trifill.borrow().transform_and_clip_spans(&spans);
+                let state = *state_for_trifill.borrow();
+                let _ = state.map_color(col);
+                let _ = state.transform_and_clip_spans(&spans);
                 Ok(Rc::new(RObject::nil()))
             }),
         );
@@ -1630,9 +1849,12 @@ fn register_engine_api(
             obj_class.clone(),
             "print_text",
             Box::new(move |_vm, args| {
-                if state_for_headless_print.borrow().is_clip_empty() {
+                let state = *state_for_headless_print.borrow();
+                if state.is_clip_empty() {
                     return Ok(Rc::new(RObject::nil()));
                 }
+                let col = arg_i32(args, 3, 7);
+                let _ = state.map_color(col);
                 if let Some(first) = args.first()
                     && let Ok(text) = String::try_from(first.as_ref())
                 {
@@ -1670,6 +1892,9 @@ fn register_engine_api(
                     if matches!(first.value, RValue::String(_, _)) {
                         if let Ok(s) = String::try_from(first.as_ref()) {
                             if let Some(sp) = emoji_for_headless.borrow_mut().get_or_insert(&s, false) {
+                                if !state.is_default_palette() {
+                                    let _ = sp.apply_palette(&state.pal_map, state.palt_mask);
+                                }
                                 let _ = compute_sprite_draw_params(
                                     sp.width as f32,
                                     sp.height as f32,
@@ -1687,6 +1912,9 @@ fn register_engine_api(
                 }
                 let id = arg_i32(args, 0, 0);
                 if let Some(sp) = sprites_for_headless.borrow().get(&id) {
+                    if !state.is_default_palette() {
+                        let _ = sp.apply_palette(&state.pal_map, state.palt_mask);
+                    }
                     let _ = compute_sprite_draw_params(
                         sp.width as f32,
                         sp.height as f32,
@@ -1718,8 +1946,9 @@ fn register_engine_api(
         "cls",
         Box::new(move |_vm, args| {
             let col = arg_i32(args, 0, 0);
-            let color = palette_color(col);
-            if let Some(clip_rect) = state_for_cls.borrow().clip {
+            let state = *state_for_cls.borrow();
+            let color = state.map_color(col);
+            if let Some(clip_rect) = state.clip {
                 if clip_rect.w > 0 && clip_rect.h > 0 {
                     draw_rectangle(
                         clip_rect.x as f32,
@@ -1746,10 +1975,9 @@ fn register_engine_api(
             let x = arg_i32(args, 0, 0);
             let y = arg_i32(args, 1, 0);
             let col = arg_i32(args, 2, 7);
-            let spans = state_for_pset
-                .borrow()
-                .transform_and_clip_spans(&[PixelSpan::new(x, y, 1, 1)]);
-            draw_spans(&spans, palette_color(col));
+            let state = *state_for_pset.borrow();
+            let spans = state.transform_and_clip_spans(&[PixelSpan::new(x, y, 1, 1)]);
+            draw_spans(&spans, state.map_color(col));
             Ok(Rc::new(RObject::nil()))
         }),
     );
@@ -1767,8 +1995,9 @@ fn register_engine_api(
             let y1 = arg_i32(args, 3, 0);
             let col = arg_i32(args, 4, 7);
             let raw = rasterize_line(x0, y0, x1, y1);
-            let spans = state_for_line.borrow().transform_and_clip_spans(&raw);
-            draw_spans(&spans, palette_color(col));
+            let state = *state_for_line.borrow();
+            let spans = state.transform_and_clip_spans(&raw);
+            draw_spans(&spans, state.map_color(col));
             Ok(Rc::new(RObject::nil()))
         }),
     );
@@ -1786,8 +2015,9 @@ fn register_engine_api(
             let h = arg_i32(args, 3, 16);
             let col = arg_i32(args, 4, 7);
             let raw = rasterize_rect(x, y, w, h);
-            let spans = state_for_rect.borrow().transform_and_clip_spans(&raw);
-            draw_spans(&spans, palette_color(col));
+            let state = *state_for_rect.borrow();
+            let spans = state.transform_and_clip_spans(&raw);
+            draw_spans(&spans, state.map_color(col));
             Ok(Rc::new(RObject::nil()))
         }),
     );
@@ -1805,8 +2035,9 @@ fn register_engine_api(
             let h = arg_i32(args, 3, 16);
             let col = arg_i32(args, 4, 7);
             let raw = rasterize_rectfill(x, y, w, h);
-            let spans = state_for_rectfill.borrow().transform_and_clip_spans(&raw);
-            draw_spans(&spans, palette_color(col));
+            let state = *state_for_rectfill.borrow();
+            let spans = state.transform_and_clip_spans(&raw);
+            draw_spans(&spans, state.map_color(col));
             Ok(Rc::new(RObject::nil()))
         }),
     );
@@ -1824,8 +2055,9 @@ fn register_engine_api(
                 let r = arg_i32(args, 2, 4);
                 let col = arg_i32(args, 3, 7);
                 let raw = rasterize_circ(x, y, r);
-                let spans = state_for_circ.borrow().transform_and_clip_spans(&raw);
-                draw_spans(&spans, palette_color(col));
+                let state = *state_for_circ.borrow();
+                let spans = state.transform_and_clip_spans(&raw);
+                draw_spans(&spans, state.map_color(col));
                 Ok(Rc::new(RObject::nil()))
             }),
         );
@@ -1844,8 +2076,9 @@ fn register_engine_api(
                 let r = arg_i32(args, 2, 4);
                 let col = arg_i32(args, 3, 7);
                 let raw = rasterize_circfill(x, y, r);
-                let spans = state_for_circfill.borrow().transform_and_clip_spans(&raw);
-                draw_spans(&spans, palette_color(col));
+                let state = *state_for_circfill.borrow();
+                let spans = state.transform_and_clip_spans(&raw);
+                draw_spans(&spans, state.map_color(col));
                 Ok(Rc::new(RObject::nil()))
             }),
         );
@@ -1865,8 +2098,9 @@ fn register_engine_api(
                 let ry = arg_i32(args, 3, 4);
                 let col = arg_i32(args, 4, 7);
                 let raw = rasterize_oval(x, y, rx, ry);
-                let spans = state_for_oval.borrow().transform_and_clip_spans(&raw);
-                draw_spans(&spans, palette_color(col));
+                let state = *state_for_oval.borrow();
+                let spans = state.transform_and_clip_spans(&raw);
+                draw_spans(&spans, state.map_color(col));
                 Ok(Rc::new(RObject::nil()))
             }),
         );
@@ -1886,8 +2120,9 @@ fn register_engine_api(
                 let ry = arg_i32(args, 3, 4);
                 let col = arg_i32(args, 4, 7);
                 let raw = rasterize_ovalfill(x, y, rx, ry);
-                let spans = state_for_ovalfill.borrow().transform_and_clip_spans(&raw);
-                draw_spans(&spans, palette_color(col));
+                let state = *state_for_ovalfill.borrow();
+                let spans = state.transform_and_clip_spans(&raw);
+                draw_spans(&spans, state.map_color(col));
                 Ok(Rc::new(RObject::nil()))
             }),
         );
@@ -1908,8 +2143,9 @@ fn register_engine_api(
             let y2 = arg_i32(args, 5, 8);
             let col = arg_i32(args, 6, 7);
             let raw = rasterize_tri(x0, y0, x1, y1, x2, y2);
-            let spans = state_for_tri.borrow().transform_and_clip_spans(&raw);
-            draw_spans(&spans, palette_color(col));
+            let state = *state_for_tri.borrow();
+            let spans = state.transform_and_clip_spans(&raw);
+            draw_spans(&spans, state.map_color(col));
             Ok(Rc::new(RObject::nil()))
         }),
     );
@@ -1929,8 +2165,9 @@ fn register_engine_api(
             let y2 = arg_i32(args, 5, 8);
             let col = arg_i32(args, 6, 7);
             let raw = rasterize_trifill(x0, y0, x1, y1, x2, y2);
-            let spans = state_for_trifill.borrow().transform_and_clip_spans(&raw);
-            draw_spans(&spans, palette_color(col));
+            let state = *state_for_trifill.borrow();
+            let spans = state.transform_and_clip_spans(&raw);
+            draw_spans(&spans, state.map_color(col));
             Ok(Rc::new(RObject::nil()))
         }),
     );
@@ -1961,7 +2198,7 @@ fn register_engine_api(
             {
                 let mut atlas_ref = emoji_for_spr.borrow_mut();
                 if let Some(sprite) = atlas_ref.get_or_insert(&emoji_str, true) {
-                    draw_sprite_transformed(sprite, x, y, flip_x, flip_y, rotate, scale);
+                    draw_sprite_transformed(sprite, &state, x, y, flip_x, flip_y, rotate, scale);
                 }
                 return Ok(Rc::new(RObject::nil()));
             }
@@ -1969,7 +2206,7 @@ fn register_engine_api(
             let id = arg_i32(args, 0, 0);
             let sprites_ref = sprites_for_spr.borrow();
             if let Some(sprite) = sprites_ref.get(&id) {
-                draw_sprite_transformed(sprite, x, y, flip_x, flip_y, rotate, scale);
+                draw_sprite_transformed(sprite, &state, x, y, flip_x, flip_y, rotate, scale);
             }
             Ok(Rc::new(RObject::nil()))
         }),
@@ -2015,7 +2252,7 @@ fn register_engine_api(
             let x = (arg_i32(args, 1, 0).saturating_sub(state.cam_x)) as f32;
             let y = (arg_i32(args, 2, 0).saturating_sub(state.cam_y)) as f32;
             let col = arg_i32(args, 3, 7);
-            font_for_print.draw_text_crisp(&text, x, y, palette_color(col), &emoji_for_print);
+            font_for_print.draw_text_crisp(&text, x, y, state.map_color(col), &emoji_for_print);
             Ok(Rc::new(RObject::nil()))
         }),
     );
@@ -3156,5 +3393,104 @@ end
             runtime.call_draw();
         }
     }
+
+    #[test]
+    fn test_pal_and_palt_state_and_sprite_rgba() {
+        let mut state = DrawState::default();
+        assert!(state.is_default_palette());
+        assert_eq!(state.map_color_index(8), 8);
+
+        // pal(8, 12): 8 (Red) -> 12 (Blue)
+        state.set_pal(8, 12);
+        assert!(!state.is_default_palette());
+        assert_eq!(state.map_color_index(8), 12);
+        assert_eq!(state.map_color(8), PALETTE[12]);
+        // 負数・16以上のインデックスも mod 16 でラップアラウンド
+        state.set_pal(-8, 28); // -8 mod 16 == 8, 28 mod 16 == 12
+        assert_eq!(state.map_color_index(24), 12);
+
+        state.reset_pal();
+        assert!(state.is_default_palette());
+        assert_eq!(state.map_color_index(8), 8);
+
+        // palt(1, true): 色1を透過に設定
+        state.set_palt(1, true);
+        assert!(!state.is_default_palette());
+        assert_eq!(state.palt_mask, 1 << 1);
+        state.set_palt(1, false);
+        assert!(state.is_default_palette());
+
+        // スプライトの RGBA パレット置換 & 透過マスク検証
+        // (0,0)=1(Dark Blue), (1,0)=8(Red), (2,0)=0(Black), (3,0)='.'(Transparent)
+        let sp = SpriteData::from_lines(&["180."]);
+        let mut pal_map = DEFAULT_PAL_MAP;
+        pal_map[8] = 12; // Red -> Blue
+        let palt_mask = 1 << 1; // Dark Blue を透明化
+        let transformed = sp.apply_palette(&pal_map, palt_mask);
+
+        // (0,0): Dark Blue (1) -> palt により透明 [0, 0, 0, 0]
+        assert_eq!(&transformed[0..4], &[0, 0, 0, 0]);
+        // (1,0): Red (8) -> Blue (12)
+        assert_eq!(&transformed[4..8], &PALETTE_RGBA[12]);
+        // (2,0): Black (0) -> 不透明の黒のまま
+        assert_eq!(&transformed[8..12], &PALETTE_RGBA[0]);
+        // (3,0): 元から透明 '.' -> 透明のまま
+        assert_eq!(&transformed[12..16], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn test_pal_and_palt_in_ruby_script() {
+        let ruby_code = r#"
+$ok = false
+def update
+  pal(8, 12)
+  pal([0, 1, 2, 3, 4, 5, 6, 7, 12, 9, 10, 11, 8, 13, 14, 15])
+  palt(0, true)
+  palt(1, true)
+  palt(0, false)
+  $ok = true
+end
+def draw
+  cls(0)
+  rectfill(10, 10, 20, 20, 8)
+  oval(30, 30, 10, 6, 8)
+  spr(0, 16, 16)
+  spr("🐰", 32, 16)
+  print_text("PAL", 4, 4, 8)
+  pal()
+  palt()
+end
+__END__
+@SPRITE 0
+180.
+"#;
+        let (tail, mrb) =
+            cli::compile_ruby_script_str(ruby_code).expect("Ruby script should compile");
+        let mut runtime = GameRuntime::new(&tail, &mrb, true).expect("Runtime should init");
+        runtime.call_update();
+        runtime.call_draw();
+        let ok_obj = runtime.vm.globals.get("$ok").expect("$ok should exist");
+        assert_eq!(
+            bool::try_from(ok_obj.as_ref()).expect("$ok should be bool"),
+            true
+        );
+        assert!(runtime.draw_state.borrow().is_default_palette());
+    }
+
+    #[test]
+    fn test_pal_example_script() {
+        let (_, tail_data, mrb_bytes) =
+            cli::compile_ruby_script_file(std::path::Path::new("examples/pal.rb"))
+                .expect("examples/pal.rb should compile");
+
+        let mut runtime =
+            GameRuntime::new(&tail_data, &mrb_bytes, true).expect("Example should initialize");
+
+        for _ in 0..5 {
+            runtime.call_update();
+            runtime.call_draw();
+        }
+    }
 }
+
 
