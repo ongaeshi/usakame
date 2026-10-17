@@ -552,6 +552,8 @@ pub fn parse_tail_resources(data_section: &str) -> HashMap<i32, SpriteData> {
                     current_kind = Some(ResourceBlockKind::TextSprite(id));
                 }
             }
+        } else if line.starts_with('@') {
+            flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites);
         } else if current_kind.is_some() {
             current_lines.push(line.to_string());
         }
@@ -559,6 +561,147 @@ pub fn parse_tail_resources(data_section: &str) -> HashMap<i32, SpriteData> {
 
     flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites);
     sprites
+}
+
+/// タイルマップ管理構造体（1セル = 16x16 スプライト番号、`0` は空タイル）
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Tilemap {
+    pub cells: HashMap<(i32, i32), i32>,
+    pub width: i32,
+    pub height: i32,
+}
+
+fn parse_map_tile_token(tok: &str) -> i32 {
+    if matches!(tok, "." | ".." | "_" | "-") {
+        return 0;
+    }
+    if let Some(hex) = tok.strip_prefix("0x").or_else(|| tok.strip_prefix("0X")) {
+        return i32::from_str_radix(hex, 16).unwrap_or(0);
+    }
+    if let Ok(v) = tok.parse::<i32>() {
+        return v;
+    }
+    i32::from_str_radix(tok, 16).unwrap_or(0)
+}
+
+impl Tilemap {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn get(&self, x: i32, y: i32) -> i32 {
+        self.cells.get(&(x, y)).copied().unwrap_or(0)
+    }
+
+    pub fn set(&mut self, x: i32, y: i32, val: i32) {
+        if val == 0 {
+            self.cells.remove(&(x, y));
+        } else {
+            self.cells.insert((x, y), val);
+        }
+        if x >= 0 && x + 1 > self.width {
+            self.width = x + 1;
+        }
+        if y >= 0 && y + 1 > self.height {
+            self.height = y + 1;
+        }
+    }
+
+    /// 1行分のテキスト（空白・カンマ区切りトークン、または1文字1タイルの16進文字列 `0`..`F`/`.`）を行 `y` に反映する
+    pub fn parse_row_line(&mut self, start_x: i32, y: i32, line: &str) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            return;
+        }
+        if trimmed.contains(|c: char| c.is_ascii_whitespace() || c == ',') {
+            let mut x = start_x;
+            for token in trimmed.split(|c: char| c.is_ascii_whitespace() || c == ',') {
+                let tok = token.trim();
+                if tok.is_empty() {
+                    continue;
+                }
+                self.set(x, y, parse_map_tile_token(tok));
+                x += 1;
+            }
+        } else {
+            for (dx, ch) in trimmed.chars().enumerate() {
+                let val = match ch {
+                    '.' | '_' | '-' => 0,
+                    c if c.is_ascii_hexdigit() => c.to_digit(16).unwrap_or(0) as i32,
+                    _ => 0,
+                };
+                self.set(start_x + dx as i32, y, val);
+            }
+        }
+    }
+}
+
+/// `__END__` 以降の `@MAP [offset_x] [offset_y]` セクションをパースして `Tilemap` を生成する
+pub fn parse_tail_map(data_section: &str) -> Tilemap {
+    let mut tilemap = Tilemap::new();
+    let mut in_map = false;
+    let mut offset_x = 0i32;
+    let mut cur_y = 0i32;
+
+    for raw_line in data_section.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        if let Some(rest) = line.strip_prefix("@MAP")
+            && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+        {
+            in_map = true;
+            let mut parts = rest.split_whitespace();
+            offset_x = parts
+                .next()
+                .and_then(|s| s.parse::<i32>().ok())
+                .unwrap_or(0);
+            cur_y = parts
+                .next()
+                .and_then(|s| s.parse::<i32>().ok())
+                .unwrap_or(0);
+        } else if line.starts_with('@') {
+            in_map = false;
+        } else if in_map {
+            tilemap.parse_row_line(offset_x, cur_y, line);
+            cur_y += 1;
+        }
+    }
+
+    tilemap
+}
+
+/// Rubyグローバル変数 `$MAP`（文字列配列または2次元整数配列）から `Tilemap` に反映する
+pub fn parse_ruby_map_global(vm: &VM, tilemap: &mut Tilemap) {
+    let Some(map_obj) = vm.globals.get("$MAP") else {
+        return;
+    };
+    let RValue::Array(ref rows_cell) = map_obj.value else {
+        return;
+    };
+
+    for (y, row_item) in rows_cell.borrow().iter().enumerate() {
+        match &row_item.value {
+            RValue::String(_, _) => {
+                if let Ok(line) = String::try_from(row_item.as_ref()) {
+                    tilemap.parse_row_line(0, y as i32, &line);
+                }
+            }
+            RValue::Array(cols_cell) => {
+                for (x, cell_item) in cols_cell.borrow().iter().enumerate() {
+                    let val = match cell_item.value {
+                        RValue::Integer(v) => v as i32,
+                        RValue::Float(v) => v as i32,
+                        _ => 0,
+                    };
+                    tilemap.set(x as i32, y as i32, val);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Rubyオブジェクトの2次元配列または文字列配列 (`$SPRITES`) からスプライトをパースする
@@ -1549,6 +1692,7 @@ pub fn rasterize_trifill(x0: i32, y0: i32, x1: i32, y1: i32, x2: i32, y2: i32) -
 fn register_engine_api(
     vm: &mut VM,
     sprites: Rc<RefCell<HashMap<i32, SpriteData>>>,
+    tilemap: Rc<RefCell<Tilemap>>,
     emoji_atlas: Rc<RefCell<emoji::EmojiAtlas>>,
     bitmap_font: Rc<BitmapFont>,
     draw_state: Rc<RefCell<DrawState>>,
@@ -1638,6 +1782,35 @@ fn register_engine_api(
                 let transparent = arg_bool(args, 1, true);
                 state.set_palt(col, transparent);
             }
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
+
+    // mget(cel_x = 0, cel_y = 0): タイルマップ上のセル (cel_x, cel_y) のタイル番号を取得（未設定は 0）
+    let map_for_mget = tilemap.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "mget",
+        Box::new(move |_vm, args| {
+            let cx = arg_i32(args, 0, 0);
+            let cy = arg_i32(args, 1, 0);
+            let val = map_for_mget.borrow().get(cx, cy);
+            Ok(Rc::new(RObject::integer(val as i64)))
+        }),
+    );
+
+    // mset(cel_x = 0, cel_y = 0, val = 0): タイルマップ上のセル (cel_x, cel_y) にタイル番号 val を設定
+    let map_for_mset = tilemap.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "mset",
+        Box::new(move |_vm, args| {
+            let cx = arg_i32(args, 0, 0);
+            let cy = arg_i32(args, 1, 0);
+            let val = arg_i32(args, 2, 0);
+            map_for_mset.borrow_mut().set(cx, cy, val);
             Ok(Rc::new(RObject::nil()))
         }),
     );
@@ -1929,6 +2102,66 @@ fn register_engine_api(
                 Ok(Rc::new(RObject::nil()))
             }),
         );
+        let sprites_for_headless_map = sprites.clone();
+        let map_for_headless = tilemap.clone();
+        let state_for_headless_map = draw_state.clone();
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            "map",
+            Box::new(move |_vm, args| {
+                let state = *state_for_headless_map.borrow();
+                if state.is_clip_empty() {
+                    return Ok(Rc::new(RObject::nil()));
+                }
+                let tmap = map_for_headless.borrow();
+                let cel_x = arg_i32(args, 0, 0);
+                let cel_y = arg_i32(args, 1, 0);
+                let sx = arg_i32(args, 2, 0);
+                let sy = arg_i32(args, 3, 0);
+                let cel_w = arg_i32(args, 4, tmap.width.max(16));
+                let cel_h = arg_i32(args, 5, tmap.height.max(16));
+                if cel_w <= 0 || cel_h <= 0 {
+                    return Ok(Rc::new(RObject::nil()));
+                }
+                let sprites_ref = sprites_for_headless_map.borrow();
+                for dy in 0..cel_h {
+                    for dx in 0..cel_w {
+                        let tile_id = tmap.get(cel_x + dx, cel_y + dy);
+                        if tile_id <= 0 {
+                            continue;
+                        }
+                        if let Some(sp) = sprites_ref.get(&tile_id) {
+                            let draw_x =
+                                (sx + dx * SPRITE_SIZE as i32 - state.cam_x) as f32;
+                            let draw_y =
+                                (sy + dy * SPRITE_SIZE as i32 - state.cam_y) as f32;
+                            if draw_x + sp.width as f32 <= 0.0
+                                || draw_x >= SCREEN_WIDTH as f32
+                                || draw_y + sp.height as f32 <= 0.0
+                                || draw_y >= SCREEN_HEIGHT as f32
+                            {
+                                continue;
+                            }
+                            if !state.is_default_palette() {
+                                let _ = sp.apply_palette(&state.pal_map, state.palt_mask);
+                            }
+                            let _ = compute_sprite_draw_params(
+                                sp.width as f32,
+                                sp.height as f32,
+                                draw_x,
+                                draw_y,
+                                false,
+                                false,
+                                0.0,
+                                1.0,
+                            );
+                        }
+                    }
+                }
+                Ok(Rc::new(RObject::nil()))
+            }),
+        );
         mrb_define_cmethod(
             vm,
             obj_class,
@@ -2212,6 +2445,56 @@ fn register_engine_api(
         }),
     );
 
+    // map(cel_x = 0, cel_y = 0, sx = 0, sy = 0, cel_w = map.width, cel_h = map.height): タイルマップを描画（0は空タイル）
+    let sprites_for_map = sprites.clone();
+    let map_for_draw = tilemap.clone();
+    let state_for_map = draw_state.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "map",
+        Box::new(move |_vm, args| {
+            let state = *state_for_map.borrow();
+            if state.is_clip_empty() {
+                return Ok(Rc::new(RObject::nil()));
+            }
+            let tmap = map_for_draw.borrow();
+            let cel_x = arg_i32(args, 0, 0);
+            let cel_y = arg_i32(args, 1, 0);
+            let sx = arg_i32(args, 2, 0);
+            let sy = arg_i32(args, 3, 0);
+            let cel_w = arg_i32(args, 4, tmap.width.max(16));
+            let cel_h = arg_i32(args, 5, tmap.height.max(16));
+            if cel_w <= 0 || cel_h <= 0 {
+                return Ok(Rc::new(RObject::nil()));
+            }
+            let sprites_ref = sprites_for_map.borrow();
+            for dy in 0..cel_h {
+                for dx in 0..cel_w {
+                    let tile_id = tmap.get(cel_x + dx, cel_y + dy);
+                    if tile_id <= 0 {
+                        continue;
+                    }
+                    if let Some(sprite) = sprites_ref.get(&tile_id) {
+                        let draw_x = (sx + dx * SPRITE_SIZE as i32 - state.cam_x) as f32;
+                        let draw_y = (sy + dy * SPRITE_SIZE as i32 - state.cam_y) as f32;
+                        if draw_x + sprite.width as f32 <= 0.0
+                            || draw_x >= SCREEN_WIDTH as f32
+                            || draw_y + sprite.height as f32 <= 0.0
+                            || draw_y >= SCREEN_HEIGHT as f32
+                        {
+                            continue;
+                        }
+                        draw_sprite_transformed(
+                            sprite, &state, draw_x, draw_y, false, false, 0.0, 1.0,
+                        );
+                    }
+                }
+            }
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
+
     // btn(id): ボタン入力判定 (0:左, 1:右, 2:上, 3:下, 4:Z/Space, 5:X/Enter)
     mrb_define_cmethod(
         vm,
@@ -2319,28 +2602,33 @@ fn snapshot_globals(vm: &VM) -> HashMap<String, Rc<RObject>> {
 pub struct GameRuntime {
     pub vm: VM,
     pub sprites: Rc<RefCell<HashMap<i32, SpriteData>>>,
+    pub tilemap: Rc<RefCell<Tilemap>>,
     pub emoji_atlas: Rc<RefCell<emoji::EmojiAtlas>>,
     pub bitmap_font: Rc<BitmapFont>,
     pub draw_state: Rc<RefCell<DrawState>>,
     initial_globals: HashMap<String, Rc<RObject>>,
+    initial_tail_map: Tilemap,
     headless: bool,
 }
 
 impl GameRuntime {
     pub fn new(tail_data: &str, mrb_bytes: &[u8], headless: bool) -> Result<Self, String> {
         let mut sprites_map = parse_tail_resources(tail_data);
+        let tail_map = parse_tail_map(tail_data);
 
         let mut rite =
             rite::load(mrb_bytes).map_err(|e| format!("Failed to load RITE(.mrb): {:?}", e))?;
         let mut vm = VM::open(&mut rite);
 
         let sprites = Rc::new(RefCell::new(HashMap::new()));
+        let tilemap = Rc::new(RefCell::new(tail_map.clone()));
         let emoji_atlas = Rc::new(RefCell::new(emoji::EmojiAtlas::new()));
         let bitmap_font = Rc::new(BitmapFont::new(!headless));
         let draw_state = Rc::new(RefCell::new(DrawState::default()));
         register_engine_api(
             &mut vm,
             sprites.clone(),
+            tilemap.clone(),
             emoji_atlas.clone(),
             bitmap_font.clone(),
             draw_state.clone(),
@@ -2351,6 +2639,7 @@ impl GameRuntime {
             .map_err(|e| format!("Failed to run top-level Ruby script: {:?}", e))?;
 
         parse_ruby_sprites_global(&vm, &mut sprites_map, &emoji_atlas.borrow());
+        parse_ruby_map_global(&vm, &mut tilemap.borrow_mut());
         if !headless {
             for sprite in sprites_map.values_mut() {
                 sprite.build_texture();
@@ -2359,32 +2648,38 @@ impl GameRuntime {
         *sprites.borrow_mut() = sprites_map;
 
         let initial_globals = snapshot_globals(&vm);
+        let initial_tail_map = tilemap.borrow().clone();
 
         Ok(Self {
             vm,
             sprites,
+            tilemap,
             emoji_atlas,
             bitmap_font,
             draw_state,
             initial_globals,
+            initial_tail_map,
             headless,
         })
     }
 
-    /// グローバル変数（`$x`, `$y`, `$t` 等）の実行時状態を維持したまま、
-    /// メソッド定義とスプライト定義をホットリロードする。
-    /// ただしスクリプト上のトップレベル初期値自体が書き換えられた変数は新しい初期値を採用する。
+    /// グローバル変数（`$x`, `$y`, `$t` 等）や実行時タイルマップの操作状態を維持したまま、
+    /// メソッド定義とスプライト・マップ定義をホットリロードする。
+    /// ただしスクリプト上のトップレベル初期値や `@MAP` 自体が書き換えられた場合は新しい定義を採用する。
     pub fn hot_reload(&mut self, new_tail_data: &str, new_mrb_bytes: &[u8]) -> Result<(), String> {
         let mut new_sprites_map = parse_tail_resources(new_tail_data);
+        let new_tail_map = parse_tail_map(new_tail_data);
 
         let mut new_rite = rite::load(new_mrb_bytes)
             .map_err(|e| format!("Failed to load RITE(.mrb) on reload: {:?}", e))?;
         let mut new_vm = VM::open(&mut new_rite);
 
+        let temp_tilemap = Rc::new(RefCell::new(new_tail_map));
         *self.draw_state.borrow_mut() = DrawState::default();
         register_engine_api(
             &mut new_vm,
             self.sprites.clone(),
+            temp_tilemap.clone(),
             self.emoji_atlas.clone(),
             self.bitmap_font.clone(),
             self.draw_state.clone(),
@@ -2396,6 +2691,7 @@ impl GameRuntime {
             .map_err(|e| format!("Ruby top-level error on reload: {:?}", e))?;
 
         parse_ruby_sprites_global(&new_vm, &mut new_sprites_map, &self.emoji_atlas.borrow());
+        parse_ruby_map_global(&new_vm, &mut temp_tilemap.borrow_mut());
         if !self.headless {
             for sprite in new_sprites_map.values_mut() {
                 sprite.build_texture();
@@ -2403,11 +2699,27 @@ impl GameRuntime {
         }
         *self.sprites.borrow_mut() = new_sprites_map;
 
+        let new_initial_map = temp_tilemap.borrow().clone();
+        if new_initial_map != self.initial_tail_map {
+            *self.tilemap.borrow_mut() = new_initial_map.clone();
+            self.initial_tail_map = new_initial_map;
+        }
+        // 新VMの mget / mset / map が self.tilemap を参照するように再登録
+        register_engine_api(
+            &mut new_vm,
+            self.sprites.clone(),
+            self.tilemap.clone(),
+            self.emoji_atlas.clone(),
+            self.bitmap_font.clone(),
+            self.draw_state.clone(),
+            self.headless,
+        );
+
         let new_initial_globals = snapshot_globals(&new_vm);
 
         // 以前のVMから現在のグローバル変数を引き継ぐ
         for (name, live_val) in &self.vm.globals {
-            if name == "$SPRITES" {
+            if name == "$SPRITES" || name == "$MAP" {
                 continue;
             }
             let init_changed = match (
@@ -3491,6 +3803,142 @@ __END__
             runtime.call_draw();
         }
     }
+
+    #[test]
+    fn test_tilemap_parse_and_mget_mset() {
+        let data = r#"
+@SPRITE 1 🌲
+@SPRITE 2 🍎
+@MAP 0 0
+1.2a
+1 0 12 0x1F
+@MAP 10 5
+3,4,.,7
+"#;
+        let sprites = parse_tail_resources(data);
+        assert!(sprites.contains_key(&1));
+        assert!(sprites.contains_key(&2));
+
+        let mut tmap = parse_tail_map(data);
+        // Row 0 (compact hex mode): '1'->1, '.'->0, '2'->2, 'a'->10
+        assert_eq!(tmap.get(0, 0), 1);
+        assert_eq!(tmap.get(1, 0), 0);
+        assert_eq!(tmap.get(2, 0), 2);
+        assert_eq!(tmap.get(3, 0), 10);
+        // Row 1 (space-separated mode): 1, 0, 12, 31
+        assert_eq!(tmap.get(0, 1), 1);
+        assert_eq!(tmap.get(1, 1), 0);
+        assert_eq!(tmap.get(2, 1), 12);
+        assert_eq!(tmap.get(3, 1), 31);
+        // Second @MAP block at offset (10, 5): 3, 4, 0, 7
+        assert_eq!(tmap.get(10, 5), 3);
+        assert_eq!(tmap.get(11, 5), 4);
+        assert_eq!(tmap.get(12, 5), 0);
+        assert_eq!(tmap.get(13, 5), 7);
+        assert_eq!(tmap.width, 14);
+        assert_eq!(tmap.height, 6);
+
+        // mset で書き換え・0消去確認
+        tmap.set(1, 0, 99);
+        assert_eq!(tmap.get(1, 0), 99);
+        tmap.set(1, 0, 0);
+        assert_eq!(tmap.get(1, 0), 0);
+        assert!(!tmap.cells.contains_key(&(1, 0)));
+    }
+
+    #[test]
+    fn test_map_mget_mset_in_ruby_script_and_hot_reload() {
+        let script_v1 = r#"
+$tile_at_2_0 = 0
+def update
+  $tile_at_2_0 = mget(2, 0)
+  mset(2, 0, 0)
+  mset(5, 3, 2)
+end
+def draw
+  cls(0)
+  map(0, 0, 0, 0, 8, 4)
+end
+__END__
+@SPRITE 1 🌲
+@SPRITE 2 🍎
+@MAP 0 0
+11211111
+1......1
+"#;
+        let (tail_v1, mrb_v1) = cli::compile_ruby_script_str(script_v1).unwrap();
+        let mut runtime = GameRuntime::new(&tail_v1, &mrb_v1, true).unwrap();
+        runtime.call_update();
+        runtime.call_draw();
+
+        let read_val: i32 = runtime
+            .vm
+            .globals
+            .get("$tile_at_2_0")
+            .unwrap()
+            .as_ref()
+            .try_into()
+            .unwrap();
+        assert_eq!(read_val, 2);
+        assert_eq!(runtime.tilemap.borrow().get(2, 0), 0);
+        assert_eq!(runtime.tilemap.borrow().get(5, 3), 2);
+
+        // @MAP を変更せずにコードだけホットリロードした場合、実行時の mset 変更が維持されること
+        let script_v2 = r#"
+$tile_at_2_0 = 0
+def update
+  $tile_at_2_0 = mget(5, 3)
+end
+def draw
+  map()
+end
+__END__
+@SPRITE 1 🌲
+@SPRITE 2 🍎
+@MAP 0 0
+11211111
+1......1
+"#;
+        let (tail_v2, mrb_v2) = cli::compile_ruby_script_str(script_v2).unwrap();
+        runtime.hot_reload(&tail_v2, &mrb_v2).unwrap();
+        assert_eq!(runtime.tilemap.borrow().get(2, 0), 0);
+        assert_eq!(runtime.tilemap.borrow().get(5, 3), 2);
+
+        // @MAP 自体を編集してホットリロードした場合、新しい @MAP が反映されること
+        let script_v3 = r#"
+$tile_at_2_0 = 0
+def update
+end
+def draw
+  map()
+end
+__END__
+@SPRITE 1 🌲
+@SPRITE 2 🍎
+@MAP 0 0
+22222222
+"#;
+        let (tail_v3, mrb_v3) = cli::compile_ruby_script_str(script_v3).unwrap();
+        runtime.hot_reload(&tail_v3, &mrb_v3).unwrap();
+        assert_eq!(runtime.tilemap.borrow().get(2, 0), 2);
+        assert_eq!(runtime.tilemap.borrow().get(5, 3), 0);
+    }
+
+    #[test]
+    fn test_tilemap_example_script() {
+        let (_, tail_data, mrb_bytes) =
+            cli::compile_ruby_script_file(std::path::Path::new("examples/tilemap.rb"))
+                .expect("examples/tilemap.rb should compile");
+
+        let mut runtime =
+            GameRuntime::new(&tail_data, &mrb_bytes, true).expect("Example should initialize");
+
+        for _ in 0..5 {
+            runtime.call_update();
+            runtime.call_draw();
+        }
+    }
 }
+
 
 
