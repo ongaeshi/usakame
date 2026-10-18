@@ -4770,7 +4770,24 @@ end
         mrb_funcall(&mut runtime.vm, None, "run_full_sim", &[])
             .expect("Full simulation of USAKAME SURVIVORS should succeed without any Ruby error");
     }
+
+    #[test]
+    fn test_demo_example_script() {
+        let (_, tail_data, mrb_bytes) =
+            cli::compile_ruby_script_file(std::path::Path::new("examples/demo.rb"))
+                .expect("examples/demo.rb should compile");
+
+        let mut runtime =
+            GameRuntime::new(&tail_data, &mrb_bytes, true).expect("examples/demo.rb should initialize");
+
+        // 登場歩行 -> 全会話 -> 暗転完了まで 3500 フレーム回して完走を検証
+        for _ in 0..3500 {
+            runtime.call_update();
+            runtime.call_draw();
+        }
+    }
 }
+
 
 
 
