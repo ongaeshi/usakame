@@ -122,3 +122,23 @@ pub fn read_bundle_from_current_exe() -> Option<(String, Vec<u8>)> {
     let exe_path = std::env::current_exe().ok()?;
     read_bundle_from_file(&exe_path)
 }
+
+/// Ruby スクリプト全体を行単位で走査し、独立した行にある `__END__` を境界として
+/// `(ruby_code, tail_data)` に分割する。
+/// コメント行や文字列リテラル内に `__END__` という文字列が含まれていても誤検知しない。
+pub fn split_ruby_source_and_tail(full_source: &str) -> (&str, &str) {
+    let mut byte_offset = 0;
+    for line in full_source.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed == "__END__"
+            || (trimmed.starts_with("__END__")
+                && trimmed[7..].chars().all(|c| c.is_whitespace() || c == '#'))
+        {
+            let code_part = &full_source[..byte_offset];
+            let tail_part = &full_source[byte_offset + line.len()..];
+            return (code_part, tail_part);
+        }
+        byte_offset += line.len();
+    }
+    (full_source, "")
+}

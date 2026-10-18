@@ -1900,6 +1900,60 @@ fn register_engine_api(
 ) {
     let obj_class = vm.object_class.clone();
 
+    // 組み込みクラス拡張: ! 演算子 (FalseClass, NilClass, TrueClass, Object)
+    if let Some(false_class) = vm.builtin_class_table.get("FalseClass").cloned() {
+        mrb_define_cmethod(
+            vm,
+            false_class,
+            "!",
+            Box::new(|_vm, _args| Ok(Rc::new(RObject::boolean(true)))),
+        );
+    }
+    if let Some(nil_class) = vm.builtin_class_table.get("NilClass").cloned() {
+        mrb_define_cmethod(
+            vm,
+            nil_class,
+            "!",
+            Box::new(|_vm, _args| Ok(Rc::new(RObject::boolean(true)))),
+        );
+    }
+    if let Some(true_class) = vm.builtin_class_table.get("TrueClass").cloned() {
+        mrb_define_cmethod(
+            vm,
+            true_class,
+            "!",
+            Box::new(|_vm, _args| Ok(Rc::new(RObject::boolean(false)))),
+        );
+    }
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "!",
+        Box::new(|_vm, _args| Ok(Rc::new(RObject::boolean(false)))),
+    );
+
+    // Symbol#upcase, Symbol#downcase
+    if let Some(sym_class) = vm.builtin_class_table.get("Symbol").cloned() {
+        mrb_define_cmethod(
+            vm,
+            sym_class.clone(),
+            "upcase",
+            Box::new(|vm, _args| {
+                let s: String = vm.getself()?.as_ref().try_into()?;
+                Ok(Rc::new(RObject::string(s.to_uppercase())))
+            }),
+        );
+        mrb_define_cmethod(
+            vm,
+            sym_class,
+            "downcase",
+            Box::new(|vm, _args| {
+                let s: String = vm.getself()?.as_ref().try_into()?;
+                Ok(Rc::new(RObject::string(s.to_lowercase())))
+            }),
+        );
+    }
+
     // camera(x = 0, y = 0): カメラオフセットを設定（引数なしで (0, 0) にリセット）
     let state_for_cam = draw_state.clone();
     mrb_define_cmethod(
@@ -3383,20 +3437,12 @@ async fn main() {
     // `uk browser` サーバーから配信される `/__uk_bundle.bin` を優先取得し、無ければ埋め込みデータへフォールバック
     let (tail_data, mrb_bytes) = match macroquad::file::load_file("__uk_bundle.bin").await {
         Ok(bytes) => bundle::unpack_bundle_from_bytes(&bytes).unwrap_or_else(|| {
-            let tail = EMBEDDED_SOURCE
-                .splitn(2, "__END__")
-                .nth(1)
-                .unwrap_or("")
-                .to_string();
-            (tail, EMBEDDED_MRB.to_vec())
+            let (_, tail) = bundle::split_ruby_source_and_tail(EMBEDDED_SOURCE);
+            (tail.to_string(), EMBEDDED_MRB.to_vec())
         }),
         Err(_) => {
-            let tail = EMBEDDED_SOURCE
-                .splitn(2, "__END__")
-                .nth(1)
-                .unwrap_or("")
-                .to_string();
-            (tail, EMBEDDED_MRB.to_vec())
+            let (_, tail) = bundle::split_ruby_source_and_tail(EMBEDDED_SOURCE);
+            (tail.to_string(), EMBEDDED_MRB.to_vec())
         }
     };
 
@@ -3489,6 +3535,28 @@ mod tests {
         assert_eq!(parse_button_name("mouse_r"), Some(ButtonId::MouseRight));
         assert_eq!(parse_button_name("mouse_m"), Some(ButtonId::MouseMiddle));
         assert_eq!(parse_button_name("invalid"), None);
+    }
+
+    #[test]
+    fn test_split_ruby_source_and_tail() {
+        // コメント内に __END__ が含まれていても誤検知せず、独立した行の __END__ を正しく認識する
+        let source_with_comment = r#"# サウンドはすべてこのスクリプト内（__END__ 以降の @SFX / @MUSIC）で定義されています。
+def update; end
+def draw; end
+__END__
+@SFX 0 c2 e2 g2
+"#;
+        let (code, tail) = bundle::split_ruby_source_and_tail(source_with_comment);
+        assert!(code.contains("def update; end"));
+        assert!(code.contains("def draw; end"));
+        assert!(!code.contains("c2 e2 g2"));
+        assert!(tail.contains("@SFX 0 c2 e2 g2"));
+
+        // __END__ が存在しない場合
+        let source_no_end = "def update; end\ndef draw; end\n";
+        let (code, tail) = bundle::split_ruby_source_and_tail(source_no_end);
+        assert_eq!(code, source_no_end);
+        assert_eq!(tail, "");
     }
 
     #[test]
@@ -4635,9 +4703,10 @@ __END__
         }
 
         // 2. ゲーム開始・全武器解禁・全敵スポーン・スキル・タッグ切替・描画の総合検証スクリプトを実行
+        let (code_prefix, _) = bundle::split_ruby_source_and_tail(&full_src);
         let sim_driver = format!(
             "{}\n{}",
-            full_src.split("__END__").next().unwrap(),
+            code_prefix,
             r#"
 def run_full_sim
   start_new_game

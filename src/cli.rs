@@ -348,9 +348,8 @@ pub fn cmd_encode(
 
 /// Ruby スクリプト文字列（`__END__` 区切り対応）をコンパイルし `(tail_data, mrb_bytes)` を返す。
 pub fn compile_ruby_script_str(full_source: &str) -> Result<(String, Vec<u8>), String> {
-    let mut parts = full_source.splitn(2, "__END__");
-    let ruby_code = parts.next().unwrap_or("");
-    let tail_data = parts.next().unwrap_or("").to_string();
+    let (ruby_code, tail_data) = crate::bundle::split_ruby_source_and_tail(full_source);
+    let tail_data = tail_data.to_string();
 
     let mrb_bytes = unsafe {
         let mut compiler = mruby_compiler2_sys::MRubyCompiler2Context::new();
