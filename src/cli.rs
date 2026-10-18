@@ -350,11 +350,12 @@ pub fn cmd_encode(
 pub fn compile_ruby_script_str(full_source: &str) -> Result<(String, Vec<u8>), String> {
     let (ruby_code, tail_data) = crate::bundle::split_ruby_source_and_tail(full_source);
     let tail_data = tail_data.to_string();
+    let normalized_code = crate::bundle::normalize_ruby_config_syntax(ruby_code);
 
     let mrb_bytes = unsafe {
         let mut compiler = mruby_compiler2_sys::MRubyCompiler2Context::new();
         compiler
-            .compile(ruby_code)
+            .compile(&normalized_code)
             .map_err(|e| format!("Ruby compile error: {}", e))?
     };
 

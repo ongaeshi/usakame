@@ -23,6 +23,88 @@ pub const WINDOW_WIDTH: i32 = 512;
 pub const WINDOW_HEIGHT: i32 = 512;
 pub const SPRITE_SIZE: usize = 16;
 
+/// エンジン設定（内部仮想解像度、ウィンドウ表示倍率、スプライト・タイル倍率、テキストサイズ等）
+#[derive(Debug, Clone, PartialEq)]
+pub struct AppConfig {
+    pub screen_width: u32,
+    pub screen_height: u32,
+    pub window_scale: f32,
+    pub sprite_scale: f32,
+    pub text_size: u32, // 0 = 自動判定 (screen_width <= 256 ? 8 : 16)
+    pub title: String,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            screen_width: SCREEN_WIDTH,
+            screen_height: SCREEN_HEIGHT,
+            window_scale: 2.0,
+            sprite_scale: 1.0,
+            text_size: 0,
+            title: "Usakame Retro Engine".to_string(),
+        }
+    }
+}
+
+impl AppConfig {
+    pub fn resolved_text_size(&self) -> u32 {
+        if self.text_size == 8 || self.text_size == 16 {
+            self.text_size
+        } else if self.screen_width <= 256 {
+            8
+        } else {
+            16
+        }
+    }
+
+    pub fn window_width(&self) -> i32 {
+        ((self.screen_width as f32) * self.window_scale).round() as i32
+    }
+
+    pub fn window_height(&self) -> i32 {
+        ((self.screen_height as f32) * self.window_scale).round() as i32
+    }
+}
+
+/// スクリプトソース冒頭から `config(...)` を静的に事前解析して初期 `AppConfig` を取得する
+pub fn parse_config_from_source(source: &str) -> AppConfig {
+    let mut config = AppConfig::default();
+    let code = match source.find("__END__") {
+        Some(idx) => &source[..idx],
+        None => source,
+    };
+    if let Some(idx) = code.find("config") {
+        let rest = &code[idx + 6..];
+        let content = if let Some(open) = rest.find('(') {
+            if let Some(close) = rest[open..].find(')') {
+                &rest[open + 1..open + close]
+            } else {
+                rest.lines().next().unwrap_or_default()
+            }
+        } else {
+            rest.lines().next().unwrap_or_default()
+        };
+        for part in content.split(',') {
+            let part = part.trim();
+            if let Some(colon) = part.find(':') {
+                let k = part[..colon].trim().trim_start_matches(['{', ':', ' ']);
+                let v = part[colon + 1..].trim().trim_matches(['"', '\'', '}', ' ']);
+                match k {
+                    "width" => if let Ok(n) = v.parse::<u32>() { config.screen_width = n; },
+                    "height" => if let Ok(n) = v.parse::<u32>() { config.screen_height = n; },
+                    "scale" => if let Ok(n) = v.parse::<f32>() { config.window_scale = n; },
+                    "sprite_scale" => if let Ok(n) = v.parse::<f32>() { config.sprite_scale = n; },
+                    "text_size" => if let Ok(n) = v.parse::<u32>() { config.text_size = n; },
+                    "title" => config.title = v.to_string(),
+                    _ => {}
+                }
+            }
+        }
+    }
+    config
+}
+
 /// PICO-8 準拠の16色パレット
 pub const PALETTE: [Color; 16] = [
     Color::from_rgba(0, 0, 0, 255),       // 0: Black (#000000)
@@ -854,6 +936,39 @@ const FONT_5X7: [[u8; 7]; 95] = [
 ];
 
 const MISAKI_FONT_BIN: &[u8] = include_bytes!("../assets/misaki_font.bin");
+const SHINONOME_FONT_BIN: &[u8] = include_bytes!("../assets/shinonome_font.bin");
+
+#[derive(Debug, Clone, Copy)]
+pub struct ShinonomeGlyph {
+    pub width: u8,
+    pub bitmap: [u8; 32],
+}
+
+/// 東雲ゴシック（16x16 / 8x16 1-bit, Public Domain）のバイナリテーブルから指定Unicodeコードポイントのグリフを取得する
+pub fn lookup_shinonome_glyph(cp: u16) -> Option<ShinonomeGlyph> {
+    if SHINONOME_FONT_BIN.len() < 8 {
+        return None;
+    }
+    let count = u16::from_le_bytes([SHINONOME_FONT_BIN[6], SHINONOME_FONT_BIN[7]]) as usize;
+    let mut low = 0usize;
+    let mut high = count;
+    while low < high {
+        let mid = (low + high) / 2;
+        let off = 8 + mid * 35;
+        let mid_cp = u16::from_le_bytes([SHINONOME_FONT_BIN[off], SHINONOME_FONT_BIN[off + 1]]);
+        match mid_cp.cmp(&cp) {
+            std::cmp::Ordering::Equal => {
+                let width = SHINONOME_FONT_BIN[off + 2];
+                let mut bitmap = [0u8; 32];
+                bitmap.copy_from_slice(&SHINONOME_FONT_BIN[off + 3..off + 35]);
+                return Some(ShinonomeGlyph { width, bitmap });
+            }
+            std::cmp::Ordering::Less => low = mid + 1,
+            std::cmp::Ordering::Greater => high = mid,
+        }
+    }
+    None
+}
 
 /// 美咲フォント（Misaki Gothic 2nd, 8x8 1-bit）のバイナリテーブルから指定Unicodeコードポイントの8行ビットマップを二分探索で取得する
 pub fn lookup_misaki_glyph(cp: u16) -> Option<[u8; 8]> {
@@ -880,6 +995,7 @@ pub fn lookup_misaki_glyph(cp: u16) -> Option<[u8; 8]> {
 pub struct BitmapFont {
     texture: Option<Texture2D>,
     ja_cache: RefCell<HashMap<u16, Texture2D>>,
+    ja16_cache: RefCell<HashMap<u16, (u8, Texture2D)>>,
 }
 
 impl Default for BitmapFont {
@@ -894,6 +1010,7 @@ impl BitmapFont {
             return Self {
                 texture: None,
                 ja_cache: RefCell::new(HashMap::new()),
+                ja16_cache: RefCell::new(HashMap::new()),
             };
         }
         let rows = (FONT_5X7.len() + FONT_ATLAS_COLS - 1) / FONT_ATLAS_COLS;
@@ -929,6 +1046,7 @@ impl BitmapFont {
         Self {
             texture: Some(texture),
             ja_cache: RefCell::new(HashMap::new()),
+            ja16_cache: RefCell::new(HashMap::new()),
         }
     }
 
@@ -940,9 +1058,130 @@ impl BitmapFont {
         color: Color,
         emoji_atlas: &RefCell<emoji::EmojiAtlas>,
     ) {
+        self.draw_text_crisp_ex(text, x, y, color, emoji_atlas, 8);
+    }
+
+    pub fn draw_text_crisp_ex(
+        &self,
+        text: &str,
+        x: f32,
+        y: f32,
+        color: Color,
+        emoji_atlas: &RefCell<emoji::EmojiAtlas>,
+        font_size: u32,
+    ) {
         let Some(ref texture) = self.texture else {
             return;
         };
+
+        if font_size == 16 {
+            let mut cur_x = x.floor();
+            let mut cur_y = y.floor();
+            let start_x = cur_x;
+
+            let mut chars = text.chars().peekable();
+            while let Some(ch) = chars.next() {
+                if ch == '\n' {
+                    cur_x = start_x;
+                    cur_y += 16.0;
+                    continue;
+                }
+                let code = ch as u32;
+                if code == 0xFE0E
+                    || code == 0xFE0F
+                    || code == 0x200D
+                    || (0x1F3FB..=0x1F3FF).contains(&code)
+                {
+                    continue;
+                }
+                let next_vs = match chars.peek().copied() {
+                    Some('\u{FE0F}') | Some('\u{FE0E}') => chars.next(),
+                    _ => None,
+                };
+
+                let prefer_emoji = next_vs != Some('\u{FE0E}')
+                    && emoji::is_emoji_codepoint(code)
+                    && (code > 0xFFFF
+                        || next_vs == Some('\u{FE0F}')
+                        || code >= 0x2300
+                        || (code <= 0xFFFF && lookup_shinonome_glyph(code as u16).is_none()));
+
+                if prefer_emoji {
+                    let mut atlas_ref = emoji_atlas.borrow_mut();
+                    if let Some(sprite) = atlas_ref.get_or_insert_16x16_by_cp(code, true)
+                        && let Some(ref emoji_tex) = sprite.texture
+                    {
+                        draw_texture_ex(
+                            emoji_tex,
+                            cur_x,
+                            cur_y,
+                            WHITE,
+                            DrawTextureParams::default(),
+                        );
+                    }
+                    cur_x += 16.0;
+                    continue;
+                }
+
+                if code <= 0xFFFF {
+                    let cp = code as u16;
+                    if cp == 0x3000 {
+                        cur_x += 16.0;
+                        continue;
+                    }
+                    if cp == 0x20 {
+                        cur_x += 8.0;
+                        continue;
+                    }
+
+                    if !self.ja16_cache.borrow().contains_key(&cp) {
+                        if let Some(glyph) = lookup_shinonome_glyph(cp) {
+                            let w = glyph.width as u16;
+                            let mut rgba = vec![0u8; (w as usize) * 16 * 4];
+                            for gy in 0..16 {
+                                let row_bits = if w == 16 {
+                                    ((glyph.bitmap[gy * 2] as u16) << 8)
+                                        | (glyph.bitmap[gy * 2 + 1] as u16)
+                                } else {
+                                    (glyph.bitmap[gy] as u16) << 8
+                                };
+                                for gx in 0..(w as usize) {
+                                    if ((row_bits >> (15 - gx)) & 1) != 0 {
+                                        let off = (gy * (w as usize) + gx) * 4;
+                                        rgba[off] = 255;
+                                        rgba[off + 1] = 255;
+                                        rgba[off + 2] = 255;
+                                        rgba[off + 3] = 255;
+                                    }
+                                }
+                            }
+                            let image = Image {
+                                bytes: rgba,
+                                width: w,
+                                height: 16,
+                            };
+                            let tex = Texture2D::from_image(&image);
+                            tex.set_filter(FilterMode::Nearest);
+                            self.ja16_cache.borrow_mut().insert(cp, (glyph.width, tex));
+                        }
+                    }
+
+                    if let Some((w, tex)) = self.ja16_cache.borrow().get(&cp) {
+                        draw_texture_ex(tex, cur_x, cur_y, color, DrawTextureParams::default());
+                        cur_x += *w as f32;
+                    } else if let Some(tex) = self.ja_cache.borrow().get(&cp) {
+                        draw_texture_ex(tex, cur_x, cur_y, color, DrawTextureParams::default());
+                        cur_x += 8.0;
+                    } else {
+                        cur_x += 16.0;
+                    }
+                } else {
+                    cur_x += 16.0;
+                }
+            }
+            return;
+        }
+
         let mut cur_x = x.floor();
         let mut cur_y = y.floor();
         let start_x = cur_x;
@@ -1097,6 +1336,46 @@ fn arg_bool(args: &[Rc<RObject>], index: usize, default: bool) -> bool {
         .unwrap_or(default)
 }
 
+fn robject_to_u32(obj: &Rc<RObject>) -> Option<u32> {
+    match &obj.value {
+        RValue::Integer(i) => Some(*i as u32),
+        RValue::Float(f) => Some(*f as u32),
+        _ => None,
+    }
+}
+
+fn robject_to_f32(obj: &Rc<RObject>) -> Option<f32> {
+    match &obj.value {
+        RValue::Integer(i) => Some(*i as f32),
+        RValue::Float(f) => Some(*f as f32),
+        _ => None,
+    }
+}
+
+fn parse_text_size_arg(args: &[Rc<RObject>], default_size: u32) -> u32 {
+    if let Some(arg) = args.get(4) {
+        if let Some(n) = robject_to_u32(arg) {
+            return if n == 16 { 16 } else { 8 };
+        }
+        if let RValue::Hash(ref hash_cell) = arg.value {
+            let hash = hash_cell.borrow();
+            for (_k_obj, (k, v)) in hash.iter() {
+                let key_str = match &k.value {
+                    RValue::Symbol(s) => s.name.clone(),
+                    RValue::String(s, _) => String::from_utf8_lossy(&s.borrow()).to_string(),
+                    _ => continue,
+                };
+                if key_str == "size" {
+                    if let Some(n) = robject_to_u32(v) {
+                        return if n == 16 { 16 } else { 8 };
+                    }
+                }
+            }
+        }
+    }
+    default_size
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ButtonId {
     Left,
@@ -1202,14 +1481,18 @@ pub fn screen_to_virtual(
 }
 
 pub fn virtual_mouse_position() -> (i32, i32) {
+    virtual_mouse_position_ex(SCREEN_WIDTH as f32, SCREEN_HEIGHT as f32)
+}
+
+pub fn virtual_mouse_position_ex(virt_w: f32, virt_h: f32) -> (i32, i32) {
     let (mx, my) = mouse_position();
     screen_to_virtual(
         mx,
         my,
         screen_width(),
         screen_height(),
-        SCREEN_WIDTH as f32,
-        SCREEN_HEIGHT as f32,
+        virt_w,
+        virt_h,
     )
 }
 
@@ -1322,11 +1605,13 @@ impl PixelSpan {
 
 /// 画面座標系のクリッピング矩形 `(x, y, w, h)` を仮想画面 `(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT)` と交差させる
 pub fn intersect_screen_clip(x: i32, y: i32, w: i32, h: i32) -> PixelSpan {
+    intersect_screen_clip_ex(x, y, w, h, SCREEN_WIDTH as i32, SCREEN_HEIGHT as i32)
+}
+
+pub fn intersect_screen_clip_ex(x: i32, y: i32, w: i32, h: i32, sw: i32, sh: i32) -> PixelSpan {
     if w <= 0 || h <= 0 {
         return PixelSpan::new(0, 0, 0, 0);
     }
-    let sw = SCREEN_WIDTH as i32;
-    let sh = SCREEN_HEIGHT as i32;
     let x0 = x.clamp(0, sw);
     let y0 = y.clamp(0, sh);
     let x1 = x.saturating_add(w).clamp(0, sw);
@@ -1342,6 +1627,8 @@ pub struct DrawState {
     pub clip: Option<PixelSpan>,
     pub pal_map: [u8; 16],
     pub palt_mask: u16,
+    pub screen_w: i32,
+    pub screen_h: i32,
 }
 
 impl Default for DrawState {
@@ -1352,6 +1639,8 @@ impl Default for DrawState {
             clip: None,
             pal_map: DEFAULT_PAL_MAP,
             palt_mask: 0,
+            screen_w: SCREEN_WIDTH as i32,
+            screen_h: SCREEN_HEIGHT as i32,
         }
     }
 }
@@ -1368,7 +1657,7 @@ impl DrawState {
     }
 
     pub fn set_clip(&mut self, x: i32, y: i32, w: i32, h: i32) {
-        self.clip = Some(intersect_screen_clip(x, y, w, h));
+        self.clip = Some(intersect_screen_clip_ex(x, y, w, h, self.screen_w, self.screen_h));
     }
 
     pub fn reset_clip(&mut self) {
@@ -1896,9 +2185,70 @@ fn register_engine_api(
     emoji_atlas: Rc<RefCell<emoji::EmojiAtlas>>,
     bitmap_font: Rc<BitmapFont>,
     draw_state: Rc<RefCell<DrawState>>,
+    config: Rc<RefCell<AppConfig>>,
     headless: bool,
 ) {
     let obj_class = vm.object_class.clone();
+
+    // config(opts): 画面解像度・倍率・フォント等の設定
+    let cfg_for_config = config.clone();
+    let state_for_config = draw_state.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "config",
+        Box::new(move |_vm, args| {
+            if let Some(arg) = args.first() {
+                if let RValue::Hash(ref hash_cell) = arg.value {
+                    let hash = hash_cell.borrow();
+                    let mut cfg = cfg_for_config.borrow_mut();
+                    for (_k_obj, (k, v)) in hash.iter() {
+                        let key_str = match &k.value {
+                            RValue::Symbol(s) => s.name.clone(),
+                            RValue::String(s, _) => String::from_utf8_lossy(&s.borrow()).to_string(),
+                            _ => continue,
+                        };
+                        match key_str.as_str() {
+                            "width" => {
+                                if let Some(n) = robject_to_u32(v) {
+                                    cfg.screen_width = n;
+                                }
+                            }
+                            "height" => {
+                                if let Some(n) = robject_to_u32(v) {
+                                    cfg.screen_height = n;
+                                }
+                            }
+                            "scale" => {
+                                if let Some(f) = robject_to_f32(v) {
+                                    cfg.window_scale = f;
+                                }
+                            }
+                            "sprite_scale" => {
+                                if let Some(f) = robject_to_f32(v) {
+                                    cfg.sprite_scale = f;
+                                }
+                            }
+                            "text_size" => {
+                                if let Some(n) = robject_to_u32(v) {
+                                    cfg.text_size = n;
+                                }
+                            }
+                            "title" => {
+                                if let Ok(s) = String::try_from(v.as_ref()) {
+                                    cfg.title = s;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    state_for_config.borrow_mut().screen_w = cfg.screen_width as i32;
+                    state_for_config.borrow_mut().screen_h = cfg.screen_height as i32;
+                }
+            }
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
 
     // 組み込みクラス拡張: ! 演算子 (FalseClass, NilClass, TrueClass, Object)
     if let Some(false_class) = vm.builtin_class_table.get("FalseClass").cloned() {
@@ -2299,6 +2649,7 @@ fn register_engine_api(
         let sprites_for_headless = sprites.clone();
         let emoji_for_headless = emoji_atlas.clone();
         let state_for_headless_spr = draw_state.clone();
+        let cfg_for_headless_spr = config.clone();
         mrb_define_cmethod(
             vm,
             obj_class.clone(),
@@ -2308,12 +2659,13 @@ fn register_engine_api(
                 if state.is_clip_empty() {
                     return Ok(Rc::new(RObject::nil()));
                 }
+                let default_scale = cfg_for_headless_spr.borrow().sprite_scale;
                 let x = arg_f32(args, 1, 0.0) - state.cam_x as f32;
                 let y = arg_f32(args, 2, 0.0) - state.cam_y as f32;
                 let flip_x = arg_bool(args, 3, false);
                 let flip_y = arg_bool(args, 4, false);
                 let rotate = arg_f32(args, 5, 0.0);
-                let scale = arg_f32(args, 6, 1.0);
+                let scale = arg_f32(args, 6, default_scale);
 
                 if let Some(first) = args.first() {
                     if matches!(first.value, RValue::String(_, _)) {
@@ -2359,6 +2711,7 @@ fn register_engine_api(
         let sprites_for_headless_map = sprites.clone();
         let map_for_headless = tilemap.clone();
         let state_for_headless_map = draw_state.clone();
+        let cfg_for_headless_map = config.clone();
         mrb_define_cmethod(
             vm,
             obj_class.clone(),
@@ -2368,6 +2721,10 @@ fn register_engine_api(
                 if state.is_clip_empty() {
                     return Ok(Rc::new(RObject::nil()));
                 }
+                let cfg = cfg_for_headless_map.borrow();
+                let sp_scale = cfg.sprite_scale;
+                let sw = cfg.screen_width as f32;
+                let sh = cfg.screen_height as f32;
                 let tmap = map_for_headless.borrow();
                 let cel_x = arg_i32(args, 0, 0);
                 let cel_y = arg_i32(args, 1, 0);
@@ -2379,6 +2736,7 @@ fn register_engine_api(
                     return Ok(Rc::new(RObject::nil()));
                 }
                 let sprites_ref = sprites_for_headless_map.borrow();
+                let step = (SPRITE_SIZE as f32 * sp_scale) as i32;
                 for dy in 0..cel_h {
                     for dx in 0..cel_w {
                         let tile_id = tmap.get(cel_x + dx, cel_y + dy);
@@ -2387,13 +2745,13 @@ fn register_engine_api(
                         }
                         if let Some(sp) = sprites_ref.get(&tile_id) {
                             let draw_x =
-                                (sx + dx * SPRITE_SIZE as i32 - state.cam_x) as f32;
+                                (sx + dx * step - state.cam_x) as f32;
                             let draw_y =
-                                (sy + dy * SPRITE_SIZE as i32 - state.cam_y) as f32;
-                            if draw_x + sp.width as f32 <= 0.0
-                                || draw_x >= SCREEN_WIDTH as f32
-                                || draw_y + sp.height as f32 <= 0.0
-                                || draw_y >= SCREEN_HEIGHT as f32
+                                (sy + dy * step - state.cam_y) as f32;
+                            if draw_x + sp.width as f32 * sp_scale <= 0.0
+                                || draw_x >= sw
+                                || draw_y + sp.height as f32 * sp_scale <= 0.0
+                                || draw_y >= sh
                             {
                                 continue;
                             }
@@ -2408,7 +2766,7 @@ fn register_engine_api(
                                 false,
                                 false,
                                 0.0,
-                                1.0,
+                                sp_scale,
                             );
                         }
                     }
@@ -2693,6 +3051,7 @@ fn register_engine_api(
     let sprites_for_spr = sprites.clone();
     let emoji_for_spr = emoji_atlas.clone();
     let state_for_spr = draw_state.clone();
+    let cfg_for_spr = config.clone();
     mrb_define_cmethod(
         vm,
         obj_class.clone(),
@@ -2702,12 +3061,13 @@ fn register_engine_api(
             if state.is_clip_empty() {
                 return Ok(Rc::new(RObject::nil()));
             }
+            let default_scale = cfg_for_spr.borrow().sprite_scale;
             let x = arg_f32(args, 1, 0.0) - state.cam_x as f32;
             let y = arg_f32(args, 2, 0.0) - state.cam_y as f32;
             let flip_x = arg_bool(args, 3, false);
             let flip_y = arg_bool(args, 4, false);
             let rotate = arg_f32(args, 5, 0.0);
-            let scale = arg_f32(args, 6, 1.0);
+            let scale = arg_f32(args, 6, default_scale);
 
             if let Some(first) = args.first()
                 && matches!(first.value, RValue::String(_, _))
@@ -2733,6 +3093,7 @@ fn register_engine_api(
     let sprites_for_map = sprites.clone();
     let map_for_draw = tilemap.clone();
     let state_for_map = draw_state.clone();
+    let cfg_for_map = config.clone();
     mrb_define_cmethod(
         vm,
         obj_class.clone(),
@@ -2742,6 +3103,10 @@ fn register_engine_api(
             if state.is_clip_empty() {
                 return Ok(Rc::new(RObject::nil()));
             }
+            let cfg = cfg_for_map.borrow();
+            let sp_scale = cfg.sprite_scale;
+            let sw = cfg.screen_width as f32;
+            let sh = cfg.screen_height as f32;
             let tmap = map_for_draw.borrow();
             let cel_x = arg_i32(args, 0, 0);
             let cel_y = arg_i32(args, 1, 0);
@@ -2753,6 +3118,7 @@ fn register_engine_api(
                 return Ok(Rc::new(RObject::nil()));
             }
             let sprites_ref = sprites_for_map.borrow();
+            let step = (SPRITE_SIZE as f32 * sp_scale) as i32;
             for dy in 0..cel_h {
                 for dx in 0..cel_w {
                     let tile_id = tmap.get(cel_x + dx, cel_y + dy);
@@ -2760,17 +3126,17 @@ fn register_engine_api(
                         continue;
                     }
                     if let Some(sprite) = sprites_ref.get(&tile_id) {
-                        let draw_x = (sx + dx * SPRITE_SIZE as i32 - state.cam_x) as f32;
-                        let draw_y = (sy + dy * SPRITE_SIZE as i32 - state.cam_y) as f32;
-                        if draw_x + sprite.width as f32 <= 0.0
-                            || draw_x >= SCREEN_WIDTH as f32
-                            || draw_y + sprite.height as f32 <= 0.0
-                            || draw_y >= SCREEN_HEIGHT as f32
+                        let draw_x = (sx + dx * step - state.cam_x) as f32;
+                        let draw_y = (sy + dy * step - state.cam_y) as f32;
+                        if draw_x + sprite.width as f32 * sp_scale <= 0.0
+                            || draw_x >= sw
+                            || draw_y + sprite.height as f32 * sp_scale <= 0.0
+                            || draw_y >= sh
                         {
                             continue;
                         }
                         draw_sprite_transformed(
-                            sprite, &state, draw_x, draw_y, false, false, 0.0, 1.0,
+                            sprite, &state, draw_x, draw_y, false, false, 0.0, sp_scale,
                         );
                     }
                 }
@@ -2805,24 +3171,28 @@ fn register_engine_api(
         }),
     );
 
-    // mouse_x: 仮想スクリーン (256x256) 上のマウス X 座標
+    // mouse_x: 仮想スクリーン上のマウス X 座標
+    let cfg_for_mouse_x = config.clone();
     mrb_define_cmethod(
         vm,
         obj_class.clone(),
         "mouse_x",
-        Box::new(|_vm, _args| {
-            let (mx, _) = virtual_mouse_position();
+        Box::new(move |_vm, _args| {
+            let cfg = cfg_for_mouse_x.borrow();
+            let (mx, _) = virtual_mouse_position_ex(cfg.screen_width as f32, cfg.screen_height as f32);
             Ok(Rc::new(RObject::integer(mx as i64)))
         }),
     );
 
-    // mouse_y: 仮想スクリーン (256x256) 上のマウス Y 座標
+    // mouse_y: 仮想スクリーン上のマウス Y 座標
+    let cfg_for_mouse_y = config.clone();
     mrb_define_cmethod(
         vm,
         obj_class.clone(),
         "mouse_y",
-        Box::new(|_vm, _args| {
-            let (_, my) = virtual_mouse_position();
+        Box::new(move |_vm, _args| {
+            let cfg = cfg_for_mouse_y.borrow();
+            let (_, my) = virtual_mouse_position_ex(cfg.screen_width as f32, cfg.screen_height as f32);
             Ok(Rc::new(RObject::integer(my as i64)))
         }),
     );
@@ -2850,10 +3220,11 @@ fn register_engine_api(
         }),
     );
 
-    // print_text(text, x = 0, y = 0, col = 7): 1-bit ピクセルフォント + 8x8 縮小絵文字でくっきりテキスト描画
+    // print_text(text, x = 0, y = 0, col = 7, size = nil): 1-bit ピクセルフォント + 絵文字でくっきりテキスト描画
     let font_for_print = bitmap_font.clone();
     let emoji_for_print = emoji_atlas.clone();
     let state_for_print = draw_state;
+    let cfg_for_print = config.clone();
     mrb_define_cmethod(
         vm,
         obj_class,
@@ -2870,7 +3241,8 @@ fn register_engine_api(
             let x = (arg_i32(args, 1, 0).saturating_sub(state.cam_x)) as f32;
             let y = (arg_i32(args, 2, 0).saturating_sub(state.cam_y)) as f32;
             let col = arg_i32(args, 3, 7);
-            font_for_print.draw_text_crisp(&text, x, y, state.map_color(col), &emoji_for_print);
+            let size = parse_text_size_arg(args, cfg_for_print.borrow().resolved_text_size());
+            font_for_print.draw_text_crisp_ex(&text, x, y, state.map_color(col), &emoji_for_print, size);
             Ok(Rc::new(RObject::nil()))
         }),
     );
@@ -2942,6 +3314,7 @@ pub struct GameRuntime {
     pub bitmap_font: Rc<BitmapFont>,
     pub draw_state: Rc<RefCell<DrawState>>,
     pub sound_bank: Rc<RefCell<sound::SoundBank>>,
+    pub config: Rc<RefCell<AppConfig>>,
     initial_globals: HashMap<String, Rc<RObject>>,
     initial_tail_map: Tilemap,
     headless: bool,
@@ -2966,6 +3339,8 @@ impl GameRuntime {
             HashMap::new(),
             HashMap::new(),
         )));
+        let config = Rc::new(RefCell::new(AppConfig::default()));
+
         register_engine_api(
             &mut vm,
             sprites.clone(),
@@ -2973,6 +3348,7 @@ impl GameRuntime {
             emoji_atlas.clone(),
             bitmap_font.clone(),
             draw_state.clone(),
+            config.clone(),
             headless,
         );
         register_sound_api(&mut vm, sound_bank.clone());
@@ -3004,6 +3380,7 @@ impl GameRuntime {
             bitmap_font,
             draw_state,
             sound_bank,
+            config,
             initial_globals,
             initial_tail_map,
             headless,
@@ -3031,7 +3408,12 @@ impl GameRuntime {
         };
 
         let temp_tilemap = Rc::new(RefCell::new(new_tail_map));
-        *self.draw_state.borrow_mut() = DrawState::default();
+        {
+            let mut ds = self.draw_state.borrow_mut();
+            *ds = DrawState::default();
+            ds.screen_w = self.config.borrow().screen_width as i32;
+            ds.screen_h = self.config.borrow().screen_height as i32;
+        }
         register_engine_api(
             &mut new_vm,
             self.sprites.clone(),
@@ -3039,6 +3421,7 @@ impl GameRuntime {
             self.emoji_atlas.clone(),
             self.bitmap_font.clone(),
             self.draw_state.clone(),
+            self.config.clone(),
             self.headless,
         );
         register_sound_api(&mut new_vm, self.sound_bank.clone());
@@ -3088,6 +3471,7 @@ impl GameRuntime {
             self.emoji_atlas.clone(),
             self.bitmap_font.clone(),
             self.draw_state.clone(),
+            self.config.clone(),
             self.headless,
         );
 
@@ -3159,36 +3543,40 @@ impl GameRuntime {
 // ==========================================
 // ウィンドウ & 描画ループ共通処理
 // ==========================================
-fn window_conf_with_title(title: &str) -> Conf {
+pub fn window_conf_with_title_and_size(title: &str, w: i32, h: i32) -> Conf {
     Conf {
         window_title: title.to_owned(),
-        window_width: WINDOW_WIDTH,
-        window_height: WINDOW_HEIGHT,
+        window_width: w,
+        window_height: h,
         window_resizable: true,
         ..Default::default()
     }
 }
 
-fn create_virtual_screen() -> (RenderTarget, Camera2D) {
-    let rt = render_target(SCREEN_WIDTH, SCREEN_HEIGHT);
+pub fn window_conf_with_title(title: &str) -> Conf {
+    window_conf_with_title_and_size(title, WINDOW_WIDTH, WINDOW_HEIGHT)
+}
+
+pub fn create_virtual_screen(w: u32, h: u32) -> (RenderTarget, Camera2D) {
+    let rt = render_target(w, h);
     rt.texture.set_filter(FilterMode::Nearest);
 
     let mut cam =
-        Camera2D::from_display_rect(Rect::new(0.0, 0.0, SCREEN_WIDTH as f32, SCREEN_HEIGHT as f32));
+        Camera2D::from_display_rect(Rect::new(0.0, 0.0, w as f32, h as f32));
     cam.render_target = Some(rt.clone());
     (rt, cam)
 }
 
-fn present_virtual_screen(render_target: &RenderTarget, reload_banner_frames: u32) {
+pub fn present_virtual_screen(render_target: &RenderTarget, virt_w: u32, virt_h: u32, reload_banner_frames: u32) {
     apply_gl_scissor(None);
     set_default_camera();
     clear_background(BLACK);
 
     let win_w = screen_width();
     let win_h = screen_height();
-    let scale = (win_w / SCREEN_WIDTH as f32).min(win_h / SCREEN_HEIGHT as f32);
-    let draw_w = SCREEN_WIDTH as f32 * scale;
-    let draw_h = SCREEN_HEIGHT as f32 * scale;
+    let scale = (win_w / virt_w as f32).min(win_h / virt_h as f32);
+    let draw_w = virt_w as f32 * scale;
+    let draw_h = virt_h as f32 * scale;
     let offset_x = ((win_w - draw_w) * 0.5).floor();
     let offset_y = ((win_h - draw_h) * 0.5).floor();
 
@@ -3234,6 +3622,7 @@ async fn run_native_with_hot_reload(
     initial_tail: String,
     initial_mrb: Vec<u8>,
 ) {
+    let initial_config = parse_config_from_source(&initial_source);
     let mut runtime = match GameRuntime::new(&initial_tail, &initial_mrb, false) {
         Ok(rt) => rt,
         Err(e) => {
@@ -3241,8 +3630,16 @@ async fn run_native_with_hot_reload(
             return;
         }
     };
+    if initial_config != AppConfig::default() {
+        let mut cfg = runtime.config.borrow_mut();
+        *cfg = initial_config;
+        runtime.draw_state.borrow_mut().screen_w = cfg.screen_width as i32;
+        runtime.draw_state.borrow_mut().screen_h = cfg.screen_height as i32;
+    }
 
-    let (render_target, virtual_camera) = create_virtual_screen();
+    let mut cur_virt_w = runtime.config.borrow().screen_width;
+    let mut cur_virt_h = runtime.config.borrow().screen_height;
+    let (mut render_target, mut virtual_camera) = create_virtual_screen(cur_virt_w, cur_virt_h);
     runtime.preload_audio().await;
     let mut last_source = initial_source;
     let mut last_modified = std::fs::metadata(&script_path)
@@ -3266,13 +3663,29 @@ async fn run_native_with_hot_reload(
                     && new_source != last_source
                 {
                     last_source = new_source.clone();
+                    let new_parsed_config = parse_config_from_source(&new_source);
                     match cli::compile_ruby_script_str(&new_source) {
                         Ok((new_tail, new_mrb)) => {
+                            if new_parsed_config != AppConfig::default() {
+                                let mut cfg = runtime.config.borrow_mut();
+                                *cfg = new_parsed_config;
+                            }
                             match runtime.hot_reload(&new_tail, &new_mrb) {
                                 Ok(()) => {
                                     runtime.preload_audio().await;
                                     println!("[uk run] Hot-reloaded `{}`", script_path.display());
                                     reload_banner_frames = 60;
+                                    let (new_w, new_h) = {
+                                        let cfg = runtime.config.borrow();
+                                        (cfg.screen_width, cfg.screen_height)
+                                    };
+                                    if new_w != cur_virt_w || new_h != cur_virt_h {
+                                        cur_virt_w = new_w;
+                                        cur_virt_h = new_h;
+                                        let (rt, cam) = create_virtual_screen(cur_virt_w, cur_virt_h);
+                                        render_target = rt;
+                                        virtual_camera = cam;
+                                    }
                                 }
                                 Err(e) => {
                                     eprintln!(
@@ -3301,7 +3714,7 @@ async fn run_native_with_hot_reload(
         set_camera(&virtual_camera);
         runtime.call_draw();
 
-        present_virtual_screen(&render_target, reload_banner_frames);
+        present_virtual_screen(&render_target, cur_virt_w, cur_virt_h, reload_banner_frames);
         reload_banner_frames = reload_banner_frames.saturating_sub(1);
 
         next_frame().await;
@@ -3318,7 +3731,11 @@ async fn run_embedded_game(tail_data: String, mrb_bytes: Vec<u8>) {
         }
     };
 
-    let (render_target, virtual_camera) = create_virtual_screen();
+    let (virt_w, virt_h) = {
+        let cfg = runtime.config.borrow();
+        (cfg.screen_width, cfg.screen_height)
+    };
+    let (render_target, virtual_camera) = create_virtual_screen(virt_w, virt_h);
     runtime.preload_audio().await;
 
     loop {
@@ -3328,7 +3745,7 @@ async fn run_embedded_game(tail_data: String, mrb_bytes: Vec<u8>) {
         set_camera(&virtual_camera);
         runtime.call_draw();
 
-        present_virtual_screen(&render_target, 0);
+        present_virtual_screen(&render_target, virt_w, virt_h, 0);
 
         next_frame().await;
     }
@@ -3389,9 +3806,14 @@ fn main() {
                         std::process::exit(1);
                     }
                 };
-            let title = format!("Usakame - {}", script_path.display());
+            let parsed_cfg = parse_config_from_source(&initial_source);
+            let title = if parsed_cfg.title != "Usakame Retro Engine" {
+                parsed_cfg.title.clone()
+            } else {
+                format!("Usakame - {}", script_path.display())
+            };
             macroquad::Window::from_config(
-                window_conf_with_title(&title),
+                window_conf_with_title_and_size(&title, parsed_cfg.window_width(), parsed_cfg.window_height()),
                 run_native_with_hot_reload(script_path, initial_source, tail_data, mrb_bytes),
             );
         }
@@ -3428,7 +3850,7 @@ pub extern "C" fn uk_notify_reload() {
 
 #[cfg(target_arch = "wasm32")]
 fn window_conf_wasm() -> Conf {
-    window_conf_with_title("Usakame Retro Engine (256x256)")
+    window_conf_with_title("Usakame Retro Engine")
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -3448,7 +3870,9 @@ async fn main() {
 
     let mut runtime = GameRuntime::new(&tail_data, &mrb_bytes, false)
         .expect("Failed to initialize WASM GameRuntime");
-    let (render_target, virtual_camera) = create_virtual_screen();
+    let mut cur_virt_w = runtime.config.borrow().screen_width;
+    let mut cur_virt_h = runtime.config.borrow().screen_height;
+    let (mut render_target, mut virtual_camera) = create_virtual_screen(cur_virt_w, cur_virt_h);
     runtime.preload_audio().await;
     let mut reload_banner_frames: u32 = 0;
 
@@ -3462,6 +3886,17 @@ async fn main() {
                     Ok(()) => {
                         runtime.preload_audio().await;
                         reload_banner_frames = 60;
+                        let (new_w, new_h) = {
+                            let cfg = runtime.config.borrow();
+                            (cfg.screen_width, cfg.screen_height)
+                        };
+                        if new_w != cur_virt_w || new_h != cur_virt_h {
+                            cur_virt_w = new_w;
+                            cur_virt_h = new_h;
+                            let (rt, cam) = create_virtual_screen(cur_virt_w, cur_virt_h);
+                            render_target = rt;
+                            virtual_camera = cam;
+                        }
                     }
                     Err(e) => {
                         eprintln!("Hot-reload error in browser: {}", e);
@@ -3476,7 +3911,7 @@ async fn main() {
         set_camera(&virtual_camera);
         runtime.call_draw();
 
-        present_virtual_screen(&render_target, reload_banner_frames);
+        present_virtual_screen(&render_target, cur_virt_w, cur_virt_h, reload_banner_frames);
         reload_banner_frames = reload_banner_frames.saturating_sub(1);
 
         next_frame().await;
@@ -3498,6 +3933,103 @@ mod tests {
         assert_eq!(WINDOW_WIDTH, 512);
         assert_eq!(WINDOW_HEIGHT, 512);
         assert_eq!(SPRITE_SIZE, 16);
+    }
+
+    #[test]
+    fn test_shinonome_japanese_font_lookup() {
+        for ch in ['あ', 'い', 'ウ', 'サ', 'ギ', '兎', '亀', '漢', '字', '！'] {
+            let glyph = lookup_shinonome_glyph(ch as u16)
+                .unwrap_or_else(|| panic!("Shinonome glyph should exist for '{}'", ch));
+            assert_eq!(glyph.width, 16, "Glyph '{}' should be width 16", ch);
+            assert!(
+                glyph.bitmap.iter().any(|&b| b != 0),
+                "Glyph '{}' should have non-zero pixel bytes",
+                ch
+            );
+        }
+        for ch in ['A', 'Z', '0', '9', '?'] {
+            let glyph = lookup_shinonome_glyph(ch as u16)
+                .unwrap_or_else(|| panic!("Shinonome glyph should exist for '{}'", ch));
+            assert_eq!(glyph.width, 8, "Glyph '{}' should be width 8", ch);
+            assert!(
+                glyph.bitmap.iter().any(|&b| b != 0),
+                "Glyph '{}' should have non-zero pixel bytes",
+                ch
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_config_from_source() {
+        let code = r#"
+config(
+  width: 640,
+  height: 480,
+  scale: 1.5,
+  sprite_scale: 2.0,
+  text_size: 16,
+  title: "MY RETRO RPG"
+)
+x = 10
+"#;
+        let cfg = parse_config_from_source(code);
+        assert_eq!(cfg.screen_width, 640);
+        assert_eq!(cfg.screen_height, 480);
+        assert_eq!(cfg.window_scale, 1.5);
+        assert_eq!(cfg.sprite_scale, 2.0);
+        assert_eq!(cfg.text_size, 16);
+        assert_eq!(cfg.title, "MY RETRO RPG");
+        assert_eq!(cfg.resolved_text_size(), 16);
+        assert_eq!(cfg.window_width(), 960);
+        assert_eq!(cfg.window_height(), 720);
+
+        // デフォルト判定
+        let default_cfg = AppConfig::default();
+        assert_eq!(default_cfg.resolved_text_size(), 8); // 256x256 -> 8
+        let vga_cfg = AppConfig {
+            screen_width: 640,
+            screen_height: 480,
+            ..Default::default()
+        };
+        assert_eq!(vga_cfg.resolved_text_size(), 16); // 640x480 -> 16
+    }
+
+    #[test]
+    fn test_config_api_and_text_size_in_ruby_script() {
+        let script = r#"
+config(
+  width: 640,
+  height: 480,
+  scale: 2,
+  sprite_scale: 2,
+  text_size: 16,
+  title: "Test RPG"
+)
+
+def update
+end
+
+def draw
+  cls(1)
+  spr(1, 10, 20)
+  spr(1, 50, 50, false, false, 0, 1.0)
+  map(0, 0, 0, 0, 10, 10)
+  print_text("こんにちは！🐰", 10, 10, 7)
+  print_text("STATUS", 10, 30, 7, size: 8)
+  print_text("VGA", 10, 50, 7, 16)
+end
+"#;
+        let (tail, mrb) = cli::compile_ruby_script_str(script).expect("Compile should succeed");
+        let mut runtime = GameRuntime::new(&tail, &mrb, true).expect("Runtime init should succeed");
+        assert_eq!(runtime.config.borrow().screen_width, 640);
+        assert_eq!(runtime.config.borrow().screen_height, 480);
+        assert_eq!(runtime.config.borrow().sprite_scale, 2.0);
+        assert_eq!(runtime.config.borrow().text_size, 16);
+        assert_eq!(runtime.config.borrow().resolved_text_size(), 16);
+        assert_eq!(runtime.config.borrow().title, "Test RPG");
+
+        runtime.call_update();
+        runtime.call_draw();
     }
 
     #[test]
@@ -4782,6 +5314,33 @@ end
 
         // 登場歩行 -> 全会話 -> 暗転完了まで 3500 フレーム回して完走を検証
         for _ in 0..3500 {
+            runtime.call_update();
+            runtime.call_draw();
+        }
+    }
+
+    #[test]
+    fn test_resolution_example_script() {
+        let (full_src, tail_data, mrb_bytes) =
+            cli::compile_ruby_script_file(std::path::Path::new("examples/resolution.rb"))
+                .expect("examples/resolution.rb should compile");
+
+        let initial_config = parse_config_from_source(&full_src);
+        assert_eq!(initial_config.screen_width, 640);
+        assert_eq!(initial_config.screen_height, 480);
+        assert_eq!(initial_config.window_scale, 1.5);
+        assert_eq!(initial_config.sprite_scale, 2.0);
+        assert_eq!(initial_config.text_size, 16);
+
+        let mut runtime =
+            GameRuntime::new(&tail_data, &mrb_bytes, true).expect("examples/resolution.rb should initialize");
+
+        assert_eq!(runtime.config.borrow().screen_width, 640);
+        assert_eq!(runtime.config.borrow().screen_height, 480);
+        assert_eq!(runtime.config.borrow().sprite_scale, 2.0);
+        assert_eq!(runtime.config.borrow().text_size, 16);
+
+        for _ in 0..60 {
             runtime.call_update();
             runtime.call_draw();
         }

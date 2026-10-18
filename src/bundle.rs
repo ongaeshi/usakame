@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 #[cfg(not(target_arch = "wasm32"))]
 use std::fs::File;
 #[cfg(not(target_arch = "wasm32"))]
@@ -141,4 +143,106 @@ pub fn split_ruby_source_and_tail(full_source: &str) -> (&str, &str) {
         byte_offset += line.len();
     }
     (full_source, "")
+}
+
+/// Ruby スクリプト中の `config(...)` 呼び出しを検出し、波括弧がない場合は `config({...})` に正規化する。
+///
+/// mruby 3.0 (mruby_compiler2) は波括弧なしのキーワード引数を `karg` コール規約でコンパイルするため、
+/// C拡張メソッド（mrubyedge）が第1引数として Hash を直接受領できるように `{ ... }` で囲む。
+pub fn normalize_ruby_config_syntax(code: &str) -> String {
+    let mut result = String::with_capacity(code.len() + 16);
+    let mut cursor = 0;
+    while let Some(pos) = code[cursor..].find("config") {
+        let abs_pos = cursor + pos;
+        let before = if abs_pos > 0 { code.as_bytes()[abs_pos - 1] } else { b' ' };
+        if before.is_ascii_alphanumeric() || before == b'_' {
+            result.push_str(&code[cursor..=abs_pos]);
+            cursor = abs_pos + 1;
+            continue;
+        }
+
+        let after_config = &code[abs_pos + 6..];
+        let trimmed_after = after_config.trim_start();
+        if !trimmed_after.starts_with('(') {
+            result.push_str(&code[cursor..abs_pos + 6]);
+            cursor = abs_pos + 6;
+            continue;
+        }
+
+        let open_paren_idx = abs_pos + 6 + (after_config.len() - trimmed_after.len());
+        let mut depth = 0;
+        let mut close_paren_idx = None;
+        let mut in_string = None;
+        let bytes = code.as_bytes();
+        let mut i = open_paren_idx;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if let Some(quote) = in_string {
+                if b == quote && (i == 0 || bytes[i - 1] != b'\\') {
+                    in_string = None;
+                }
+            } else if b == b'"' || b == b'\'' {
+                in_string = Some(b);
+            } else if b == b'(' {
+                depth += 1;
+            } else if b == b')' {
+                depth -= 1;
+                if depth == 0 {
+                    close_paren_idx = Some(i);
+                    break;
+                }
+            }
+            i += 1;
+        }
+
+        if let Some(close_idx) = close_paren_idx {
+            let inner = &code[open_paren_idx + 1..close_idx];
+            let trimmed_inner = inner.trim();
+            if !trimmed_inner.is_empty()
+                && !(trimmed_inner.starts_with('{') && trimmed_inner.ends_with('}'))
+            {
+                result.push_str(&code[cursor..open_paren_idx + 1]);
+                result.push('{');
+                result.push_str(inner);
+                result.push('}');
+                result.push(')');
+                cursor = close_idx + 1;
+                continue;
+            }
+        }
+
+        result.push_str(&code[cursor..abs_pos + 6]);
+        cursor = abs_pos + 6;
+    }
+    result.push_str(&code[cursor..]);
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_ruby_config_syntax() {
+        let raw = "config(width: 640, height: 480)\ndef update\nend";
+        assert_eq!(
+            normalize_ruby_config_syntax(raw),
+            "config({width: 640, height: 480})\ndef update\nend"
+        );
+
+        let multi = "config(\n  width: 640,\n  height: 480\n)";
+        assert_eq!(
+            normalize_ruby_config_syntax(multi),
+            "config({\n  width: 640,\n  height: 480\n})"
+        );
+
+        let already_braced = "config({ width: 640, height: 480 })";
+        assert_eq!(
+            normalize_ruby_config_syntax(already_braced),
+            "config({ width: 640, height: 480 })"
+        );
+
+        let other = "configure(123)\nmy_config(456)";
+        assert_eq!(normalize_ruby_config_syntax(other), other);
+    }
 }

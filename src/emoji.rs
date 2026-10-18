@@ -181,6 +181,22 @@ impl EmojiAtlas {
         }
         self.cache_8x8.get(&cp)
     }
+
+    /// キャッシュから 16x16 絵文字スプライトを取得し、未生成であれば切り出して（必要に応じGPUテクスチャ化して）返す。
+    pub fn get_or_insert_16x16_by_cp(
+        &mut self,
+        cp: u32,
+        build_texture: bool,
+    ) -> Option<&SpriteData> {
+        if !self.cache.contains_key(&cp) {
+            let mut sprite = self.extract_sprite_by_cp(cp)?;
+            if build_texture {
+                sprite.build_texture();
+            }
+            self.cache.insert(cp, sprite);
+        }
+        self.cache.get(&cp)
+    }
 }
 
 #[cfg(test)]
