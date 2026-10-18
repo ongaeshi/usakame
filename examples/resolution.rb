@@ -12,7 +12,7 @@
 config(
   width: 640,
   height: 480,
-  scale: 1.5,
+  scale: 2,
   sprite_scale: 2.0,
   text_size: 16,
   title: "USAKAME - 640x480 VGA / PC-98 Mode"
@@ -44,20 +44,12 @@ MESSAGES = [
 def update
   $frame += 1
 
-  # カーソルキーでプレイヤー移動
+  # カーソルキーまたは WASD でプレイヤー移動（btn(:left) 等は内部で矢印キーと WASD の両方を自動検知）
   speed = 3
-  if btn(:left) || btn("a")
-    $px -= speed
-  end
-  if btn(:right) || btn("d")
-    $px += speed
-  end
-  if btn(:up) || btn("w")
-    $py -= speed
-  end
-  if btn(:down) || btn("s")
-    $py += speed
-  end
+  $px -= speed if btn(:left)
+  $px += speed if btn(:right)
+  $py -= speed if btn(:up)
+  $py += speed if btn(:down)
 
   # 画面内に制限 (歩行可能エリア)
   $px = 24 if $px < 24

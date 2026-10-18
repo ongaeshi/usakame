@@ -5335,7 +5335,7 @@ end
         let initial_config = parse_config_from_source(&full_src);
         assert_eq!(initial_config.screen_width, 640);
         assert_eq!(initial_config.screen_height, 480);
-        assert_eq!(initial_config.window_scale, 1.5);
+        assert_eq!(initial_config.window_scale, 2.0);
         assert_eq!(initial_config.sprite_scale, 2.0);
         assert_eq!(initial_config.text_size, 16);
 
