@@ -627,9 +627,16 @@ pub fn parse_tail_resources(data_section: &str) -> HashMap<i32, SpriteData> {
                 && let Ok(id) = id_str.parse::<i32>()
             {
                 if let Some(emoji_token) = parts.next() {
-                    let atlas = emoji_atlas.get_or_insert_with(emoji::EmojiAtlas::new);
-                    if let Some(sp) = atlas.extract_sprite(emoji_token) {
-                        sprites.insert(id, sp);
+                    // 数値トークン（例: @SPRITE 1 16 16）は寸法指定であり絵文字ではないため TextSprite として扱う
+                    if emoji_token.chars().all(|c| c.is_ascii_digit()) {
+                        current_kind = Some(ResourceBlockKind::TextSprite(id));
+                    } else {
+                        let atlas = emoji_atlas.get_or_insert_with(emoji::EmojiAtlas::new);
+                        if let Some(sp) = atlas.extract_sprite(emoji_token) {
+                            sprites.insert(id, sp);
+                        } else {
+                            current_kind = Some(ResourceBlockKind::TextSprite(id));
+                        }
                     }
                 } else {
                     current_kind = Some(ResourceBlockKind::TextSprite(id));
@@ -5339,6 +5346,11 @@ end
         assert_eq!(runtime.config.borrow().screen_height, 480);
         assert_eq!(runtime.config.borrow().sprite_scale, 2.0);
         assert_eq!(runtime.config.borrow().text_size, 16);
+
+        assert!(runtime.sprites.borrow().contains_key(&1), "Sprite 1 should be loaded");
+        assert!(runtime.sprites.borrow().contains_key(&2), "Sprite 2 should be loaded");
+        assert!(runtime.sprites.borrow().contains_key(&3), "Sprite 3 should be loaded");
+        assert_eq!(runtime.tilemap.borrow().get(0, 0), 3, "Tilemap at (0, 0) should be 3");
 
         for _ in 0..60 {
             runtime.call_update();
