@@ -1097,6 +1097,122 @@ fn arg_bool(args: &[Rc<RObject>], index: usize, default: bool) -> bool {
         .unwrap_or(default)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ButtonId {
+    Left,
+    Right,
+    Up,
+    Down,
+    A,
+    B,
+    MouseLeft,
+    MouseRight,
+    MouseMiddle,
+}
+
+pub fn parse_button_name(name: &str) -> Option<ButtonId> {
+    match name.to_lowercase().as_str() {
+        "left" | "l" => Some(ButtonId::Left),
+        "right" | "r" => Some(ButtonId::Right),
+        "up" | "u" => Some(ButtonId::Up),
+        "down" | "d" => Some(ButtonId::Down),
+        "z" | "space" | "a" | "btn_a" => Some(ButtonId::A),
+        "x" | "enter" | "b" | "btn_b" => Some(ButtonId::B),
+        "mouse_l" | "mouse_left" | "mouse_1" | "click" | "lclick" => Some(ButtonId::MouseLeft),
+        "mouse_r" | "mouse_right" | "mouse_2" | "rclick" => Some(ButtonId::MouseRight),
+        "mouse_m" | "mouse_middle" | "mouse_3" | "mclick" => Some(ButtonId::MouseMiddle),
+        _ => None,
+    }
+}
+
+pub fn parse_button_arg(args: &[Rc<RObject>], index: usize) -> Option<ButtonId> {
+    let obj = args.get(index)?;
+    match &obj.value {
+        RValue::Integer(i) => match *i {
+            0 => Some(ButtonId::Left),
+            1 => Some(ButtonId::Right),
+            2 => Some(ButtonId::Up),
+            3 => Some(ButtonId::Down),
+            4 => Some(ButtonId::A),
+            5 => Some(ButtonId::B),
+            6 => Some(ButtonId::MouseLeft),
+            7 => Some(ButtonId::MouseRight),
+            8 => Some(ButtonId::MouseMiddle),
+            _ => None,
+        },
+        RValue::Symbol(sym) => parse_button_name(&sym.name),
+        RValue::String(_, _) => {
+            let s = String::try_from(obj.as_ref()).ok()?;
+            parse_button_name(&s)
+        }
+        _ => None,
+    }
+}
+
+pub fn is_button_down(btn: ButtonId) -> bool {
+    match btn {
+        ButtonId::Left => is_key_down(KeyCode::Left) || is_key_down(KeyCode::A),
+        ButtonId::Right => is_key_down(KeyCode::Right) || is_key_down(KeyCode::D),
+        ButtonId::Up => is_key_down(KeyCode::Up) || is_key_down(KeyCode::W),
+        ButtonId::Down => is_key_down(KeyCode::Down) || is_key_down(KeyCode::S),
+        ButtonId::A => is_key_down(KeyCode::Z) || is_key_down(KeyCode::Space),
+        ButtonId::B => is_key_down(KeyCode::X) || is_key_down(KeyCode::Enter),
+        ButtonId::MouseLeft => is_mouse_button_down(MouseButton::Left),
+        ButtonId::MouseRight => is_mouse_button_down(MouseButton::Right),
+        ButtonId::MouseMiddle => is_mouse_button_down(MouseButton::Middle),
+    }
+}
+
+pub fn is_button_pressed(btn: ButtonId) -> bool {
+    match btn {
+        ButtonId::Left => is_key_pressed(KeyCode::Left) || is_key_pressed(KeyCode::A),
+        ButtonId::Right => is_key_pressed(KeyCode::Right) || is_key_pressed(KeyCode::D),
+        ButtonId::Up => is_key_pressed(KeyCode::Up) || is_key_pressed(KeyCode::W),
+        ButtonId::Down => is_key_pressed(KeyCode::Down) || is_key_pressed(KeyCode::S),
+        ButtonId::A => is_key_pressed(KeyCode::Z) || is_key_pressed(KeyCode::Space),
+        ButtonId::B => is_key_pressed(KeyCode::X) || is_key_pressed(KeyCode::Enter),
+        ButtonId::MouseLeft => is_mouse_button_pressed(MouseButton::Left),
+        ButtonId::MouseRight => is_mouse_button_pressed(MouseButton::Right),
+        ButtonId::MouseMiddle => is_mouse_button_pressed(MouseButton::Middle),
+    }
+}
+
+/// OS ウィンドウ上のスクリーン座標 (mx, my) を、
+/// レターボックス比率（アスペクト比維持）に基づき 仮想画面 (virt_w x virt_h) の座標 (vx, vy) に変換する
+pub fn screen_to_virtual(
+    mx: f32,
+    my: f32,
+    win_w: f32,
+    win_h: f32,
+    virt_w: f32,
+    virt_h: f32,
+) -> (i32, i32) {
+    let scale = (win_w / virt_w).min(win_h / virt_h);
+    if scale <= 0.0 {
+        return (0, 0);
+    }
+    let draw_w = virt_w * scale;
+    let draw_h = virt_h * scale;
+    let offset_x = ((win_w - draw_w) * 0.5).floor();
+    let offset_y = ((win_h - draw_h) * 0.5).floor();
+
+    let vx = ((mx - offset_x) / scale).floor() as i32;
+    let vy = ((my - offset_y) / scale).floor() as i32;
+    (vx, vy)
+}
+
+pub fn virtual_mouse_position() -> (i32, i32) {
+    let (mx, my) = mouse_position();
+    screen_to_virtual(
+        mx,
+        my,
+        screen_width(),
+        screen_height(),
+        SCREEN_WIDTH as f32,
+        SCREEN_HEIGHT as f32,
+    )
+}
+
 /// スプライトの元の矩形 `(x, y, w, h)` の中心を基準（ピボット）として、
 /// 回転角 `rotate_deg`（度数法・時計回り）および拡大率 `scale` を適用した描画座標と `DrawTextureParams` を計算する。
 pub fn compute_sprite_draw_params(
@@ -2248,9 +2364,39 @@ fn register_engine_api(
         );
         mrb_define_cmethod(
             vm,
-            obj_class,
+            obj_class.clone(),
             "btn",
             Box::new(|_vm, _args| Ok(Rc::new(RObject::boolean(false)))),
+        );
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            "btnp",
+            Box::new(|_vm, _args| Ok(Rc::new(RObject::boolean(false)))),
+        );
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            "mouse_x",
+            Box::new(|_vm, _args| Ok(Rc::new(RObject::integer(0)))),
+        );
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            "mouse_y",
+            Box::new(|_vm, _args| Ok(Rc::new(RObject::integer(0)))),
+        );
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            "mouse_wheel",
+            Box::new(|_vm, _args| Ok(Rc::new(RObject::float(0.0)))),
+        );
+        mrb_define_cmethod(
+            vm,
+            obj_class,
+            "show_mouse",
+            Box::new(|_vm, _args| Ok(Rc::new(RObject::nil()))),
         );
         return;
     }
@@ -2579,23 +2725,74 @@ fn register_engine_api(
         }),
     );
 
-    // btn(id): ボタン入力判定 (0:左, 1:右, 2:上, 3:下, 4:Z/Space, 5:X/Enter)
+    // btn(id_or_sym): ボタン入力判定（キーボード: 0..5 または :left, :right, :up, :down, :z, :x / マウス: 6..8 または :mouse_l, :mouse_r, :mouse_m）
     mrb_define_cmethod(
         vm,
         obj_class.clone(),
         "btn",
         Box::new(|_vm, args| {
-            let id = arg_i32(args, 0, 0);
-            let pressed = match id {
-                0 => is_key_down(KeyCode::Left) || is_key_down(KeyCode::A),
-                1 => is_key_down(KeyCode::Right) || is_key_down(KeyCode::D),
-                2 => is_key_down(KeyCode::Up) || is_key_down(KeyCode::W),
-                3 => is_key_down(KeyCode::Down) || is_key_down(KeyCode::S),
-                4 => is_key_down(KeyCode::Z) || is_key_down(KeyCode::Space),
-                5 => is_key_down(KeyCode::X) || is_key_down(KeyCode::Enter),
-                _ => false,
-            };
+            let pressed = parse_button_arg(args, 0)
+                .map(is_button_down)
+                .unwrap_or(false);
             Ok(Rc::new(RObject::boolean(pressed)))
+        }),
+    );
+
+    // btnp(id_or_sym): ボタンがこのフレームで押された瞬間か判定
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "btnp",
+        Box::new(|_vm, args| {
+            let pressed = parse_button_arg(args, 0)
+                .map(is_button_pressed)
+                .unwrap_or(false);
+            Ok(Rc::new(RObject::boolean(pressed)))
+        }),
+    );
+
+    // mouse_x: 仮想スクリーン (256x256) 上のマウス X 座標
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "mouse_x",
+        Box::new(|_vm, _args| {
+            let (mx, _) = virtual_mouse_position();
+            Ok(Rc::new(RObject::integer(mx as i64)))
+        }),
+    );
+
+    // mouse_y: 仮想スクリーン (256x256) 上のマウス Y 座標
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "mouse_y",
+        Box::new(|_vm, _args| {
+            let (_, my) = virtual_mouse_position();
+            Ok(Rc::new(RObject::integer(my as i64)))
+        }),
+    );
+
+    // mouse_wheel: マウスホイールのスクロール量（縦方向）
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "mouse_wheel",
+        Box::new(|_vm, _args| {
+            let (_, wy) = mouse_wheel();
+            Ok(Rc::new(RObject::float(wy as f64)))
+        }),
+    );
+
+    // show_mouse(visible = true): OS マウスカーソルの表示/非表示を切り替え
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "show_mouse",
+        Box::new(|_vm, args| {
+            let visible = arg_bool(args, 0, true);
+            show_mouse(visible);
+            Ok(Rc::new(RObject::nil()))
         }),
     );
 
@@ -3255,6 +3452,77 @@ mod tests {
         assert_eq!(WINDOW_WIDTH, 512);
         assert_eq!(WINDOW_HEIGHT, 512);
         assert_eq!(SPRITE_SIZE, 16);
+    }
+
+    #[test]
+    fn test_screen_to_virtual_coordinates() {
+        // 等倍 512x512 ウィンドウ -> 256x256 仮想画面（スケール 2.0, オフセット 0）
+        assert_eq!(screen_to_virtual(0.0, 0.0, 512.0, 512.0, 256.0, 256.0), (0, 0));
+        assert_eq!(screen_to_virtual(100.0, 200.0, 512.0, 512.0, 256.0, 256.0), (50, 100));
+        assert_eq!(screen_to_virtual(511.0, 511.0, 512.0, 512.0, 256.0, 256.0), (255, 255));
+
+        // 横長 640x480 ウィンドウ -> 256x256 仮想画面（スケール 1.875, 480x480 表示, 左右オフセット 80.0）
+        assert_eq!(screen_to_virtual(80.0, 0.0, 640.0, 480.0, 256.0, 256.0), (0, 0));
+        assert_eq!(screen_to_virtual(560.0, 480.0, 640.0, 480.0, 256.0, 256.0), (256, 256));
+        // 黒帯内（左側）
+        assert!(screen_to_virtual(0.0, 240.0, 640.0, 480.0, 256.0, 256.0).0 < 0);
+    }
+
+    #[test]
+    fn test_button_parsing_symbols_and_numbers() {
+        assert_eq!(parse_button_name("left"), Some(ButtonId::Left));
+        assert_eq!(parse_button_name("l"), Some(ButtonId::Left));
+        assert_eq!(parse_button_name("right"), Some(ButtonId::Right));
+        assert_eq!(parse_button_name("r"), Some(ButtonId::Right));
+        assert_eq!(parse_button_name("up"), Some(ButtonId::Up));
+        assert_eq!(parse_button_name("u"), Some(ButtonId::Up));
+        assert_eq!(parse_button_name("down"), Some(ButtonId::Down));
+        assert_eq!(parse_button_name("d"), Some(ButtonId::Down));
+        assert_eq!(parse_button_name("z"), Some(ButtonId::A));
+        assert_eq!(parse_button_name("space"), Some(ButtonId::A));
+        assert_eq!(parse_button_name("btn_a"), Some(ButtonId::A));
+        assert_eq!(parse_button_name("x"), Some(ButtonId::B));
+        assert_eq!(parse_button_name("enter"), Some(ButtonId::B));
+        assert_eq!(parse_button_name("btn_b"), Some(ButtonId::B));
+        assert_eq!(parse_button_name("mouse_l"), Some(ButtonId::MouseLeft));
+        assert_eq!(parse_button_name("click"), Some(ButtonId::MouseLeft));
+        assert_eq!(parse_button_name("mouse_r"), Some(ButtonId::MouseRight));
+        assert_eq!(parse_button_name("mouse_m"), Some(ButtonId::MouseMiddle));
+        assert_eq!(parse_button_name("invalid"), None);
+    }
+
+    #[test]
+    fn test_mouse_and_btn_api_in_ruby_script() {
+        let script = r#"
+            $bx = btn(:left)
+            $bm = btn(:mouse_l)
+            $bpm = btnp(:mouse_l)
+            $mx = mouse_x
+            $my = mouse_y
+            $mw = mouse_wheel
+            show_mouse(false)
+            show_mouse(true)
+            show_mouse
+            $ok = true
+        "#;
+        let (tail, mrb_bytes) = cli::compile_ruby_script_str(script).unwrap();
+        let runtime = GameRuntime::new(&tail, &mrb_bytes, true).unwrap();
+        assert_eq!(
+            runtime.vm.globals.get("$ok").map(|v| v.as_ref().clone()),
+            Some(RObject::boolean(true))
+        );
+        assert_eq!(
+            runtime.vm.globals.get("$bx").map(|v| v.as_ref().clone()),
+            Some(RObject::boolean(false))
+        );
+        assert_eq!(
+            runtime.vm.globals.get("$bm").map(|v| v.as_ref().clone()),
+            Some(RObject::boolean(false))
+        );
+        assert_eq!(
+            runtime.vm.globals.get("$bpm").map(|v| v.as_ref().clone()),
+            Some(RObject::boolean(false))
+        );
     }
 
     #[test]
@@ -4024,6 +4292,21 @@ ch0 T120 L4 O4 c d e f
             GameRuntime::new(&tail_data, &mrb_bytes, true).expect("Example should initialize");
 
         for _ in 0..5 {
+            runtime.call_update();
+            runtime.call_draw();
+        }
+    }
+
+    #[test]
+    fn test_mouse_example_script() {
+        let (_, tail_data, mrb_bytes) =
+            cli::compile_ruby_script_file(std::path::Path::new("examples/mouse.rb"))
+                .expect("examples/mouse.rb should compile");
+
+        let mut runtime =
+            GameRuntime::new(&tail_data, &mrb_bytes, true).expect("Mouse example should initialize");
+
+        for _ in 0..10 {
             runtime.call_update();
             runtime.call_draw();
         }

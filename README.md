@@ -155,7 +155,13 @@ ch2 wave=noise  vol=2 T140 L8 O2 c r >>> c r <<<
 - `pal(c0, c1)` / `palt(col, transparent)` : パレット色置換 / 透過色設定
 
 ### 入力
-- `btn(id)` : 押し続け判定（`0:左, 1:右, 2:上, 3:下, 4:Z/Space, 5:X/Enter`）
+- `btn(id_or_sym)` : 押し続け判定
+  - キーボード: `0: :left`, `1: :right`, `2: :up`, `3: :down`, `4: :z / :space`, `5: :x / :enter`
+  - マウス: `6: :mouse_l` (左クリック), `7: :mouse_r` (右クリック), `8: :mouse_m` (中クリック)
+- `btnp(id_or_sym)` : このフレームで新たに押された瞬間判定（クリック検出や単発アクションに最適）
+- `mouse_x` / `mouse_y` : 仮想画面（256x256）基準でのマウス座標（アスペクト比維持のレターボックス補正済み）
+- `mouse_wheel` : マウスホイールのスクロール量（上: 正、下: 負）
+- `show_mouse(visible = true)` : OS 標準マウスカーソルの表示 / 非表示切り替え
 
 ---
 
@@ -181,6 +187,7 @@ uk encode se.wav --id 10
 ## 📂 サンプルスクリプト
 
 - **`game.rb`**: 本格ローグライト・サバイバルアクション「USAKAME SURVIVORS」（スプライト、アニメーション、敵AI、ボス戦、BGM・効果音、レベルアップモーダル等を含む完全なゲーム）
+- **`examples/mouse.rb`**: マウス入力・ホイール・ドラッグ描画・絵文字＆スプライトカスタムカーソル対話型デモ
 - **`examples/sound.rb`**: シンセ効果音・プリセットSE・BGMシーケンスの対話型プレビューデモ
 - **`examples/tilemap.rb`**: タイルマップ描画と破壊・暗視パレット置換デモ
 - **`examples/camera_clip.rb`**: カメラ追従と分割画面クリッピングデモ
