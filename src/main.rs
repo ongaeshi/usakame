@@ -4313,6 +4313,52 @@ ch0 T120 L4 O4 c d e f
     }
 
     #[test]
+    fn test_sprite_editor_example_script() {
+        let (_, tail_data, mrb_bytes) =
+            cli::compile_ruby_script_file(std::path::Path::new("examples/sprite_editor.rb"))
+                .expect("examples/sprite_editor.rb should compile");
+
+        let mut runtime =
+            GameRuntime::new(&tail_data, &mrb_bytes, true).expect("Sprite editor should initialize");
+
+        for _ in 0..10 {
+            runtime.call_update();
+            runtime.call_draw();
+        }
+
+        // スプライトエディタで出力される形式が __END__ リソースとして正常にパースできることを検証
+        let sample_output = r#"
+@SPRITE 0
+....77....77....
+...7EE7..7EE7...
+...7EE7..7EE7...
+...7777..7777...
+...7777777777...
+..888888888888..
+.77707777770777.
+.77707777770777.
+.777777EE777777.
+..777777777777..
+...8888AA8888...
+..778888888877..
+..77.777777.77..
+....777..777....
+...777....777...
+................
+"#;
+        let sprites = parse_tail_resources(sample_output);
+        assert!(sprites.contains_key(&0));
+        let sp0 = &sprites[&0];
+        assert_eq!(sp0.width, 16);
+        assert_eq!(sp0.height, 16);
+        // (0, 0) は '.' (透明)
+        assert_eq!(sp0.rgba[3], 0);
+        // (4, 0) は '7' (白 = 0xFF, 0xF1, 0xE8, 0xFF)
+        let off = 4 * 4;
+        assert_eq!(sp0.rgba[off + 3], 255);
+    }
+
+    #[test]
     fn test_pal_and_palt_state_and_sprite_rgba() {
         let mut state = DrawState::default();
         assert!(state.is_default_palette());
@@ -4543,6 +4589,34 @@ __END__
             runtime.call_update();
             runtime.call_draw();
         }
+    }
+
+    #[test]
+    fn test_tilemap_editor_example_script() {
+        let (_, tail_data, mrb_bytes) =
+            cli::compile_ruby_script_file(std::path::Path::new("examples/tilemap_editor.rb"))
+                .expect("examples/tilemap_editor.rb should compile");
+
+        let mut runtime =
+            GameRuntime::new(&tail_data, &mrb_bytes, true).expect("Tilemap editor should initialize");
+
+        for _ in 0..10 {
+            runtime.call_update();
+            runtime.call_draw();
+        }
+
+        // タイルマップエディタが出力する形式の @MAP および @SPRITE をパースできることを検証
+        let sample_map_output = r#"
+@MAP 0 0
+11111111111111111111111111111111
+1..............................1
+1...4444.......................1
+1..............................1
+"#;
+        let parsed_map = parse_tail_map(sample_map_output);
+        assert_eq!(parsed_map.get(0, 0), 1);
+        assert_eq!(parsed_map.get(1, 1), 0);
+        assert_eq!(parsed_map.get(4, 2), 4);
     }
 
     #[test]
