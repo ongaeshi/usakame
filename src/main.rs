@@ -3506,6 +3506,20 @@ __END__
     }
 
     #[test]
+    fn test_audio_wav_encode_and_parse() {
+        let pcm = sound::synthesize_preset_pcm("coin", 1.0, 1.0, 1.0).unwrap();
+        let wav_bytes = sound::pcm_to_wav_bytes(&pcm, sound::SAMPLE_RATE);
+        let block = cli::encode_audio_bytes_to_script_block(&wav_bytes, "coin.wav", 42, false)
+            .expect("Should encode WAV bytes into @WAV block");
+        assert!(block.contains("@WAV 42"));
+
+        let (sfx_map, _) = sound::parse_tail_sounds(&block);
+        assert!(sfx_map.contains_key(&42));
+        assert!(!sfx_map[&42].pcm.is_empty());
+        assert_eq!(sfx_map[&42].wav_bytes, wav_bytes);
+    }
+
+    #[test]
     fn test_misaki_japanese_font_lookup() {
         for ch in ['あ', 'い', 'ウ', 'サ', 'ギ', '兎', '亀', 'ｱ', '！'] {
             let rows = lookup_misaki_glyph(ch as u16)
@@ -3846,6 +3860,81 @@ ch0 T120 L4 O4 c d e f
             assert!(bank.inline_cache.contains_key("jump"));
             assert!(bank.inline_cache.contains_key("tri c3"));
         }
+    }
+
+    #[test]
+    fn test_sound_api_callable_at_top_level() {
+        let src = "$t = 0\nmusic(0)\nsfx(:jump)\ndef update\n  $t += 1\nend\ndef draw; end\n__END__\n@MUSIC 0\nch0 T120 L4 O4 c d e f\n";
+        let (tail, mrb) = cli::compile_ruby_script_str(src).unwrap();
+        let mut runtime = GameRuntime::new(&tail, &mrb, true).unwrap();
+        assert_eq!(runtime.sound_bank.borrow().current_music_id, Some(0));
+        runtime.call_update();
+        let t: i32 = runtime.vm.globals.get("$t").unwrap().as_ref().try_into().unwrap();
+        assert_eq!(t, 1);
+    }
+
+    #[test]
+    fn test_game_script_sound_resources() {
+        let (_, tail_data, mrb_bytes) =
+            cli::compile_ruby_script_file(std::path::Path::new("game.rb"))
+                .expect("game.rb should compile");
+        let mut runtime =
+            GameRuntime::new(&tail_data, &mrb_bytes, true).expect("game.rb should initialize");
+        {
+            let bank = runtime.sound_bank.borrow();
+            for id in 0..=16 {
+                assert!(bank.sfx.contains_key(&id), "game.rb @SFX {} missing", id);
+            }
+            for id in 0..=2 {
+                assert!(bank.music.contains_key(&id), "game.rb @MUSIC {} missing", id);
+            }
+            // トップレベルでタイトル BGM を要求している
+            assert_eq!(bank.current_music_id, Some(0));
+        }
+        runtime.call_update();
+        runtime.call_draw();
+
+        // 各 @MUSIC の ch0..ch3 が同じ長さ（ループ時にズレない）であること
+        let mut block: Vec<String> = Vec::new();
+        let mut blocks: Vec<Vec<String>> = Vec::new();
+        for line in tail_data.lines() {
+            let l = line.trim();
+            if l.starts_with('@') {
+                if !block.is_empty() {
+                    blocks.push(std::mem::take(&mut block));
+                }
+                if !l.starts_with("@MUSIC") {
+                    continue;
+                }
+                block.push(String::new());
+            } else if !block.is_empty() && l.starts_with("ch") {
+                block.push(l[3..].trim().to_string());
+            }
+        }
+        if !block.is_empty() {
+            blocks.push(block);
+        }
+        assert_eq!(blocks.len(), 3);
+        for b in &blocks {
+            let lens: Vec<usize> = b[1..]
+                .iter()
+                .map(|s| sound::parse_and_synthesize_sfx_pcm(s).len())
+                .collect();
+            let max = *lens.iter().max().unwrap();
+            let min = *lens.iter().min().unwrap();
+            assert!(max - min < sound::SAMPLE_RATE as usize / 50, "channel lengths differ: {:?}", lens);
+        }
+    }
+
+    #[test]
+    fn test_sound_sharp_is_not_comment() {
+        assert_eq!(sound::strip_sound_comment("c# d# # comment"), "c# d#");
+        assert_eq!(sound::strip_sound_comment("# whole line"), "");
+        // シャープ付きは半音上で、ナチュラルとは異なる波形になる
+        let natural = sound::parse_and_synthesize_sfx_pcm("c2 d2");
+        let sharp = sound::parse_and_synthesize_sfx_pcm("c#2 d#2");
+        assert_eq!(natural.len(), sharp.len());
+        assert_ne!(natural, sharp);
     }
 
     #[test]

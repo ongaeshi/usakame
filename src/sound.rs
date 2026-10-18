@@ -458,6 +458,17 @@ pub fn synthesize_preset_pcm(name: &str, pitch_mul: f32, speed_mul: f32, vol_mul
 // MML / ノート文字列パーサ
 // ==========================================
 
+/// 行内コメントを除去する。`#` は行頭または空白の直後にある場合のみコメント扱い（`c#` のシャープは保持）
+pub fn strip_sound_comment(raw_line: &str) -> &str {
+    let bytes = raw_line.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'#' && (i == 0 || bytes[i - 1].is_ascii_whitespace()) {
+            return raw_line[..i].trim();
+        }
+    }
+    raw_line.trim()
+}
+
 fn parse_semitone(note_char: char, accidental: Option<char>) -> Option<i32> {
     let base = match note_char.to_ascii_lowercase() {
         'c' => 0,
@@ -523,11 +534,7 @@ pub fn parse_and_synthesize_sfx_pcm(spec: &str) -> Vec<i16> {
     let mut note_tokens: Vec<String> = Vec::new();
 
     for raw_line in trimmed.lines() {
-        let line = raw_line
-            .split('#')
-            .next()
-            .unwrap_or("")
-            .trim();
+        let line = strip_sound_comment(raw_line);
         if line.is_empty() {
             continue;
         }
@@ -941,7 +948,7 @@ impl MusicData {
         let mut pattern_rows: Vec<[i32; 4]> = Vec::new();
 
         for raw_line in spec.lines() {
-            let line = raw_line.split('#').next().unwrap_or("").trim();
+            let line = strip_sound_comment(raw_line);
             if line.is_empty() {
                 continue;
             }

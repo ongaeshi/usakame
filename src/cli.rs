@@ -53,7 +53,7 @@ USAGE:
     uk run [script.rb]                  Run script natively with live hot-reload (default: game.rb)
     uk build [script.rb] [-o <output>]  Build a standalone single binary from script
     uk browser [script.rb] [-p <port>]  Run script in the browser with live hot-reload
-    uk encode <image.png> [--id <id>]   Encode PNG image/sheet into Base64 (@PNG / @SHEET) for script
+    uk encode <file> [--id <id>]        Encode PNG image/sheet or WAV/OGG audio into Base64 for script
     uk --help, -h                       Show this help message
     uk --version, -V                    Show version information"
     );
@@ -293,18 +293,55 @@ pub fn encode_png_bytes_to_script_block(
     Ok(out)
 }
 
+/// 音声ファイル（WAV/OGG）のバイト列を `__END__` セクション用の `@WAV` または `@OGG` テキストブロックに変換する。
+pub fn encode_audio_bytes_to_script_block(
+    audio_bytes: &[u8],
+    label: &str,
+    start_id: i32,
+    is_ogg: bool,
+) -> Result<String, String> {
+    if audio_bytes.is_empty() {
+        return Err(format!("Audio file `{}` is empty", label));
+    }
+    let b64 = crate::encode_base64(audio_bytes);
+    let tag = if is_ogg { "@OGG" } else { "@WAV" };
+    let mut out = String::new();
+    out.push_str(&format!("# {} ({} bytes)\n", label, audio_bytes.len()));
+    out.push_str(&format!("{} {}\n", tag, start_id));
+
+    for chunk in b64.as_bytes().chunks(76) {
+        out.push_str(std::str::from_utf8(chunk).unwrap_or(""));
+        out.push('\n');
+    }
+
+    Ok(out)
+}
+
 pub fn cmd_encode(
-    image_path: &Path,
+    file_path: &Path,
     start_id: i32,
     tile_size: Option<(u16, u16)>,
 ) -> Result<String, String> {
-    let bytes = fs::read(image_path)
-        .map_err(|e| format!("Failed to read PNG `{}`: {}", image_path.display(), e))?;
-    let label = image_path
+    let bytes = fs::read(file_path)
+        .map_err(|e| format!("Failed to read asset `{}`: {}", file_path.display(), e))?;
+    let label = file_path
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "sprite.png".to_string());
-    let block = encode_png_bytes_to_script_block(&bytes, &label, start_id, tile_size)?;
+        .unwrap_or_else(|| "asset".to_string());
+    let ext = file_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    let block = if ext == "wav" {
+        encode_audio_bytes_to_script_block(&bytes, &label, start_id, false)?
+    } else if ext == "ogg" {
+        encode_audio_bytes_to_script_block(&bytes, &label, start_id, true)?
+    } else {
+        encode_png_bytes_to_script_block(&bytes, &label, start_id, tile_size)?
+    };
+
     print!("{}", block);
     Ok(block)
 }

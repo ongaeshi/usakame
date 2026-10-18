@@ -135,6 +135,22 @@ $lightnings = []
 $popups = []
 
 # ==============================================================================
+# サウンド (効果音・BGM の定義はファイル末尾のデータセクションの @SFX / @MUSIC)
+#   ch0: プレイヤー行動 / ch1: アイテム取得 / ch2: 敵撃破 / ch3: 爆発・ボス
+# ==============================================================================
+$se_last = [-99, -99, -99, -99]
+
+# 同一チャンネルで gap フレーム以内の連打を間引いて効果音を鳴らす（大量撃破・大量取得時の音割れ防止）
+def se(id, ch, gap)
+  if $t - $se_last[ch] >= gap
+    $se_last[ch] = $t
+    sfx(id, ch)
+  end
+end
+
+music(0)
+
+# ==============================================================================
 # ユーティリティ関数 (100% 整数演算)
 # ==============================================================================
 def rand_int(max)
@@ -420,6 +436,8 @@ def start_new_game
   $popups = []
 
   setup_arena_map
+  sfx(14, 0)
+  music(1)
   add_popup($px - 16, $py - 12, "SURVIVE! 🐰🐢", 10)
 end
 
@@ -471,6 +489,7 @@ def gain_exp(amount)
     $lv += 1
     $next_exp = 8 + ($lv * 6) + (($lv * $lv) / 2)
     $shake = 6
+    sfx(12, 0)
     roll_levelup_choices
     $state = STATE_LEVELUP
   end
@@ -519,6 +538,7 @@ def trigger_tag_switch
     $tag_gauge = 0
     $tag_buff = 150 + $upg_lv[7] * 30
     $shake = 10
+    sfx(6, 0)
     add_popup($px - 20, $py - 16, "⚡TAG BURST!⚡", 10)
     burst_dmg = scale_dmg(22 + $lv * 3)
 
@@ -551,6 +571,7 @@ def trigger_tag_switch
       i += 1
     end
   else
+    sfx(5, 0)
     add_popup($px - 12, $py - 10, ($form == 0) ? "🐰USAGI!" : "🐢KAME!", ($form == 0) ? 14 : 11)
   end
 end
@@ -565,11 +586,13 @@ def trigger_active_skill
 
   if $form == 0
     # 🐰 ラビット・ブリンク: 残像と星屑の渦を残して高速移動
+    sfx(3, 0)
     add_popup($px - 10, $py - 10, "💨BLINK!", 12)
     spawn_burst_particles($px + 8, $py + 8, 12, 10)
     spawn_bullet($px, $py, -$dir_x10, -$dir_y10, scale_dmg(18 + $lv * 2), 35, 2, 4, 0)
   else
     # 🐢 シェル・スピン: 周囲の岩・木箱を粉砕し、体当たりオーラを展開
+    sfx(4, 0)
     add_popup($px - 14, $py - 10, "🛡️SHELL SPIN!", 11)
     spawn_burst_particles($px + 8, $py + 8, 11, 12)
     cx = ($px + 8) / 16
@@ -849,6 +872,7 @@ def damage_player(raw_dmg)
   $hp -= dmg
   $inv_timer = 32
   $shake = 8
+  sfx(2, 0)
   spawn_burst_particles($px + 8, $py + 8, 8, 10)
   add_popup($px - 4, $py - 10, "-#{dmg}", 8)
 
@@ -861,6 +885,8 @@ def damage_player(raw_dmg)
       $best_frames = $run_frames
     end
     $state = STATE_GAMEOVER
+    stop_music
+    sfx(16, 0)
   end
 end
 
@@ -888,6 +914,8 @@ def update_waves_and_spawns
     bx = clamp_val($px + 96, 48, WORLD_W - 64)
     by = clamp_val($py - 64, 48, WORLD_H - 64)
     spawn_enemy(5, bx, by)
+    sfx(9, 3)
+    music(2)
     add_popup($px - 28, $py - 20, "⚠️BOSS: OGRE KING!👹", 8)
   end
 
@@ -899,6 +927,8 @@ def update_waves_and_spawns
     bx = clamp_val($px - 96, 48, WORLD_W - 64)
     by = clamp_val($py - 80, 48, WORLD_H - 64)
     spawn_enemy(6, bx, by)
+    sfx(9, 3)
+    music(2)
     add_popup($px - 32, $py - 20, "⚠️FINAL BOSS: DRAGON!🐉", 8)
   end
 
@@ -949,6 +979,7 @@ def update_enemies
         # 🐉 最終ボス撃破！
         $score += 5000
         $shake = 20
+        sfx(10, 3)
         $cleared_once = true
         if $score > $high_score
           $high_score = $score
@@ -959,17 +990,21 @@ def update_enemies
         if $endless_mode == false
           victory_triggered = true
         else
+          music(1)
           add_popup(ex, ey, "🐉DRAGON SLAIN! +5000", 10)
         end
       elsif kind == 5
         # 👹 中ボス撃破！
         $score += 1500
         $shake = 14
+        sfx(10, 3)
+        music(1)
         spawn_item(ex, ey, 2, 30)
         spawn_item(ex + 10, ey, 3, 50)
         spawn_item(ex - 10, ey, 5, 1)
         add_popup(ex - 12, ey - 8, "👹BOSS DOWN! +1500", 10)
       else
+        se(1, 2, 3)
         $score += 25 + kind * 15
         r = rand_int(100)
         if r < 4
@@ -1066,6 +1101,8 @@ def update_enemies
   $enemies = next_enemies
   if victory_triggered
     $state = STATE_VICTORY
+    stop_music
+    sfx(15, 0)
   end
 end
 
@@ -1099,16 +1136,20 @@ def update_items
       val = it[3]
       if kind <= 2
         gain_exp(val)
+        se(0, 1, 3)
         $tag_gauge = clamp_val($tag_gauge + 3, 0, 100)
       elsif kind == 3
         $hp = clamp_val($hp + val, 0, $max_hp)
+        sfx(7, 1)
         add_popup($px - 8, $py - 10, "+#{val}HP🍎", 11)
         spawn_burst_particles($px + 8, $py + 8, 11, 8)
       elsif kind == 4
+        sfx(11, 1)
         add_popup($px - 16, $py - 12, "🧲ALL ATTRACT!", 10)
         attract_all = true
       elsif kind == 5
         $shake = 12
+        sfx(8, 3)
         add_popup($px - 16, $py - 12, "💣MEGA BOMB!", 8)
         j = 0
         while j < $enemies.length
@@ -1195,10 +1236,13 @@ def update
   if $state == STATE_LEVELUP
     if $btnp0 || $btnp2
       $cursor = ($cursor - 1) % 3
+      sfx(13, 0)
     elsif $btnp1 || $btnp3
       $cursor = ($cursor + 1) % 3
+      sfx(13, 0)
     elsif $btnp4 || $btnp5
       apply_upgrade($choices[$cursor])
+      sfx(14, 0)
       $state = STATE_PLAY
     end
     return
@@ -1222,9 +1266,12 @@ def update
     if $btnp4
       $endless_mode = true
       $state = STATE_PLAY
+      sfx(14, 0)
+      music(1)
       add_popup($px - 24, $py - 12, "🔥ENDLESS MODE!🔥", 10)
     elsif $btnp5
       $state = STATE_TITLE
+      music(0)
     end
     return
   end
@@ -1984,3 +2031,61 @@ CCCC1CCCCCC1CCCC
 2....4......7........4.........2
 2..7...3......7..6.....3...7...2
 22222222222222222222222222222222
+
+# ==============================================================================
+# 効果音 (sfx id)  ※ c2 = C4。:fade :slide :vib :drop :arp はノート単位エフェクト
+# ==============================================================================
+# 0: 経験値ジェム取得
+@SFX 0 wave=pulse12 speed=1 e4 b4:fade
+# 1: 敵撃破
+@SFX 1 wave=noise speed=2 c4 c2:fade
+# 2: 被ダメージ
+@SFX 2 :hit
+# 3: 🐰 ラビット・ブリンク
+@SFX 3 wave=pulse speed=2 c3 c5:slide
+# 4: 🐢 シェル・スピン
+@SFX 4 wave=saw speed=3 c1 c2:slide c1:slide:fade
+# 5: タッグ切替（通常）
+@SFX 5 wave=square speed=2 g3 c4:fade
+# 6: タッグバースト
+@SFX 6 wave=square speed=2 c3 e3 g3 c4 e4 g4 c5:arp:fade
+# 7: 回復 🍎
+@SFX 7 wave=tri speed=3 c3 e3 g3 c4:fade
+# 8: 💣 メガボム
+@SFX 8 :explosion
+# 9: ⚠️ ボス出現警告
+@SFX 9 wave=saw speed=8 a2:vib r a2:vib r a2:vib:fade
+# 10: ボス撃破
+@SFX 10 :explosion pitch=0.6 speed=0.5
+# 11: 🧲 全回収
+@SFX 11 wave=pulse speed=2 c3 g3 c4 g4 c5:fade
+# 12: レベルアップ
+@SFX 12 :powerup
+# 13: カーソル移動
+@SFX 13 :select
+# 14: 決定
+@SFX 14 :coin
+# 15: 勝利ファンファーレ
+@SFX 15 wave=square speed=5 c3 c3 c3 c3*3 g#2*3 a#2*3 c3 r a#2 c3*6:vib:fade
+# 16: ゲームオーバー
+@SFX 16 :gameover
+
+# ==============================================================================
+# BGM (music id)  ※ ch0..ch3 に MML: T=テンポ L=基本音長 O=オクターブ < > でオクターブ移動
+# ==============================================================================
+# 0: タイトル
+@MUSIC 0
+ch0 wave=pulse vol=4 T100 L4 O4 e g > c < b  a g e2  f a > d c  < b g > c2
+ch1 wave=tri vol=6 T100 L2 O3 c e  f g  d f  g c
+
+# 1: フィールド (Wave 1〜5)
+@MUSIC 1
+ch0 wave=square vol=3 T150 L8 O4 a > c e < a > d c < b g  a > c e a g e d c  < b > d g < b > c < b a g  a e a > c < a4 r4
+ch1 wave=tri vol=6 T150 L8 O2 a a > a < a a a > a < a  f f > f < f f f > f < f  g g > g < g g g > g < g  a a > a < a e e > e < e
+ch2 wave=noise vol=2 T150 L8 O2 c r >>> c r <<< c c >>> c r <<<  c r >>> c r <<< c c >>> c r <<<  c r >>> c r <<< c c >>> c r <<<  c r >>> c r <<< c c >>> c c <<<
+
+# 2: ボス戦
+@MUSIC 2
+ch0 wave=saw vol=3 T170 L16 O4 e e > e < e d# d# > d# < d# e e > e < e g f# e d#  c c > c < c b b > b < b c c > c < c d# e f# g
+ch1 wave=tri vol=6 T170 L8 O2 e e e e d# d# d# d#  c c c c d# d# e e
+ch2 wave=noise vol=2 T170 L8 O2 c >>> c <<< c >>> c <<<  c >>> c <<< c >>> c <<<  c >>> c <<< c >>> c <<<  c >>> c c c <<<
