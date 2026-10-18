@@ -22,10 +22,10 @@ $FADE_PALS = [
 
 # 全セリフ一覧 [話者(:usagi / :kame / :both), 行1, 行2, 演出ID]
 $DIALOGS = [
-  [:usagi, "こんにちは！わたしはうさぎ", nil, :greet_usagi],
+  [:usagi, "こんにちは！わたしはうさぎ。", nil, :greet_usagi],
   [:kame,  "わたしは亀です。", nil, :greet_kame],
   [:usagi, "これは", nil, :none],
-  [:kame,  "今開発中の usakame game", "engine のデモです。", :logo],
+  [:kame,  "今開発中の USAKAME GAME ENGINE のデモです。", nil, :logo],
   [:usagi, "ピクセルスタイルの", "キャラクターの描画と移動", :move],
   [:kame,  "タイルマップによる", "配置とスクロール", :scroll],
   [:usagi, "キーボードとマウス入力", nil, :input],
@@ -33,10 +33,10 @@ $DIALOGS = [
   [:usagi, "日本語フォントに標準対応", nil, :font],
   [:kame,  "絵文字をスプライトとして表示", "🎃⭐🩻", :emoji],
   [:usagi, "などの機能があります。", nil, :nod],
-  [:kame,  "他のファンタジーコンソールと", "比べて一番の特徴は", :light],
-  [:usagi, "コードとリソースを含めて", "すべて1つのファイル内で表現することです。", :singlefile],
+  [:kame,  "他のファンタジーコンソールと比べて一番の特徴は", nil, :light],
+  [:usagi, "コードとリソースを含めて", "すべて1つのファイルで表現することです。", :singlefile],
   [:kame,  "なのでファイルさえ渡せば", nil, :handover],
-  [:usagi, "同じエンジンを持っている環境さえあれば", "100%確実に動作します", :works],
+  [:usagi, "usakame エンジンがあれば", "100%確実に動作します", :works],
   [:kame,  "そこから改造するのもとっても簡単です", nil, :edit],
   [:usagi, "もちろん", nil, :none],
   [:kame,  "作成したプログラムを", ".exe形式で配布したり", :exe],
@@ -273,16 +273,16 @@ def draw
     case scene
     when :logo
       # usakame ロゴ看板
-      rectfill(38, 20, 218, 52, 0)
-      rect(38, 20, 218, 52, 10)
-      rect(40, 22, 216, 50, 7)
+      rectfill(38, 20, 188, 52, 0)
+      rect(38, 20, 188, 52, 10)
+      rect(40, 22, 186, 50, 7)
       print_text("🐰 usakame game engine 🐢", 46, 26, 10)
       print_text("RETRO 256x256 ENGINE", 62, 38, 12)
 
     when :font
       # 日本語フォント看板
-      rectfill(30, 22, 226, 52, 1)
-      rect(30, 22, 226, 52, 7)
+      rectfill(30, 22, 196, 52, 1)
+      rect(30, 22, 196, 52, 7)
       print_text("美咲フォント内蔵 (8x8)", 48, 26, 10)
       print_text("漢字・ひらがな・カタカナOK", 40, 38, 7)
 
@@ -296,39 +296,39 @@ def draw
 
     when :singlefile
       # 1ファイル完結アイコン
-      rectfill(40, 18, 216, 54, 0)
-      rect(40, 18, 216, 54, 11)
+      rectfill(40, 18, 170, 54, 0)
+      rect(40, 18, 170, 54, 11)
       print_text("📄 game.rb (1 FILE ONLY!)", 50, 24, 11)
       print_text("Code + Sprites + BGM + Map", 44, 38, 7)
 
     when :works
       # 100% 動作スタンプ
-      rectfill(56, 20, 200, 50, 8)
-      rect(58, 22, 198, 48, 7)
+      rectfill(56, 20, 144, 50, 8)
+      rect(58, 22, 144, 48, 7)
       print_text("💯 100% 確実に動作！", 66, 30, 7)
 
     when :edit
       # 改造も簡単
-      rectfill(44, 20, 212, 50, 4)
-      rect(44, 20, 212, 50, 9)
+      rectfill(44, 20, 170, 50, 4)
+      rect(44, 20, 170, 50, 9)
       print_text("🔧 エディタで即改造＆即反映", 50, 30, 10)
 
     when :exe
       # .exe 配布
-      rectfill(40, 20, 216, 50, 1)
-      rect(40, 20, 216, 50, 12)
+      rectfill(40, 20, 170, 50, 1)
+      rect(40, 20, 170, 50, 12)
       print_text("💻 uk build -> my_game.exe", 46, 30, 12)
 
     when :browser
       # ブラウザ実行
-      rectfill(40, 20, 216, 50, 1)
-      rect(40, 20, 216, 50, 10)
+      rectfill(30, 20, 196, 50, 1)
+      rect(30, 20, 196, 50, 10)
       print_text("🌐 uk browser -> WebAssembly!", 44, 30, 10)
 
     when :input
       # 入力ギミックのガイド
-      rectfill(40, 20, 216, 50, 0)
-      rect(40, 20, 216, 50, 14)
+      rectfill(40, 20, 170, 50, 0)
+      rect(40, 20, 170, 50, 14)
       print_text("⌨️ KEYBOARD & 🖱️ MOUSE", 54, 25, 14)
       print_text("画面をクリックしてみてね！", 50, 37, 7)
 
@@ -440,22 +440,22 @@ def draw
     line2 = cur[2]
 
     # ウィンドウ外枠・背景 (x: 10, y: 168, w: 236, h: 78)
-    rectfill(10, 168, 246, 246, 1) # 濃紺 1
-    rect(10, 168, 246, 246, 7)     # 白枠 7
-    rect(12, 170, 244, 244, 5)     # 暗灰内枠 5
+    rectfill(10, 168, 236, 236, 1) # 濃紺 1
+    rect(10, 168, 236, 236, 7)     # 白枠 7
+    rect(12, 170, 232, 232, 5)     # 暗灰内枠 5
 
     # 話者ネームプレート
-    plate_w = (speaker == :both) ? 144 : 76
-    rectfill(20, 158, 20 + plate_w, 170, 0) # 黒背景
+    plate_w = (speaker == :both) ? 80 : 30
+    rectfill(20, 158, 20 + plate_w, 15, 0) # 黒背景
     case speaker
     when :usagi
-      rect(20, 158, 20 + plate_w, 170, 14)   # ピンク枠
+      rect(20, 158, 20 + plate_w, 15, 14)   # ピンク枠
       print_text("🐰 うさぎ", 24, 161, 14)
     when :kame
-      rect(20, 158, 20 + plate_w, 170, 11)   # 緑枠
+      rect(20, 158, 20 + plate_w, 15, 11)   # 緑枠
       print_text("🐢 かめ", 24, 161, 11)
     when :both
-      rect(20, 158, 20 + plate_w, 170, 10)   # 黄枠
+      rect(20, 158, 20 + plate_w, 15, 10)   # 黄枠
       print_text("🐰 うさぎ ＆ 🐢 かめ", 24, 161, 10)
     end
 
