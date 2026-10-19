@@ -1597,6 +1597,76 @@ fn draw_sprite_transformed(
     }
 }
 
+/// メモリ上のピクセル配列（0..15 の整数または nil、16x16 スプライト）をダイレクト描画
+fn draw_pixel_data_direct(
+    data: &[Rc<RObject>],
+    state: &DrawState,
+    x: f32,
+    y: f32,
+    flip_x: bool,
+    flip_y: bool,
+    scale: f32,
+) {
+    if data.is_empty() || scale <= 0.0 {
+        return;
+    }
+    let size = 16;
+    for py in 0..size {
+        let src_y = if flip_y { size - 1 - py } else { py };
+        let mut px = 0;
+        while px < size {
+            let src_x = if flip_x { size - 1 - px } else { px };
+            let idx = src_y * size + src_x;
+            if idx >= data.len() {
+                px += 1;
+                continue;
+            }
+            let col_val = match &data[idx].value {
+                RValue::Integer(c) if (0..=15).contains(c) => Some(*c as i32),
+                _ => None,
+            };
+
+            let Some(col) = col_val else {
+                px += 1;
+                continue;
+            };
+
+            // 透過色判定 (palt)
+            if (state.palt_mask & (1 << col)) != 0 {
+                px += 1;
+                continue;
+            }
+
+            // 水平方向に同じ色が連続しているかスキャン（スパン結合）
+            let start_px = px;
+            px += 1;
+            while px < size {
+                let next_src_x = if flip_x { size - 1 - px } else { px };
+                let next_idx = src_y * size + next_src_x;
+                if next_idx >= data.len() {
+                    break;
+                }
+                let next_col = match &data[next_idx].value {
+                    RValue::Integer(c) if (0..=15).contains(c) => Some(*c as i32),
+                    _ => None,
+                };
+                if next_col != Some(col) {
+                    break;
+                }
+                px += 1;
+            }
+            let span_len = (px - start_px) as f32;
+            let draw_x = x + start_px as f32 * scale;
+            let draw_y = y + py as f32 * scale;
+            let draw_w = span_len * scale;
+            let draw_h = scale;
+
+            let final_color = state.map_color(col);
+            draw_rectangle(draw_x, draw_y, draw_w, draw_h, final_color);
+        }
+    }
+}
+
 /// 整数ピクセル座標系での矩形スパン (`w >= 1, h >= 1`)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PixelSpan {
@@ -2879,6 +2949,9 @@ fn register_engine_api(
                 let scale = arg_f32(args, 6, default_scale);
 
                 if let Some(first) = args.first() {
+                    if let RValue::Array(_) = first.value {
+                        return Ok(Rc::new(RObject::nil()));
+                    }
                     if matches!(first.value, RValue::String(_, _)) {
                         if let Ok(s) = String::try_from(first.as_ref()) {
                             if let Some(sp) = emoji_for_headless.borrow_mut().get_or_insert(&s, false) {
@@ -3023,9 +3096,21 @@ fn register_engine_api(
         );
         mrb_define_cmethod(
             vm,
-            obj_class,
+            obj_class.clone(),
             "fps",
             Box::new(|_vm, _args| Ok(Rc::new(RObject::integer(60)))),
+        );
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            "draw_sprite_data",
+            Box::new(|_vm, _args| Ok(Rc::new(RObject::nil()))),
+        );
+        mrb_define_cmethod(
+            vm,
+            obj_class,
+            "spr_data",
+            Box::new(|_vm, _args| Ok(Rc::new(RObject::nil()))),
         );
         return;
     }
@@ -3286,21 +3371,84 @@ fn register_engine_api(
             let rotate = arg_f32(args, 5, 0.0);
             let scale = arg_f32(args, 6, default_scale);
 
-            if let Some(first) = args.first()
-                && matches!(first.value, RValue::String(_, _))
-                && let Ok(emoji_str) = String::try_from(first.as_ref())
-            {
-                let mut atlas_ref = emoji_for_spr.borrow_mut();
-                if let Some(sprite) = atlas_ref.get_or_insert(&emoji_str, true) {
-                    draw_sprite_transformed(sprite, &state, x, y, flip_x, flip_y, rotate, scale);
+            if let Some(first) = args.first() {
+                if let RValue::Array(ref ary_cell) = first.value {
+                    let ary = ary_cell.borrow();
+                    draw_pixel_data_direct(&ary, &state, x, y, flip_x, flip_y, scale);
+                    return Ok(Rc::new(RObject::nil()));
                 }
-                return Ok(Rc::new(RObject::nil()));
+                if matches!(first.value, RValue::String(_, _))
+                    && let Ok(emoji_str) = String::try_from(first.as_ref())
+                {
+                    let mut atlas_ref = emoji_for_spr.borrow_mut();
+                    if let Some(sprite) = atlas_ref.get_or_insert(&emoji_str, true) {
+                        draw_sprite_transformed(sprite, &state, x, y, flip_x, flip_y, rotate, scale);
+                    }
+                    return Ok(Rc::new(RObject::nil()));
+                }
             }
 
             let id = arg_i32(args, 0, 0);
             let sprites_ref = sprites_for_spr.borrow();
             if let Some(sprite) = sprites_ref.get(&id) {
                 draw_sprite_transformed(sprite, &state, x, y, flip_x, flip_y, rotate, scale);
+            }
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
+
+    // draw_sprite_data(pixels, x = 0, y = 0, scale = 1.0, flip_x = false, flip_y = false): ピクセル配列ダイレクト描画
+    let state_for_draw_sp_data = draw_state.clone();
+    let cfg_for_draw_sp_data = config.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "draw_sprite_data",
+        Box::new(move |_vm, args| {
+            let state = *state_for_draw_sp_data.borrow();
+            if state.is_clip_empty() {
+                return Ok(Rc::new(RObject::nil()));
+            }
+            let default_scale = cfg_for_draw_sp_data.borrow().sprite_scale;
+            let x = arg_f32(args, 1, 0.0) - state.cam_x as f32;
+            let y = arg_f32(args, 2, 0.0) - state.cam_y as f32;
+            let scale = arg_f32(args, 3, default_scale);
+            let flip_x = arg_bool(args, 4, false);
+            let flip_y = arg_bool(args, 5, false);
+
+            if let Some(first) = args.first() {
+                if let RValue::Array(ref ary_cell) = first.value {
+                    let ary = ary_cell.borrow();
+                    draw_pixel_data_direct(&ary, &state, x, y, flip_x, flip_y, scale);
+                }
+            }
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
+
+    let state_for_spr_data = draw_state.clone();
+    let cfg_for_spr_data = config.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "spr_data",
+        Box::new(move |_vm, args| {
+            let state = *state_for_spr_data.borrow();
+            if state.is_clip_empty() {
+                return Ok(Rc::new(RObject::nil()));
+            }
+            let default_scale = cfg_for_spr_data.borrow().sprite_scale;
+            let x = arg_f32(args, 1, 0.0) - state.cam_x as f32;
+            let y = arg_f32(args, 2, 0.0) - state.cam_y as f32;
+            let scale = arg_f32(args, 3, default_scale);
+            let flip_x = arg_bool(args, 4, false);
+            let flip_y = arg_bool(args, 5, false);
+
+            if let Some(first) = args.first() {
+                if let RValue::Array(ref ary_cell) = first.value {
+                    let ary = ary_cell.borrow();
+                    draw_pixel_data_direct(&ary, &state, x, y, flip_x, flip_y, scale);
+                }
             }
             Ok(Rc::new(RObject::nil()))
         }),
@@ -4346,6 +4494,24 @@ end
 
         runtime.call_update();
         runtime.call_draw();
+    }
+
+    #[test]
+    fn test_direct_sprite_data_in_ruby_script() {
+        let script = r#"
+            pixels = Array.new(256, 7)
+            pixels[0] = nil
+            spr(pixels, 10, 20)
+            draw_sprite_data(pixels, 30, 40, 2.0)
+            spr_data(pixels, 50, 60)
+            $ok = true
+        "#;
+        let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
+        let runtime = GameRuntime::new(&tail, &mrb, true).unwrap();
+        assert_eq!(
+            runtime.vm.globals.get("$ok").map(|v| v.as_ref().clone()),
+            Some(RObject::boolean(true))
+        );
     }
 
     #[test]

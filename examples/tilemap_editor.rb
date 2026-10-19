@@ -333,25 +333,8 @@ def draw_tile_at(tid, px, py, scale = 1.0)
   return if tid <= 0
   custom = $custom_sprites[tid]
   if custom
-    # カスタムスプライト配列 (256要素) から描画
-    if scale == 1.0
-      16.times do |sy|
-        16.times do |sx|
-          c = custom[sy * 16 + sx]
-          pset(px + sx, py + sy, c) if c
-        end
-      end
-    else
-      # 8x8 縮小表示
-      8.times do |sy|
-        8.times do |sx|
-          c = custom[(sy * 2) * 16 + (sx * 2)]
-          pset(px + sx, py + sy, c) if c
-        end
-      end
-    end
+    spr(custom, px, py, false, false, 0, scale)
   else
-    # 内蔵スプライト
     spr(tid, px, py, false, false, 0, scale)
   end
 end

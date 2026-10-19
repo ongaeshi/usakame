@@ -146,7 +146,8 @@ ch2 wave=noise  vol=2 T140 L8 O2 c r >>> c r <<<
 - `circ(x, y, r, col = 7)` / `circfill(x, y, r, col = 7)` : 円・塗りつぶし円
 - `oval(x, y, rx, ry, col = 7)` / `ovalfill(x, y, rx, ry, col = 7)` : 楕円・塗りつぶし楕円
 - `tri(x0, y0, x1, y1, x2, y2, col = 7)` / `trifill(...)` : 三角形・塗りつぶし三角形
-- `spr(id_or_emoji, x, y, flip_x = false, flip_y = false, rotate = 0, scale = 1.0)` : スプライト描画
+- `spr(id_or_emoji_or_array, x, y, flip_x = false, flip_y = false, rotate = 0, scale = 1.0)` : スプライト描画（整数ID、絵文字文字列、またはメモリ上の256要素ピクセル配列をダイレクト描画）
+- `draw_sprite_data(pixels, x, y, scale = 1.0, flip_x = false, flip_y = false)` : メモリ上のピクセル配列（256要素）から高速ダイレクトスプライト描画
 - `map(cel_x, cel_y, sx, sy, cel_w, cel_h)` : タイルマップ一括描画
 - `mget(cel_x, cel_y)` / `mset(cel_x, cel_y, tile_id)` : タイルマップ取得・書換
 - `print_text(str, x, y, col = 7)` : 日本語（美咲ゴシック）＋英数フォント＋インライン絵文字テキスト描画

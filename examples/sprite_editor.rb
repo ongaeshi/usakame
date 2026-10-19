@@ -606,22 +606,12 @@ def draw
   # 1x プレビュー (16x16, x: 220, y: 38)
   rectfill(219, 37, 18, 18, preview_bg)
   rect(219, 37, 18, 18, 5)
-  16.times do |y|
-    16.times do |x|
-      c = disp_grid[y * 16 + x]
-      pset(220 + x, 38 + y, c) unless c.nil?
-    end
-  end
+  spr(disp_grid, 220, 38)
 
   # 2x プレビュー (32x32, x: 242, y: 30)
   rectfill(241, 29, 34, 34, preview_bg)
   rect(241, 29, 34, 34, 5)
-  16.times do |y|
-    16.times do |x|
-      c = disp_grid[y * 16 + x]
-      rectfill(242 + x * 2, 30 + y * 2, 2, 2, c) unless c.nil?
-    end
-  end
+  spr(disp_grid, 242, 30, false, false, 0, 2.0)
 
   # [BG]
   rectfill(282, 32, 24, 15, 2)
@@ -699,14 +689,8 @@ def draw
       rectfill(sx, sy, 26, 26, is_sel ? 2 : 1)
       rect(sx, sy, 26, 26, is_sel ? 7 : 5)
 
-      sgrid = $slots[sid]
-      16.times do |py|
-        16.times do |px|
-          c = sgrid[py * 16 + px]
-          # 26x26 内に 16x16 を縮小表示 (簡易ドット)
-          pset(sx + 5 + px, sy + 5 + py, c) unless c.nil?
-        end
-      end
+      # スロットサムネイル描画 (ダイレクトスプライト描画)
+      spr($slots[sid], sx + 5, sy + 5)
       # スロット番号
       print_text(sid.to_s, sx + 2, sy + 2, is_sel ? 10 : 5)
     end
