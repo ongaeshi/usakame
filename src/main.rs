@@ -5307,6 +5307,8 @@ ch0 T120 L4 O4 c d e f
         let mut runtime =
             GameRuntime::new(&tail_data, &mrb_bytes, true).expect("Sprite editor should initialize");
 
+        assert_eq!(runtime.config.borrow().resolved_text_size(), 8);
+
         for _ in 0..10 {
             runtime.call_update_result().expect("call_update should succeed");
             runtime.call_draw_result().expect("call_draw should succeed");
@@ -5585,6 +5587,8 @@ __END__
 
         let mut runtime =
             GameRuntime::new(&tail_data, &mrb_bytes, true).expect("Tilemap editor should initialize");
+
+        assert_eq!(runtime.config.borrow().resolved_text_size(), 8);
 
         for _ in 0..10 {
             runtime.call_update_result().expect("Tilemap editor call_update should succeed");

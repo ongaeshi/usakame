@@ -21,6 +21,7 @@ config(
   width: 480,
   height: 270,
   window_scale: 2.0,
+  text_size: 8,
   title: "Usakame Tilemap Editor"
 )
 
