@@ -5833,6 +5833,49 @@ save_file($save, $map_text)
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
+
+    #[test]
+    fn test_split_game_example_script() {
+        // examples/split_game.rb の自動コンパイル・リソース結合をテスト
+        let split_script = std::path::Path::new("examples/split_game.rb");
+        assert!(split_script.exists());
+
+        // 外部リソース (.spr, .map, .sfx) が自動検出され、マージされていること
+        let (_full_src, tail_data, mrb_bytes) =
+            cli::compile_ruby_script_file(split_script).expect("split_game.rb should compile");
+
+        assert!(tail_data.contains("@SPRITE 0"), "Should contain @SPRITE from split_game.spr");
+        assert!(tail_data.contains("@MAP 0 0"), "Should contain @MAP from split_game.map");
+        assert!(tail_data.contains("@SFX 0"), "Should contain @SFX from split_game.sfx");
+        assert!(tail_data.contains("@MUSIC 0"), "Should contain @MUSIC from split_game.sfx");
+
+        // ランタイム起動
+        let mut runtime =
+            GameRuntime::new(&tail_data, &mrb_bytes, true).expect("split_game.rb should initialize");
+
+        // スプライトとマップが正常に初期化されていること
+        assert!(runtime.sprites.borrow().contains_key(&0));
+        assert!(runtime.sprites.borrow().contains_key(&1));
+        assert_eq!(runtime.tilemap.borrow().get(0, 0), 3, "Outer tile should be water (3)");
+
+        // update と draw を複数フレーム回す
+        for _ in 0..10 {
+            runtime.call_update_result().expect("split_game update should succeed");
+            runtime.call_draw_result().expect("split_game draw should succeed");
+        }
+
+        // uk pack でスタンドアロンスクリプトにパックできることのテスト
+        let temp_packed = std::env::temp_dir().join("test_split_packed.rb");
+        let packed_content = bundle::pack_script_to_standalone_source(split_script).unwrap();
+        std::fs::write(&temp_packed, &packed_content).unwrap();
+
+        assert!(packed_content.contains("__END__"));
+        assert!(packed_content.contains("@SPRITE 0"));
+        assert!(packed_content.contains("@MAP 0 0"));
+        assert!(packed_content.contains("@SFX 0"));
+
+        let _ = std::fs::remove_file(&temp_packed);
+    }
 }
 
 
