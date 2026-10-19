@@ -25,8 +25,8 @@ config(
   title: "Usakame Tilemap Editor"
 )
 
-# OS 標準マウスカーソルを非表示にし、ゲーム内カーソルを使用
-show_mouse(false)
+# OS 標準マウスカーソルを使用
+show_mouse(true)
 
 # ------------------------------------------------------------------------------
 # 定数 & 初期設定
@@ -377,6 +377,16 @@ def update
   # 保存: Ctrl+S または S (モーダル外)
   if (btn(:ctrl) && btnp(:s)) || (!btn(:ctrl) && btnp(:s) && !$show_code_modal)
     save_map_file
+  end
+
+  # Fキーまたは60フレームごとにコンソールへFPS出力
+  $fps_log_timer = ($fps_log_timer || 0) + 1
+  if btnp(:f)
+    puts "[TilemapEditor] FPS: #{fps}"
+    notify("FPS: #{fps}")
+  elsif $fps_log_timer >= 60
+    $fps_log_timer = 0
+    puts "[TilemapEditor] FPS: #{fps}"
   end
 
   perform_undo if btnp(:z)
@@ -791,6 +801,9 @@ def draw
   rect(420, 242, 52, 14, 5)
   print_text("SYNC", 432, 245, 12)
 
+  # 右下 FPS 表示
+  print_text("FPS:#{fps}", 424, 258, 11)
+
   # --- 5. 通知メッセージ ---
   if $notify_timer > 0
     nw = $notify_msg.size * 6 + 12
@@ -839,14 +852,6 @@ def draw
     rect(160, 236, 80, 16, 7)
     print_text("SAVE MAP", 172, 240, 0)
   end
-
-  # --- 7. マウスカーソル ---
-  cx = mouse_x
-  cy = mouse_y
-  line(cx, cy, cx + 6, cy + 6, 7)
-  line(cx, cy, cx, cy + 8, 7)
-  line(cx, cy, cx + 8, cy, 7)
-  pset(cx, cy, 0)
 end
 
 __END__

@@ -32,6 +32,7 @@ pub struct AppConfig {
     pub sprite_scale: f32,
     pub text_size: u32, // 0 = 自動判定 (screen_width <= 256 ? 8 : 16)
     pub title: String,
+    pub show_fps: bool,
 }
 
 impl Default for AppConfig {
@@ -43,6 +44,7 @@ impl Default for AppConfig {
             sprite_scale: 1.0,
             text_size: 0,
             title: "Usakame Retro Engine".to_string(),
+            show_fps: false,
         }
     }
 }
@@ -97,6 +99,7 @@ pub fn parse_config_from_source(source: &str) -> AppConfig {
                     "sprite_scale" => if let Ok(n) = v.parse::<f32>() { config.sprite_scale = n; },
                     "text_size" => if let Ok(n) = v.parse::<u32>() { config.text_size = n; },
                     "title" => config.title = v.to_string(),
+                    "show_fps" | "fps" => config.show_fps = v == "true" || v == "1",
                     _ => {}
                 }
             }
@@ -1359,6 +1362,17 @@ fn robject_to_f32(obj: &Rc<RObject>) -> Option<f32> {
     }
 }
 
+fn robject_to_bool(obj: &Rc<RObject>) -> Option<bool> {
+    if let Ok(b) = bool::try_from(obj.as_ref()) {
+        Some(b)
+    } else {
+        match &obj.value {
+            RValue::Integer(i) => Some(*i != 0),
+            _ => None,
+        }
+    }
+}
+
 fn parse_text_size_arg(args: &[Rc<RObject>], default_size: u32) -> u32 {
     if let Some(arg) = args.get(4) {
         if let Some(n) = robject_to_u32(arg) {
@@ -2246,6 +2260,11 @@ fn register_engine_api(
                                     cfg.title = s;
                                 }
                             }
+                            "show_fps" | "fps" => {
+                                if let Some(b) = robject_to_bool(v) {
+                                    cfg.show_fps = b;
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -2998,9 +3017,15 @@ fn register_engine_api(
         );
         mrb_define_cmethod(
             vm,
-            obj_class,
+            obj_class.clone(),
             "show_mouse",
             Box::new(|_vm, _args| Ok(Rc::new(RObject::nil()))),
+        );
+        mrb_define_cmethod(
+            vm,
+            obj_class,
+            "fps",
+            Box::new(|_vm, _args| Ok(Rc::new(RObject::integer(60)))),
         );
         return;
     }
@@ -3412,6 +3437,17 @@ fn register_engine_api(
         }),
     );
 
+    // fps: 現在のフレームレート (FPS) を取得
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "fps",
+        Box::new(|_vm, _args| {
+            let current_fps = get_fps();
+            Ok(Rc::new(RObject::integer(current_fps as i64)))
+        }),
+    );
+
     // print_text(text, x = 0, y = 0, col = 7, size = nil): 1-bit ピクセルフォント + 絵文字でくっきりテキスト描画
     let font_for_print = bitmap_font.clone();
     let emoji_for_print = emoji_atlas.clone();
@@ -3802,7 +3838,13 @@ pub fn create_virtual_screen(w: u32, h: u32) -> (RenderTarget, Camera2D) {
     (rt, cam)
 }
 
-pub fn present_virtual_screen(render_target: &RenderTarget, virt_w: u32, virt_h: u32, reload_banner_frames: u32) {
+pub fn present_virtual_screen(
+    render_target: &RenderTarget,
+    virt_w: u32,
+    virt_h: u32,
+    reload_banner_frames: u32,
+    show_fps: bool,
+) {
     apply_gl_scissor(None);
     set_default_camera();
     clear_background(BLACK);
@@ -3843,6 +3885,22 @@ pub fn present_virtual_screen(render_target: &RenderTarget, virt_w: u32, virt_h:
             offset_y + 15.0,
             16.0,
             palette_color(7),
+        );
+    }
+
+    if show_fps {
+        let fps_text = format!("FPS: {}", get_fps());
+        let fps_w = 64.0;
+        let fps_h = 18.0;
+        let box_x = (offset_x + draw_w - fps_w - 6.0).max(0.0);
+        let box_y = (offset_y + draw_h - fps_h - 6.0).max(0.0);
+        draw_rectangle(box_x, box_y, fps_w, fps_h, Color::new(0.0, 0.0, 0.0, 0.75));
+        draw_text(
+            &fps_text,
+            box_x + 6.0,
+            box_y + 13.0,
+            14.0,
+            palette_color(11),
         );
     }
 }
@@ -3933,13 +3991,19 @@ async fn run_native_with_hot_reload(
             }
         }
 
+        if is_key_pressed(KeyCode::F3) {
+            let mut cfg = runtime.config.borrow_mut();
+            cfg.show_fps = !cfg.show_fps;
+        }
+
         runtime.call_update();
         runtime.process_audio().await;
 
         set_camera(&virtual_camera);
         runtime.call_draw();
 
-        present_virtual_screen(&render_target, cur_virt_w, cur_virt_h, reload_banner_frames);
+        let show_fps = runtime.config.borrow().show_fps;
+        present_virtual_screen(&render_target, cur_virt_w, cur_virt_h, reload_banner_frames, show_fps);
         reload_banner_frames = reload_banner_frames.saturating_sub(1);
 
         next_frame().await;
@@ -3964,13 +4028,19 @@ async fn run_embedded_game(tail_data: String, mrb_bytes: Vec<u8>) {
     runtime.preload_audio().await;
 
     loop {
+        if is_key_pressed(KeyCode::F3) {
+            let mut cfg = runtime.config.borrow_mut();
+            cfg.show_fps = !cfg.show_fps;
+        }
+
         runtime.call_update();
         runtime.process_audio().await;
 
         set_camera(&virtual_camera);
         runtime.call_draw();
 
-        present_virtual_screen(&render_target, virt_w, virt_h, 0);
+        let show_fps = runtime.config.borrow().show_fps;
+        present_virtual_screen(&render_target, virt_w, virt_h, 0, show_fps);
 
         next_frame().await;
     }
@@ -4154,7 +4224,8 @@ async fn main() {
         set_camera(&virtual_camera);
         runtime.call_draw();
 
-        present_virtual_screen(&render_target, cur_virt_w, cur_virt_h, reload_banner_frames);
+        let show_fps = runtime.config.borrow().show_fps;
+        present_virtual_screen(&render_target, cur_virt_w, cur_virt_h, reload_banner_frames, show_fps);
         reload_banner_frames = reload_banner_frames.saturating_sub(1);
 
         next_frame().await;
@@ -4211,7 +4282,8 @@ config(
   scale: 1.5,
   sprite_scale: 2.0,
   text_size: 16,
-  title: "MY RETRO RPG"
+  title: "MY RETRO RPG",
+  show_fps: true
 )
 x = 10
 "#;
@@ -4222,6 +4294,7 @@ x = 10
         assert_eq!(cfg.sprite_scale, 2.0);
         assert_eq!(cfg.text_size, 16);
         assert_eq!(cfg.title, "MY RETRO RPG");
+        assert!(cfg.show_fps);
         assert_eq!(cfg.resolved_text_size(), 16);
         assert_eq!(cfg.window_width(), 960);
         assert_eq!(cfg.window_height(), 720);
@@ -4346,6 +4419,7 @@ __END__
             show_mouse(false)
             show_mouse(true)
             show_mouse
+            $cur_fps = fps
             $ok = true
         "#;
         let (tail, mrb_bytes) = cli::compile_ruby_script_str(script).unwrap();
@@ -4353,6 +4427,10 @@ __END__
         assert_eq!(
             runtime.vm.globals.get("$ok").map(|v| v.as_ref().clone()),
             Some(RObject::boolean(true))
+        );
+        assert_eq!(
+            runtime.vm.globals.get("$cur_fps").map(|v| v.as_ref().clone()),
+            Some(RObject::integer(60))
         );
         assert_eq!(
             runtime.vm.globals.get("$bx").map(|v| v.as_ref().clone()),

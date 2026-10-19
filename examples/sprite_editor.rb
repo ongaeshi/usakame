@@ -23,8 +23,8 @@ config(
   title: "Usakame Sprite Editor"
 )
 
-# OS 標準マウスカーソルを非表示にし、ゲーム内カーソルを使用
-show_mouse(false)
+# OS 標準マウスカーソルを使用
+show_mouse(true)
 
 # ------------------------------------------------------------------------------
 # 定数 & 初期化
@@ -317,6 +317,16 @@ def update
   save_to_target if btnp(:s)
   export_current if btnp(:x)
   clear_sprite if btnp(:c)
+
+  # Fキーまたは60フレームごとにコンソールへFPS出力
+  $fps_log_timer = ($fps_log_timer || 0) + 1
+  if btnp(:f)
+    puts "[SpriteEditor] FPS: #{fps}"
+    notify("FPS: #{fps}")
+  elsif $fps_log_timer >= 60
+    $fps_log_timer = 0
+    puts "[SpriteEditor] FPS: #{fps}"
+  end
 
   # 矢印キーでシフト
   shift_sprite(-1, 0) if btnp(0) # left
@@ -720,6 +730,7 @@ def draw
   else
     print_text("Ready. [SAVE] to write #{$save_path}. Auto hot-reload active.", 10, 256, 6)
   end
+  print_text("FPS:#{fps}", 424, 256, 11)
 
   # 7. コードプレビューモーダル
   if $show_code_modal
@@ -733,11 +744,4 @@ def draw
       print_text(pl, 40, 44 + i * 10, 7)
     end
   end
-
-  # 8. マウスカーソル描画
-  pset(mx, my, 7)
-  pset(mx + 1, my, 7)
-  pset(mx, my + 1, 7)
-  pset(mx + 2, my + 2, 7)
-  pset(mx + 3, my + 3, 0)
 end
