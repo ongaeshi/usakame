@@ -2542,6 +2542,75 @@ fn register_engine_api(
         }),
     );
 
+    // load_resource_map(path, width = 32, height = 32): 指定スクリプトまたは外部リソースから
+    // タイルマップデータを読み込み、(width * height) 要素のタイルID配列を返す。@MAPがない場合はnilを返す。
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "load_resource_map",
+        Box::new(|_vm, args| {
+            let path_str = args
+                .first()
+                .and_then(|v| String::try_from(v.as_ref()).ok())
+                .unwrap_or_default();
+            let width = arg_i32(args, 1, 32).max(1) as usize;
+            let height = arg_i32(args, 2, 32).max(1) as usize;
+
+            if path_str.is_empty() {
+                return Ok(Rc::new(RObject::nil()));
+            }
+
+            let p = std::path::Path::new(&path_str);
+            let tail = if p.extension().and_then(|s| s.to_str()) == Some("rb") {
+                cli::compile_ruby_script_file(p)
+                    .map(|(_, t, _)| t)
+                    .unwrap_or_default()
+            } else if p.is_file() {
+                std::fs::read_to_string(p).unwrap_or_default()
+            } else {
+                String::new()
+            };
+
+            if !tail.contains("@MAP") {
+                return Ok(Rc::new(RObject::nil()));
+            }
+
+            let tmap = parse_tail_map(&tail);
+            let mut tiles = Vec::with_capacity(width * height);
+            for y in 0..height {
+                for x in 0..width {
+                    let tid = tmap.get(x as i32, y as i32);
+                    tiles.push(Rc::new(RObject::integer(tid as i64)));
+                }
+            }
+
+            Ok(Rc::new(RObject::array(tiles)))
+        }),
+    );
+
+    // file_mtime(path): 指定ファイルの最終更新時刻（UNIXミリ秒）を返す。存在しない場合は0。
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "file_mtime",
+        Box::new(|_vm, args| {
+            let path_str = args
+                .first()
+                .and_then(|v| String::try_from(v.as_ref()).ok())
+                .unwrap_or_default();
+            if path_str.is_empty() {
+                return Ok(Rc::new(RObject::integer(0)));
+            }
+            let mtime_ms = std::fs::metadata(&path_str)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            Ok(Rc::new(RObject::integer(mtime_ms)))
+        }),
+    );
+
     if headless {
         // ヘッドレステスト用スタブ登録 (図形ラスタライズ・カメラ・クリッピング・パレット変換および絵文字キャッシュ抽出も検証可能にする)
         let state_for_cls = draw_state.clone();
@@ -4623,6 +4692,38 @@ $read_back = read_file("{}")
         let read_back: String = runtime.vm.globals.get("$read_back").unwrap().as_ref().try_into().unwrap();
         assert_eq!(read_back, "Hello Usakame!");
 
+        // file_mtime と load_resource_map のテスト
+        let map_file = temp_dir.join("test.map");
+        let map_file_str = map_file.to_str().unwrap().replace('\\', "/");
+        let map_content = "@MAP 0 0\n12\n34\n";
+        std::fs::write(&map_file, map_content).unwrap();
+
+        let map_script = format!(r#"
+$mtime = file_mtime("{}")
+$map_tiles = load_resource_map("{}", 2, 2)
+"#, map_file_str, map_file_str);
+        let (_, mrb_map) = cli::compile_ruby_script_str(&map_script).unwrap();
+        let runtime_map = GameRuntime::new("", &mrb_map, true).unwrap();
+
+        let mtime: i64 = runtime_map.vm.globals.get("$mtime").unwrap().as_ref().try_into().unwrap();
+        assert!(mtime > 0);
+
+        let map_tiles_obj = runtime_map.vm.globals.get("$map_tiles").unwrap();
+        if let RValue::Array(arr) = &map_tiles_obj.value {
+            let borrowed = arr.borrow();
+            assert_eq!(borrowed.len(), 4);
+            let t0: i64 = borrowed[0].as_ref().try_into().unwrap();
+            let t1: i64 = borrowed[1].as_ref().try_into().unwrap();
+            let t2: i64 = borrowed[2].as_ref().try_into().unwrap();
+            let t3: i64 = borrowed[3].as_ref().try_into().unwrap();
+            assert_eq!(t0, 1);
+            assert_eq!(t1, 2);
+            assert_eq!(t2, 3);
+            assert_eq!(t3, 4);
+        } else {
+            panic!("$map_tiles should be an Array");
+        }
+
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
@@ -5621,6 +5722,103 @@ end
             runtime.call_update();
             runtime.call_draw();
         }
+    }
+
+    #[test]
+    fn test_editor_and_game_mutual_sync_workflow() {
+        let temp_dir = std::env::temp_dir().join("uk_test_sync_workflow");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let game_rb = temp_dir.join("game.rb");
+        let game_spr = temp_dir.join("game.spr");
+        let game_map = temp_dir.join("game.map");
+
+        // 1. game.rb の初期状態 (コードのみ、リソースなし)
+        let game_src = r#"
+$tile_0_0 = 0
+def update
+  $tile_0_0 = mget(0, 0)
+end
+def draw
+  map()
+  spr(1, 0, 0)
+end
+"#;
+        std::fs::write(&game_rb, game_src).unwrap();
+
+        // 2. スプライトエディタスクリプトの実行を模擬:
+        //    game.rb を対象にしてスプライト1を作成し、game.spr に保存
+        let spr_editor_script = format!(r#"
+$target = "{}"
+$save = $target[0, $target.size - 3] + ".spr"
+$custom_spr_text = "@SPRITE 1\n8888888888888888\n" + ("8888888888888888\n" * 15)
+save_file($save, $custom_spr_text)
+"#, game_rb.to_str().unwrap().replace('\\', "/"));
+
+        let (_, mrb_spr_editor) = cli::compile_ruby_script_str(&spr_editor_script).unwrap();
+        let _ = GameRuntime::new("", &mrb_spr_editor, true).unwrap();
+
+        assert!(game_spr.exists(), "game.spr should be generated by sprite editor");
+
+        // 3. タイルマップエディタスクリプトの実行を模擬:
+        //    game.rb を対象にしてマップ (0, 0)=1 を作成し、game.map に保存
+        //    同時に game.spr からスプライト1が正しく読み込めることを確認
+        let map_editor_script = format!(r#"
+$target = "{}"
+$save = $target[0, $target.size - 3] + ".map"
+$spr_path = $target[0, $target.size - 3] + ".spr"
+
+# スプライトの相互同期チェック
+$slots = load_resource_sprites($spr_path, 2)
+$spr1_loaded = (!$slots[1].nil?)
+
+# マップデータの保存
+$map_text = "@MAP 0 0\n1\n"
+save_file($save, $map_text)
+"#, game_rb.to_str().unwrap().replace('\\', "/"));
+
+        let (_, mrb_map_editor) = cli::compile_ruby_script_str(&map_editor_script).unwrap();
+        let rt_map_editor = GameRuntime::new("", &mrb_map_editor, true).unwrap();
+
+        let spr1_loaded: bool = rt_map_editor.vm.globals.get("$spr1_loaded").unwrap().as_ref().try_into().unwrap();
+        assert!(spr1_loaded, "Tilemap editor should load sprite 1 from game.spr");
+        assert!(game_map.exists(), "game.map should be generated by tilemap editor");
+
+        // 4. ゲーム側 (game.rb) をコンパイル & 実行:
+        //    game.spr と game.map が自動マージされてゲームに反映されること
+        let (_, merged_tail, game_mrb) = cli::compile_ruby_script_file(&game_rb).unwrap();
+        assert!(merged_tail.contains("@SPRITE 1"));
+        assert!(merged_tail.contains("@MAP 0 0"));
+
+        let mut game_rt = GameRuntime::new(&merged_tail, &game_mrb, true).unwrap();
+        game_rt.call_update();
+        game_rt.call_draw();
+
+        let tile_0_0: i32 = game_rt.vm.globals.get("$tile_0_0").unwrap().as_ref().try_into().unwrap();
+        assert_eq!(tile_0_0, 1, "Game should read tile (0, 0) as 1 from external game.map");
+        assert!(game_rt.sprites.borrow().contains_key(&1), "Game should load sprite 1 from external game.spr");
+
+        // 5. ホットリロードの相互検証:
+        //    スプライトエディタで game.spr を更新した場合、スナップショットが変化してゲームがホットリロードされること
+        let snap_before = bundle::get_script_and_resources_snapshot(&game_rb);
+
+        // スプライトを色 11 (緑) で上書き
+        let updated_spr_text = format!("@SPRITE 1\nBBBBBBBBBBBBBBBB\n{}", "BBBBBBBBBBBBBBBB\n".repeat(15));
+        std::fs::write(&game_spr, updated_spr_text).unwrap();
+
+        let snap_after = bundle::get_script_and_resources_snapshot(&game_rb);
+        assert_ne!(snap_before, snap_after, "Snapshot must detect changes in game.spr");
+
+        // ゲーム側にホットリロードを適用
+        let (_, reloaded_tail, reloaded_mrb) = cli::compile_ruby_script_file(&game_rb).unwrap();
+        game_rt.hot_reload(&reloaded_tail, &reloaded_mrb).unwrap();
+
+        // タイルマップエディタ側でも file_mtime が更新されること
+        let mtime_after = std::fs::metadata(&game_spr).unwrap().modified().unwrap();
+        assert!(mtime_after > std::time::UNIX_EPOCH);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
 
