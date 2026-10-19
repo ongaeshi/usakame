@@ -2426,6 +2426,122 @@ fn register_engine_api(
         }),
     );
 
+    // read_file(path): 指定パスのテキストを読み込み、文字列またはnilを返す
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "read_file",
+        Box::new(|_vm, args| {
+            let path = args
+                .first()
+                .and_then(|v| String::try_from(v.as_ref()).ok())
+                .unwrap_or_default();
+            if path.is_empty() {
+                return Ok(Rc::new(RObject::nil()));
+            }
+            match std::fs::read_to_string(&path) {
+                Ok(text) => Ok(Rc::new(RObject::string(text))),
+                Err(_) => Ok(Rc::new(RObject::nil())),
+            }
+        }),
+    );
+
+    // save_file(path, content): 指定パスにテキストを書き込む
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "save_file",
+        Box::new(|_vm, args| {
+            let path = args
+                .first()
+                .and_then(|v| String::try_from(v.as_ref()).ok())
+                .unwrap_or_default();
+            let content = args
+                .get(1)
+                .and_then(|v| String::try_from(v.as_ref()).ok())
+                .unwrap_or_default();
+            if path.is_empty() {
+                return Ok(Rc::new(RObject::boolean(false)));
+            }
+            match std::fs::write(&path, content) {
+                Ok(()) => Ok(Rc::new(RObject::boolean(true))),
+                Err(e) => {
+                    eprintln!("[save_file] Error writing `{}`: {}", path, e);
+                    Ok(Rc::new(RObject::boolean(false)))
+                }
+            }
+        }),
+    );
+
+    // load_resource_sprites(path, num_slots = 16): 指定スクリプトまたは外部リソースファイルから
+    // スプライト（16x16）を読み込み、スロットごとのドット配列 (256要素 or nil) の配列を返す。
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "load_resource_sprites",
+        Box::new(|_vm, args| {
+            let path_str = args
+                .first()
+                .and_then(|v| String::try_from(v.as_ref()).ok())
+                .unwrap_or_default();
+            let num_slots = arg_i32(args, 1, 16).max(1) as usize;
+
+            if path_str.is_empty() {
+                return Ok(Rc::new(RObject::array(vec![Rc::new(RObject::nil()); num_slots])));
+            }
+
+            let p = std::path::Path::new(&path_str);
+            let tail = if p.extension().and_then(|s| s.to_str()) == Some("rb") {
+                cli::compile_ruby_script_file(p)
+                    .map(|(_, t, _)| t)
+                    .unwrap_or_default()
+            } else if p.is_file() {
+                std::fs::read_to_string(p).unwrap_or_default()
+            } else {
+                String::new()
+            };
+
+            let sprites = parse_tail_resources(&tail);
+            let mut slot_list = Vec::with_capacity(num_slots);
+
+            for sid in 0..num_slots {
+                if let Some(sp) = sprites.get(&(sid as i32)) {
+                    let mut pixels = Vec::with_capacity(256);
+                    let w = sp.width.min(16) as usize;
+                    let h = sp.height.min(16) as usize;
+                    for y in 0..16 {
+                        for x in 0..16 {
+                            if x < w && y < h {
+                                let off = (y * sp.width as usize + x) * 4;
+                                if off + 4 <= sp.rgba.len() {
+                                    let r = sp.rgba[off];
+                                    let g = sp.rgba[off + 1];
+                                    let b = sp.rgba[off + 2];
+                                    let a = sp.rgba[off + 3];
+                                    if a == 0 {
+                                        pixels.push(Rc::new(RObject::nil()));
+                                    } else {
+                                        let c = nearest_palette_index(r, g, b) as i64;
+                                        pixels.push(Rc::new(RObject::integer(c)));
+                                    }
+                                } else {
+                                    pixels.push(Rc::new(RObject::nil()));
+                                }
+                            } else {
+                                pixels.push(Rc::new(RObject::nil()));
+                            }
+                        }
+                    }
+                    slot_list.push(Rc::new(RObject::array(pixels)));
+                } else {
+                    slot_list.push(Rc::new(RObject::nil()));
+                }
+            }
+
+            Ok(Rc::new(RObject::array(slot_list)))
+        }),
+    );
+
     if headless {
         // ヘッドレステスト用スタブ登録 (図形ラスタライズ・カメラ・クリッピング・パレット変換および絵文字キャッシュ抽出も検証可能にする)
         let state_for_cls = draw_state.clone();
@@ -3234,7 +3350,7 @@ fn register_engine_api(
     let cfg_for_print = config.clone();
     mrb_define_cmethod(
         vm,
-        obj_class,
+        obj_class.clone(),
         "print_text",
         Box::new(move |_vm, args| {
             let state = *state_for_print.borrow();
@@ -3322,6 +3438,7 @@ pub struct GameRuntime {
     pub draw_state: Rc<RefCell<DrawState>>,
     pub sound_bank: Rc<RefCell<sound::SoundBank>>,
     pub config: Rc<RefCell<AppConfig>>,
+    pub script_args: Vec<String>,
     initial_globals: HashMap<String, Rc<RObject>>,
     initial_tail_map: Tilemap,
     headless: bool,
@@ -3329,6 +3446,15 @@ pub struct GameRuntime {
 
 impl GameRuntime {
     pub fn new(tail_data: &str, mrb_bytes: &[u8], headless: bool) -> Result<Self, String> {
+        Self::new_with_args(tail_data, mrb_bytes, headless, &[])
+    }
+
+    pub fn new_with_args(
+        tail_data: &str,
+        mrb_bytes: &[u8],
+        headless: bool,
+        script_args: &[String],
+    ) -> Result<Self, String> {
         let mut sprites_map = parse_tail_resources(tail_data);
         let tail_map = parse_tail_map(tail_data);
         let (mut sfx_map, mut music_map) = sound::parse_tail_sounds(tail_data);
@@ -3336,6 +3462,15 @@ impl GameRuntime {
         let mut rite =
             rite::load(mrb_bytes).map_err(|e| format!("Failed to load RITE(.mrb): {:?}", e))?;
         let mut vm = VM::open(&mut rite);
+
+        // ARGV および $ARGV の登録
+        let argv_elements: Vec<Rc<RObject>> = script_args
+            .iter()
+            .map(|s| Rc::new(RObject::string(s.clone())))
+            .collect();
+        let argv_obj = Rc::new(RObject::array(argv_elements));
+        vm.consts.insert("ARGV".to_string(), argv_obj.clone());
+        vm.globals.insert("$ARGV".to_string(), argv_obj);
 
         let sprites = Rc::new(RefCell::new(HashMap::new()));
         let tilemap = Rc::new(RefCell::new(tail_map.clone()));
@@ -3388,6 +3523,7 @@ impl GameRuntime {
             draw_state,
             sound_bank,
             config,
+            script_args: script_args.to_vec(),
             initial_globals,
             initial_tail_map,
             headless,
@@ -3405,6 +3541,16 @@ impl GameRuntime {
         let mut new_rite = rite::load(new_mrb_bytes)
             .map_err(|e| format!("Failed to load RITE(.mrb) on reload: {:?}", e))?;
         let mut new_vm = VM::open(&mut new_rite);
+
+        // ARGV および $ARGV の再登録
+        let argv_elements: Vec<Rc<RObject>> = self
+            .script_args
+            .iter()
+            .map(|s| Rc::new(RObject::string(s.clone())))
+            .collect();
+        let argv_obj = Rc::new(RObject::array(argv_elements));
+        new_vm.consts.insert("ARGV".to_string(), argv_obj.clone());
+        new_vm.globals.insert("$ARGV".to_string(), argv_obj);
 
         // リロード前に再生中だった BGM を記録（トップレベルの `music(...)` 呼び出しで再スタートさせないため）
         let (prev_music_id, prev_music_spec, prev_pending_len) = {
@@ -3625,12 +3771,13 @@ pub fn present_virtual_screen(render_target: &RenderTarget, virt_w: u32, virt_h:
 #[cfg(not(target_arch = "wasm32"))]
 async fn run_native_with_hot_reload(
     script_path: std::path::PathBuf,
+    script_args: Vec<String>,
     initial_source: String,
     initial_tail: String,
     initial_mrb: Vec<u8>,
 ) {
     let initial_config = parse_config_from_source(&initial_source);
-    let mut runtime = match GameRuntime::new(&initial_tail, &initial_mrb, false) {
+    let mut runtime = match GameRuntime::new_with_args(&initial_tail, &initial_mrb, false, &script_args) {
         Ok(rt) => rt,
         Err(e) => {
             eprintln!("{}", e);
@@ -3808,7 +3955,10 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        cli::CliAction::Run { script_path } => {
+        cli::CliAction::Run {
+            script_path,
+            script_args,
+        } => {
             let (initial_source, tail_data, mrb_bytes) =
                 match cli::compile_ruby_script_file(&script_path) {
                     Ok(res) => res,
@@ -3825,7 +3975,7 @@ fn main() {
             };
             macroquad::Window::from_config(
                 window_conf_with_title_and_size(&title, parsed_cfg.window_width(), parsed_cfg.window_height()),
-                run_native_with_hot_reload(script_path, initial_source, tail_data, mrb_bytes),
+                run_native_with_hot_reload(script_path, script_args, initial_source, tail_data, mrb_bytes),
             );
         }
         cli::CliAction::RunEmbedded {
@@ -4322,7 +4472,17 @@ __END__
         assert_eq!(
             run_act,
             cli::CliAction::Run {
-                script_path: std::path::PathBuf::from("game.rb")
+                script_path: std::path::PathBuf::from("game.rb"),
+                script_args: Vec::new(),
+            }
+        );
+
+        let run_with_args = cli::parse_cli_args(["uk", "run", "editor.rb", "--", "target.spr"].map(String::from)).unwrap();
+        assert_eq!(
+            run_with_args,
+            cli::CliAction::Run {
+                script_path: std::path::PathBuf::from("editor.rb"),
+                script_args: vec!["target.spr".to_string()],
             }
         );
 
@@ -4428,6 +4588,40 @@ __END__
         let gen_files = cli::cmd_unpack(&copy_packed).unwrap();
         assert_eq!(gen_files.len(), 1);
         assert_eq!(gen_files[0], unpacked_dir.join("stage.spr"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_argv_and_file_io_in_ruby() {
+        let temp_dir = std::env::temp_dir().join("uk_test_file_io");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let test_file = temp_dir.join("hello.txt");
+        let test_file_str = test_file.to_str().unwrap().replace('\\', "/");
+
+        let script = format!(r#"
+$arg0 = ARGV[0]
+$arg1 = $ARGV[1]
+$write_ok = save_file("{}", "Hello Usakame!")
+$read_back = read_file("{}")
+"#, test_file_str, test_file_str);
+
+        let (_, mrb) = cli::compile_ruby_script_str(&script).unwrap();
+        let args = vec!["arg_one".to_string(), "arg_two".to_string()];
+        let runtime = GameRuntime::new_with_args("", &mrb, true, &args).unwrap();
+
+        let arg0: String = runtime.vm.globals.get("$arg0").unwrap().as_ref().try_into().unwrap();
+        let arg1: String = runtime.vm.globals.get("$arg1").unwrap().as_ref().try_into().unwrap();
+        assert_eq!(arg0, "arg_one");
+        assert_eq!(arg1, "arg_two");
+
+        let write_ok: bool = runtime.vm.globals.get("$write_ok").unwrap().as_ref().try_into().unwrap();
+        assert!(write_ok);
+
+        let read_back: String = runtime.vm.globals.get("$read_back").unwrap().as_ref().try_into().unwrap();
+        assert_eq!(read_back, "Hello Usakame!");
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

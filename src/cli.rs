@@ -13,8 +13,11 @@ const WEB_MQ_JS_BUNDLE: &str = include_str!("../web/mq_js_bundle.js");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliAction {
-    /// `uk run <script.rb>` (ホットリロード付きネイティブ実行)
-    Run { script_path: PathBuf },
+    /// `uk run <script.rb> [args...]` (ホットリロード付きネイティブ実行)
+    Run {
+        script_path: PathBuf,
+        script_args: Vec<String>,
+    },
     /// 単一バイナリ（末尾にバンドル埋め込み済み）の直接起動、または埋め込みデモ起動
     RunEmbedded {
         tail_data: String,
@@ -102,6 +105,7 @@ where
         if default_script.exists() {
             return Ok(CliAction::Run {
                 script_path: default_script,
+                script_args: Vec::new(),
             });
         }
 
@@ -112,11 +116,25 @@ where
         "help" | "--help" | "-h" => Ok(CliAction::Help),
         "version" | "--version" | "-V" => Ok(CliAction::Version),
         "run" => {
-            let script_path = rest
-                .get(1)
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("game.rb"));
-            Ok(CliAction::Run { script_path })
+            let (script_path, script_args) = if rest.len() > 1 {
+                let p = PathBuf::from(&rest[1]);
+                let args = if rest.len() > 2 {
+                    if rest[2] == "--" {
+                        rest[3..].to_vec()
+                    } else {
+                        rest[2..].to_vec()
+                    }
+                } else {
+                    Vec::new()
+                };
+                (p, args)
+            } else {
+                (PathBuf::from("game.rb"), Vec::new())
+            };
+            Ok(CliAction::Run {
+                script_path,
+                script_args,
+            })
         }
         "build" => {
             let mut script_path: Option<PathBuf> = None;
@@ -284,8 +302,18 @@ where
             // `uk game.rb` のように直接 .rb ファイルが渡された場合も `uk run` として扱う
             let candidate = PathBuf::from(other);
             if other.ends_with(".rb") || candidate.exists() {
+                let script_args = if rest.len() > 1 {
+                    if rest[1] == "--" {
+                        rest[2..].to_vec()
+                    } else {
+                        rest[1..].to_vec()
+                    }
+                } else {
+                    Vec::new()
+                };
                 Ok(CliAction::Run {
                     script_path: candidate,
+                    script_args,
                 })
             } else {
                 Err(format!(
