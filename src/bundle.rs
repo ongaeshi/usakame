@@ -4,8 +4,8 @@
 use std::fs::File;
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::{Read, Seek, SeekFrom};
-#[cfg(not(target_arch = "wasm32"))]
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 /// バイナリ末尾または配信バンドル末尾に付与するマジックナンバー (8 bytes)
 pub const BUNDLE_MAGIC: &[u8; 8] = b"USAKAME1";
@@ -218,6 +218,226 @@ pub fn normalize_ruby_config_syntax(code: &str) -> String {
     result
 }
 
+/// 外部リソースとして自動認識・マージされる拡張子リスト（優先度順）
+pub const ASSOCIATED_RESOURCE_EXTENSIONS: &[&str] = &["res", "spr", "map", "sfx"];
+
+/// 対象スクリプト（例: `game.rb`）と同ディレクトリにある外部リソースファイルを検索する。
+pub fn find_associated_resource_paths(script_path: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let parent = script_path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = match script_path.file_stem().and_then(|s| s.to_str()) {
+        Some(s) => s,
+        None => return found,
+    };
+
+    for ext in ASSOCIATED_RESOURCE_EXTENSIONS {
+        let candidate = if parent.as_os_str().is_empty() {
+            PathBuf::from(format!("{}.{}", stem, ext))
+        } else {
+            parent.join(format!("{}.{}", stem, ext))
+        };
+        if candidate.is_file() {
+            found.push(candidate);
+        }
+    }
+    found
+}
+
+/// スクリプト本体および関連する外部リソースファイルの更新日時スナップショットを取得する。
+/// ファイルの増減や更新を検知するために使用する。
+#[cfg(not(target_arch = "wasm32"))]
+pub fn get_script_and_resources_snapshot(
+    script_path: &Path,
+) -> (Option<SystemTime>, Vec<(PathBuf, Option<SystemTime>)>) {
+    let script_mod = std::fs::metadata(script_path).and_then(|m| m.modified()).ok();
+    let res_paths = find_associated_resource_paths(script_path);
+    let mut res_mods = Vec::with_capacity(res_paths.len());
+    for p in res_paths {
+        let m = std::fs::metadata(&p).and_then(|meta| meta.modified()).ok();
+        res_mods.push((p, m));
+    }
+    (script_mod, res_mods)
+}
+
+/// 埋め込み `tail_data` と、外部リソースファイルの内容をマージした `tail_data` を生成する。
+/// 外部リソースの内容は末尾に追加されるため、同一IDのスプライトやマップ、効果音は外部定義で上書きされます。
+/// 戻り値: (マージ後 tail_data, 検出された外部リソースのパス一覧)
+pub fn load_merged_tail_data(script_path: &Path, embedded_tail: &str) -> (String, Vec<PathBuf>) {
+    let res_paths = find_associated_resource_paths(script_path);
+    if res_paths.is_empty() {
+        return (embedded_tail.to_string(), res_paths);
+    }
+
+    let mut merged = String::with_capacity(embedded_tail.len() + 1024);
+    merged.push_str(embedded_tail);
+    if !merged.is_empty() && !merged.ends_with('\n') {
+        merged.push('\n');
+    }
+
+    for path in &res_paths {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            let fname = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("res");
+            merged.push_str(&format!("# --- Loaded external resource: {} ---\n", fname));
+            merged.push_str(&content);
+            if !merged.ends_with('\n') {
+                merged.push('\n');
+            }
+        }
+    }
+
+    (merged, res_paths)
+}
+
+/// 対象スクリプトとその外部リソース（`.spr`, `.map`, `.sfx`, `.res`）を結合し、
+/// 完全に自立した単一の Ruby スクリプト文字列を生成する。
+pub fn pack_script_to_standalone_source(script_path: &Path) -> Result<String, String> {
+    let full_source = std::fs::read_to_string(script_path)
+        .map_err(|e| format!("Failed to read script `{}`: {}", script_path.display(), e))?;
+
+    let (ruby_code, embedded_tail) = split_ruby_source_and_tail(&full_source);
+    let (merged_tail, _) = load_merged_tail_data(script_path, embedded_tail);
+
+    let trimmed_code = ruby_code.trim_end();
+    if merged_tail.trim().is_empty() {
+        Ok(trimmed_code.to_string() + "\n")
+    } else {
+        Ok(format!("{}\n\n__END__\n{}", trimmed_code, merged_tail))
+    }
+}
+
+/// `tail_data` の各行・ブロックを、スプライト／マップ／サウンドに分類して抽出する。
+/// 戻り値: (spr_text, map_text, sfx_text)
+pub fn unpack_tail_data_to_sections(
+    tail_data: &str,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let mut spr_blocks = Vec::new();
+    let mut map_blocks = Vec::new();
+    let mut sfx_blocks = Vec::new();
+
+    #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+    enum Category {
+        Sprite,
+        Map,
+        Sound,
+    }
+
+    let mut current_cat: Option<Category> = None;
+    let mut current_lines: Vec<&str> = Vec::new();
+
+    for line in tail_data.lines() {
+        let trimmed = line.trim();
+        let detected = if trimmed.starts_with("@SPRITE")
+            || trimmed.starts_with("@PNG")
+            || trimmed.starts_with("@SHEET")
+            || trimmed.starts_with("@B64")
+        {
+            Some(Category::Sprite)
+        } else if trimmed.starts_with("@MAP") {
+            Some(Category::Map)
+        } else if trimmed.starts_with("@SFX")
+            || trimmed.starts_with("@MUSIC")
+            || trimmed.starts_with("@WAV")
+            || trimmed.starts_with("@OGG")
+        {
+            Some(Category::Sound)
+        } else {
+            None
+        };
+
+        if let Some(new_cat) = detected {
+            if let Some(cat) = current_cat {
+                let text = current_lines.join("\n");
+                match cat {
+                    Category::Sprite => spr_blocks.push(text),
+                    Category::Map => map_blocks.push(text),
+                    Category::Sound => sfx_blocks.push(text),
+                }
+                current_lines.clear();
+            }
+            current_cat = Some(new_cat);
+        }
+        current_lines.push(line);
+    }
+
+    if let Some(cat) = current_cat {
+        let text = current_lines.join("\n");
+        match cat {
+            Category::Sprite => spr_blocks.push(text),
+            Category::Map => map_blocks.push(text),
+            Category::Sound => sfx_blocks.push(text),
+        }
+    }
+
+    let spr_opt = if spr_blocks.is_empty() {
+        None
+    } else {
+        Some(spr_blocks.join("\n\n") + "\n")
+    };
+    let map_opt = if map_blocks.is_empty() {
+        None
+    } else {
+        Some(map_blocks.join("\n\n") + "\n")
+    };
+    let sfx_opt = if sfx_blocks.is_empty() {
+        None
+    } else {
+        Some(sfx_blocks.join("\n\n") + "\n")
+    };
+
+    (spr_opt, map_opt, sfx_opt)
+}
+
+/// 対象スクリプトの `__END__` からリソースを抽出し、外部ファイル（`<stem>.spr`, `<stem>.map`, `<stem>.sfx`）に展開する。
+pub fn unpack_script_to_files(script_path: &Path) -> Result<Vec<PathBuf>, String> {
+    let full_source = std::fs::read_to_string(script_path)
+        .map_err(|e| format!("Failed to read script `{}`: {}", script_path.display(), e))?;
+
+    let (_, tail_data) = split_ruby_source_and_tail(&full_source);
+    if tail_data.trim().is_empty() {
+        return Err(format!(
+            "Script `{}` does not have any `__END__` resource section.",
+            script_path.display()
+        ));
+    }
+
+    let parent = script_path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = script_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| format!("Invalid script file name: {}", script_path.display()))?;
+
+    let (spr_text, map_text, sfx_text) = unpack_tail_data_to_sections(tail_data);
+    let mut generated = Vec::new();
+
+    if let Some(text) = spr_text {
+        let p = parent.join(format!("{}.spr", stem));
+        std::fs::write(&p, text).map_err(|e| format!("Failed to write `{}`: {}", p.display(), e))?;
+        generated.push(p);
+    }
+    if let Some(text) = map_text {
+        let p = parent.join(format!("{}.map", stem));
+        std::fs::write(&p, text).map_err(|e| format!("Failed to write `{}`: {}", p.display(), e))?;
+        generated.push(p);
+    }
+    if let Some(text) = sfx_text {
+        let p = parent.join(format!("{}.sfx", stem));
+        std::fs::write(&p, text).map_err(|e| format!("Failed to write `{}`: {}", p.display(), e))?;
+        generated.push(p);
+    }
+
+    if generated.is_empty() {
+        return Err(format!(
+            "No extractable resources found in `__END__` of `{}`",
+            script_path.display()
+        ));
+    }
+
+    Ok(generated)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,4 +465,39 @@ mod tests {
         let other = "configure(123)\nmy_config(456)";
         assert_eq!(normalize_ruby_config_syntax(other), other);
     }
+
+    #[test]
+    fn test_unpack_tail_data_to_sections() {
+        let tail = r#"
+# sprites
+@SPRITE 0
+0123
+4567
+
+# maps
+@MAP
+0 1 2
+
+# sounds
+@SFX 0
+c2 e2 g2
+"#;
+        let (spr, map, sfx) = unpack_tail_data_to_sections(tail);
+        assert!(spr.is_some());
+        assert!(map.is_some());
+        assert!(sfx.is_some());
+
+        let spr_str = spr.unwrap();
+        assert!(spr_str.contains("@SPRITE 0"));
+        assert!(!spr_str.contains("@MAP"));
+
+        let map_str = map.unwrap();
+        assert!(map_str.contains("@MAP"));
+        assert!(!map_str.contains("@SFX"));
+
+        let sfx_str = sfx.unwrap();
+        assert!(sfx_str.contains("@SFX 0"));
+        assert!(!sfx_str.contains("@SPRITE"));
+    }
 }
+

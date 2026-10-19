@@ -3648,68 +3648,57 @@ async fn run_native_with_hot_reload(
     let mut cur_virt_h = runtime.config.borrow().screen_height;
     let (mut render_target, mut virtual_camera) = create_virtual_screen(cur_virt_w, cur_virt_h);
     runtime.preload_audio().await;
-    let mut last_source = initial_source;
-    let mut last_modified = std::fs::metadata(&script_path)
-        .and_then(|m| m.modified())
-        .ok();
+    let mut last_snapshot = bundle::get_script_and_resources_snapshot(&script_path);
     let mut frame_count: u64 = 0;
     let mut reload_banner_frames: u32 = 0;
 
     loop {
         frame_count = frame_count.wrapping_add(1);
 
-        // 15フレーム (~0.25秒) ごとにスクリプトファイルの変更を検知してホットリロード
+        // 15フレーム (~0.25秒) ごとにスクリプトファイルおよび外部リソースの変更を検知してホットリロード
         if frame_count.is_multiple_of(15) {
-            let current_modified = std::fs::metadata(&script_path)
-                .and_then(|m| m.modified())
-                .ok();
-            if current_modified != last_modified {
-                last_modified = current_modified;
-                if let Ok(new_source) = std::fs::read_to_string(&script_path)
-                    && !new_source.is_empty()
-                    && new_source != last_source
-                {
-                    last_source = new_source.clone();
-                    let new_parsed_config = parse_config_from_source(&new_source);
-                    match cli::compile_ruby_script_str(&new_source) {
-                        Ok((new_tail, new_mrb)) => {
-                            if new_parsed_config != AppConfig::default() {
-                                let mut cfg = runtime.config.borrow_mut();
-                                *cfg = new_parsed_config;
-                            }
-                            match runtime.hot_reload(&new_tail, &new_mrb) {
-                                Ok(()) => {
-                                    runtime.preload_audio().await;
-                                    println!("[uk run] Hot-reloaded `{}`", script_path.display());
-                                    reload_banner_frames = 60;
-                                    let (new_w, new_h) = {
-                                        let cfg = runtime.config.borrow();
-                                        (cfg.screen_width, cfg.screen_height)
-                                    };
-                                    if new_w != cur_virt_w || new_h != cur_virt_h {
-                                        cur_virt_w = new_w;
-                                        cur_virt_h = new_h;
-                                        let (rt, cam) = create_virtual_screen(cur_virt_w, cur_virt_h);
-                                        render_target = rt;
-                                        virtual_camera = cam;
-                                    }
-                                }
-                                Err(e) => {
-                                    eprintln!(
-                                        "[uk run] Hot-reload runtime error in `{}`:\n{}",
-                                        script_path.display(),
-                                        e
-                                    );
+            let current_snapshot = bundle::get_script_and_resources_snapshot(&script_path);
+            if current_snapshot != last_snapshot {
+                last_snapshot = current_snapshot;
+                match cli::compile_ruby_script_file(&script_path) {
+                    Ok((new_source, new_tail, new_mrb)) => {
+                        let new_parsed_config = parse_config_from_source(&new_source);
+                        if new_parsed_config != AppConfig::default() {
+                            let mut cfg = runtime.config.borrow_mut();
+                            *cfg = new_parsed_config;
+                        }
+                        match runtime.hot_reload(&new_tail, &new_mrb) {
+                            Ok(()) => {
+                                runtime.preload_audio().await;
+                                println!("[uk run] Hot-reloaded `{}`", script_path.display());
+                                reload_banner_frames = 60;
+                                let (new_w, new_h) = {
+                                    let cfg = runtime.config.borrow();
+                                    (cfg.screen_width, cfg.screen_height)
+                                };
+                                if new_w != cur_virt_w || new_h != cur_virt_h {
+                                    cur_virt_w = new_w;
+                                    cur_virt_h = new_h;
+                                    let (rt, cam) = create_virtual_screen(cur_virt_w, cur_virt_h);
+                                    render_target = rt;
+                                    virtual_camera = cam;
                                 }
                             }
+                            Err(e) => {
+                                eprintln!(
+                                    "[uk run] Hot-reload runtime error in `{}`:\n{}",
+                                    script_path.display(),
+                                    e
+                                );
+                            }
                         }
-                        Err(e) => {
-                            eprintln!(
-                                "[uk run] Hot-reload compile error in `{}`:\n{}",
-                                script_path.display(),
-                                e
-                            );
-                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[uk run] Hot-reload compile error in `{}`:\n{}",
+                            script_path.display(),
+                            e
+                        );
                     }
                 }
             }
@@ -3800,6 +3789,21 @@ fn main() {
             tile_size,
         } => {
             if let Err(err) = cli::cmd_encode(&image_path, start_id, tile_size) {
+                eprintln!("Error: {}", err);
+                std::process::exit(1);
+            }
+        }
+        cli::CliAction::Pack {
+            script_path,
+            output_path,
+        } => {
+            if let Err(err) = cli::cmd_pack(&script_path, output_path.as_deref()) {
+                eprintln!("Error: {}", err);
+                std::process::exit(1);
+            }
+        }
+        cli::CliAction::Unpack { script_path } => {
+            if let Err(err) = cli::cmd_unpack(&script_path) {
                 eprintln!("Error: {}", err);
                 std::process::exit(1);
             }
@@ -4359,6 +4363,73 @@ __END__
                 tile_size: Some((16, 16)),
             }
         );
+
+        let pack_act = cli::parse_cli_args(
+            ["uk", "pack", "my_game.rb", "-o", "packed.rb"].map(String::from),
+        )
+        .unwrap();
+        assert_eq!(
+            pack_act,
+            cli::CliAction::Pack {
+                script_path: std::path::PathBuf::from("my_game.rb"),
+                output_path: Some(std::path::PathBuf::from("packed.rb")),
+            }
+        );
+
+        let unpack_act = cli::parse_cli_args(
+            ["uk", "unpack", "my_game.rb"].map(String::from),
+        )
+        .unwrap();
+        assert_eq!(
+            unpack_act,
+            cli::CliAction::Unpack {
+                script_path: std::path::PathBuf::from("my_game.rb"),
+            }
+        );
+    }
+
+    #[test]
+    fn test_external_resource_overlay_and_pack_unpack() {
+        let temp_dir = std::env::temp_dir().join("uk_test_overlay");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let rb_path = temp_dir.join("game.rb");
+        let spr_path = temp_dir.join("game.spr");
+        let packed_path = temp_dir.join("game_packed.rb");
+
+        // 1. game.rb には初期スプライト @SPRITE 0 (色 0) を定義
+        let rb_src = "def update; end\ndef draw; end\n__END__\n@SPRITE 0\n0000\n0000\n";
+        std::fs::write(&rb_path, rb_src).unwrap();
+
+        // 2. 外部 game.spr にオーバーレイスプライト @SPRITE 0 (色 7) を定義
+        let spr_src = "@SPRITE 0\n7777\n7777\n";
+        std::fs::write(&spr_path, spr_src).unwrap();
+
+        // 3. compile_ruby_script_file で読み込み、外部スプライトで上書きされているか検証
+        let (_, merged_tail, _mrb) = cli::compile_ruby_script_file(&rb_path).unwrap();
+        let sprites = parse_tail_resources(&merged_tail);
+        let sp0 = sprites.get(&0).expect("Sprite 0 should exist");
+        // 外部リソース @SPRITE 0 (色 7) の内容が適用されている
+        assert_eq!(&sp0.rgba[0..4], &PALETTE_RGBA[7]);
+
+        // 4. pack コマンドで単一ファイルに統合
+        let packed_out = cli::cmd_pack(&rb_path, Some(&packed_path)).unwrap();
+        assert_eq!(packed_out, packed_path);
+        let packed_content = std::fs::read_to_string(&packed_path).unwrap();
+        assert!(packed_content.contains("__END__"));
+        assert!(packed_content.contains("Loaded external resource: game.spr"));
+
+        // 5. unpack コマンドで外部ファイルに再展開
+        let unpacked_dir = temp_dir.join("unpacked_dest");
+        std::fs::create_dir_all(&unpacked_dir).unwrap();
+        let copy_packed = unpacked_dir.join("stage.rb");
+        std::fs::write(&copy_packed, &packed_content).unwrap();
+        let gen_files = cli::cmd_unpack(&copy_packed).unwrap();
+        assert_eq!(gen_files.len(), 1);
+        assert_eq!(gen_files[0], unpacked_dir.join("stage.spr"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]

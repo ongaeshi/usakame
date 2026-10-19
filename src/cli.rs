@@ -4,7 +4,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use crate::bundle::{pack_bundle, read_bundle_from_current_exe, strip_bundle_from_exe_bytes};
 
@@ -38,6 +38,13 @@ pub enum CliAction {
         start_id: i32,
         tile_size: Option<(u16, u16)>,
     },
+    /// `uk pack [script.rb] [-o <output>]` (外部リソースを __END__ に集約して単一 .rb に結合)
+    Pack {
+        script_path: PathBuf,
+        output_path: Option<PathBuf>,
+    },
+    /// `uk unpack [script.rb]` (`__END__` から外部リソース .spr, .map, .sfx を抽出)
+    Unpack { script_path: PathBuf },
     /// ヘルプ表示
     Help,
     /// バージョン表示
@@ -53,6 +60,8 @@ USAGE:
     uk run [script.rb]                  Run script natively with live hot-reload (default: game.rb)
     uk build [script.rb] [-o <output>]  Build a standalone single binary from script
     uk browser [script.rb] [-p <port>]  Run script in the browser with live hot-reload
+    uk pack [script.rb] [-o <output>]   Pack external resources into single standalone script
+    uk unpack [script.rb]               Unpack resources from script into .spr, .map, .sfx files
     uk encode <file> [--id <id>]        Encode PNG image/sheet or WAV/OGG audio into Base64 for script
     uk --help, -h                       Show this help message
     uk --version, -V                    Show version information"
@@ -233,6 +242,44 @@ where
                 tile_size,
             })
         }
+        "pack" => {
+            let mut script_path: Option<PathBuf> = None;
+            let mut output_path: Option<PathBuf> = None;
+            let mut i = 1;
+            while i < rest.len() {
+                match rest[i].as_str() {
+                    "-o" | "--output" => {
+                        i += 1;
+                        let out = rest
+                            .get(i)
+                            .ok_or_else(|| "Missing argument for -o / --output".to_string())?;
+                        output_path = Some(PathBuf::from(out));
+                    }
+                    arg if arg.starts_with('-') => {
+                        return Err(format!("Unknown option for `uk pack`: {}", arg));
+                    }
+                    arg => {
+                        if script_path.is_none() {
+                            script_path = Some(PathBuf::from(arg));
+                        } else {
+                            return Err(format!("Unexpected extra argument: {}", arg));
+                        }
+                    }
+                }
+                i += 1;
+            }
+            Ok(CliAction::Pack {
+                script_path: script_path.unwrap_or_else(|| PathBuf::from("game.rb")),
+                output_path,
+            })
+        }
+        "unpack" => {
+            let script_path = rest
+                .get(1)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("game.rb"));
+            Ok(CliAction::Unpack { script_path })
+        }
         other => {
             // `uk game.rb` のように直接 .rb ファイルが渡された場合も `uk run` として扱う
             let candidate = PathBuf::from(other);
@@ -362,12 +409,39 @@ pub fn compile_ruby_script_str(full_source: &str) -> Result<(String, Vec<u8>), S
     Ok((tail_data, mrb_bytes))
 }
 
-/// 指定パスの `.rb` ファイルを読み込み、コンパイルして `(full_source, tail_data, mrb_bytes)` を返す。
+/// 指定パスの `.rb` ファイルを読み込み、外部リソース（`.spr`, `.map`, `.sfx`, `.res`）をマージして
+/// コンパイルし `(full_source, merged_tail_data, mrb_bytes)` を返す。
 pub fn compile_ruby_script_file(path: &Path) -> Result<(String, String, Vec<u8>), String> {
     let full_source = fs::read_to_string(path)
         .map_err(|e| format!("Failed to read script `{}`: {}", path.display(), e))?;
-    let (tail_data, mrb_bytes) = compile_ruby_script_str(&full_source)?;
-    Ok((full_source, tail_data, mrb_bytes))
+    let (embedded_tail, mrb_bytes) = compile_ruby_script_str(&full_source)?;
+    let (merged_tail, _) = crate::bundle::load_merged_tail_data(path, &embedded_tail);
+    Ok((full_source, merged_tail, mrb_bytes))
+}
+
+/// `uk pack <script.rb> [-o <output>]` の実装:
+/// 外部リソース（`.spr`, `.map`, `.sfx`, `.res`）を `__END__` に統合した単一の `.rb` ファイルを出力する。
+pub fn cmd_pack(script_path: &Path, output_path: Option<&Path>) -> Result<PathBuf, String> {
+    let packed_source = crate::bundle::pack_script_to_standalone_source(script_path)?;
+    let target = match output_path {
+        Some(p) => p.to_path_buf(),
+        None => script_path.to_path_buf(),
+    };
+    fs::write(&target, packed_source)
+        .map_err(|e| format!("Failed to write packed script `{}`: {}", target.display(), e))?;
+    println!("Successfully packed `{}` -> `{}`", script_path.display(), target.display());
+    Ok(target)
+}
+
+/// `uk unpack <script.rb>` の実装:
+/// `__END__` セクションからリソースを抽出し、外部ファイル（`<stem>.spr`, `<stem>.map`, `<stem>.sfx`）に展開する。
+pub fn cmd_unpack(script_path: &Path) -> Result<Vec<PathBuf>, String> {
+    let generated = crate::bundle::unpack_script_to_files(script_path)?;
+    println!("Successfully unpacked resources from `{}`:", script_path.display());
+    for f in &generated {
+        println!("  - {}", f.display());
+    }
+    Ok(generated)
 }
 
 /// `uk build <script.rb>` の実装:
@@ -481,7 +555,7 @@ pub fn cmd_browser(
     open_browser: bool,
 ) -> Result<(), String> {
     // 1. 初回スクリプトのコンパイル検証
-    let (initial_source, tail_data, mrb_bytes) = compile_ruby_script_file(script_path)?;
+    let (_initial_source, tail_data, mrb_bytes) = compile_ruby_script_file(script_path)?;
     let initial_bundle = pack_bundle(&tail_data, &mrb_bytes);
 
     // 2. WASM ランタイム (`uk.wasm`) の取得またはビルド
@@ -501,35 +575,26 @@ pub fn cmd_browser(
     let shared_bundle = Arc::new(Mutex::new(initial_bundle));
     let sse_clients: Arc<Mutex<Vec<TcpStream>>> = Arc::new(Mutex::new(Vec::new()));
 
-    // 4. ファイル変更監視スレッド（ホットリロード用）
+    // 4. ファイル変更監視スレッド（ホットリロード用: スクリプトおよび外部リソースを監視）
     {
         let watch_path = script_path.to_path_buf();
         let shared_bundle_for_watcher = Arc::clone(&shared_bundle);
         let sse_clients_for_watcher = Arc::clone(&sse_clients);
-        let mut last_source = initial_source;
-        let mut last_modified: Option<SystemTime> =
-            fs::metadata(&watch_path).and_then(|m| m.modified()).ok();
+        let mut last_snapshot = crate::bundle::get_script_and_resources_snapshot(&watch_path);
 
         std::thread::spawn(move || {
             loop {
                 std::thread::sleep(Duration::from_millis(250));
 
-                let current_modified = fs::metadata(&watch_path).and_then(|m| m.modified()).ok();
-                if current_modified == last_modified {
+                let current_snapshot =
+                    crate::bundle::get_script_and_resources_snapshot(&watch_path);
+                if current_snapshot == last_snapshot {
                     continue;
                 }
-                last_modified = current_modified;
+                last_snapshot = current_snapshot;
 
-                let Ok(new_source) = fs::read_to_string(&watch_path) else {
-                    continue;
-                };
-                if new_source.is_empty() || new_source == last_source {
-                    continue;
-                }
-                last_source = new_source.clone();
-
-                match compile_ruby_script_str(&new_source) {
-                    Ok((new_tail, new_mrb)) => {
+                match compile_ruby_script_file(&watch_path) {
+                    Ok((_new_src, new_tail, new_mrb)) => {
                         let new_bundle = pack_bundle(&new_tail, &new_mrb);
                         if let Ok(mut guard) = shared_bundle_for_watcher.lock() {
                             *guard = new_bundle;
