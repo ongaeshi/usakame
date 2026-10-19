@@ -3724,21 +3724,34 @@ impl GameRuntime {
         Ok(())
     }
 
+    pub fn call_update_result(&mut self) -> Result<(), String> {
+        mrb_funcall(&mut self.vm, None, "update", &[])
+            .map(|_| ())
+            .map_err(|e| format!("{:?}", e))
+    }
+
     pub fn call_update(&mut self) {
-        if let Err(e) = mrb_funcall(&mut self.vm, None, "update", &[]) {
-            eprintln!("Ruby error in `update`: {:?}", e);
+        if let Err(e) = self.call_update_result() {
+            eprintln!("Ruby error in `update`: {}", e);
         }
     }
 
-    pub fn call_draw(&mut self) {
+    pub fn call_draw_result(&mut self) -> Result<(), String> {
         if !self.headless {
             apply_gl_scissor(self.draw_state.borrow().clip);
         }
-        if let Err(e) = mrb_funcall(&mut self.vm, None, "draw", &[]) {
-            eprintln!("Ruby error in `draw`: {:?}", e);
-        }
+        let res = mrb_funcall(&mut self.vm, None, "draw", &[])
+            .map(|_| ())
+            .map_err(|e| format!("{:?}", e));
         if !self.headless {
             apply_gl_scissor(None);
+        }
+        res
+    }
+
+    pub fn call_draw(&mut self) {
+        if let Err(e) = self.call_draw_result() {
+            eprintln!("Ruby error in `draw`: {}", e);
         }
     }
 
@@ -5295,8 +5308,8 @@ ch0 T120 L4 O4 c d e f
             GameRuntime::new(&tail_data, &mrb_bytes, true).expect("Sprite editor should initialize");
 
         for _ in 0..10 {
-            runtime.call_update();
-            runtime.call_draw();
+            runtime.call_update_result().expect("call_update should succeed");
+            runtime.call_draw_result().expect("call_draw should succeed");
         }
 
         // スプライトエディタで出力される形式が __END__ リソースとして正常にパースできることを検証
@@ -5574,8 +5587,8 @@ __END__
             GameRuntime::new(&tail_data, &mrb_bytes, true).expect("Tilemap editor should initialize");
 
         for _ in 0..10 {
-            runtime.call_update();
-            runtime.call_draw();
+            runtime.call_update_result().expect("Tilemap editor call_update should succeed");
+            runtime.call_draw_result().expect("Tilemap editor call_draw should succeed");
         }
 
         // タイルマップエディタが出力する形式の @MAP および @SPRITE をパースできることを検証

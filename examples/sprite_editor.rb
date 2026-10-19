@@ -149,11 +149,10 @@ else
   notify("TARGET: #{$target_path} (NEW)")
 end
 
-__END__
 # ------------------------------------------------------------------------------
 # エクスポート & 保存処理
 # ------------------------------------------------------------------------------
-def slot_to_text(slot_id)
+def slot_to_lines(slot_id)
   lines = ["@SPRITE #{slot_id}"]
   grid = $slots[slot_id]
   16.times do |y|
@@ -170,13 +169,23 @@ def slot_to_text(slot_id)
     end
     lines << row
   end
-  lines.join("\n")
+  lines
+end
+
+def slot_to_text(slot_id)
+  slot_to_lines(slot_id).join("\n")
 end
 
 def build_all_sprites_text
   blocks = []
   NUM_SLOTS.times do |sid|
-    has_pixel = $slots[sid].any? { |c| !c.nil? }
+    has_pixel = false
+    $slots[sid].each do |c|
+      if !c.nil?
+        has_pixel = true
+        break
+      end
+    end
     if has_pixel || sid == 0
       blocks << slot_to_text(sid)
     end
@@ -227,7 +236,8 @@ def flood_fill(start_x, start_y, new_col)
 
   while !queue.empty?
     pt = queue.shift
-    x, y = pt[0], pt[1]
+    x = pt[0]
+    y = pt[1]
     key = y * 16 + x
     next if visited[key]
     visited[key] = true
@@ -546,9 +556,13 @@ def draw
     [:pen, "PEN", 12, 30],
     [:fill, "FILL", 46, 30],
     [:picker, "PICK", 80, 30],
-    [:eraser, "ERASER", 114, 38],
+    [:eraser, "ERASER", 114, 38]
   ]
-  tools.each do |tool_id, label, bx, bw|
+  tools.each do |item|
+    tool_id = item[0]
+    label = item[1]
+    bx = item[2]
+    bw = item[3]
     is_active = ($current_tool == tool_id)
     rectfill(bx, 224, bw, 18, is_active ? 8 : 1)
     rect(bx, 224, bw, 18, is_active ? 7 : 5)
@@ -645,12 +659,17 @@ def draw
   print_text("FLIP-V", 225, 229, 7)
 
   # シフト矢印
-  [
+  arrow_buttons = [
     ["←", 268, 224, 20],
     ["↓", 292, 224, 20],
     ["→", 316, 224, 20],
-    ["↑", 320, 202, 20],
-  ].each do |lbl, sx, sy, sw|
+    ["↑", 320, 202, 20]
+  ]
+  arrow_buttons.each do |item|
+    lbl = item[0]
+    sx = item[1]
+    sy = item[2]
+    sw = item[3]
     rectfill(sx, sy, sw, 18, 1)
     rect(sx, sy, sw, 18, 5)
     print_text(lbl, sx + 5, sy + 5, 7)
@@ -683,7 +702,10 @@ def draw
   end
 
   # スロット情報
-  active_pixels = $slots[$current_slot].count { |c| !c.nil? }
+  active_pixels = 0
+  $slots[$current_slot].each do |c|
+    active_pixels += 1 unless c.nil?
+  end
   print_text("Slot ##{$current_slot}: #{active_pixels}/256 px", 350, 168, 6)
   print_text("Shortcuts: Z (Undo), S (Save), X (Exp)", 350, 184, 5)
   print_text("Arrows: Shift, Wheel: Color", 350, 198, 5)
@@ -704,10 +726,10 @@ def draw
     rect(30, 20, 420, 230, 7)
     print_text("--- SPRITE CODE PREVIEW (Click anywhere to close) ---", 40, 28, 10)
 
-    preview_lines = slot_to_text($current_slot).lines
+    preview_lines = slot_to_lines($current_slot)
     preview_lines.each_with_index do |pl, i|
       break if i > 18
-      print_text(pl.strip, 40, 44 + i * 10, 7)
+      print_text(pl, 40, 44 + i * 10, 7)
     end
   end
 
