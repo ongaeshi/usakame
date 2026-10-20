@@ -511,7 +511,50 @@ impl BankData {
                 }
             }
         }
-        self.texture = None;
+        self.pal_cache.borrow_mut().clear();
+    }
+
+    pub fn set_pixel(&mut self, x: usize, y: usize, col: Option<u8>) {
+        if x >= BANK_WIDTH || y >= BANK_HEIGHT {
+            return;
+        }
+        let off = (y * BANK_WIDTH + x) * 4;
+        if off + 4 <= self.rgba.len() {
+            if let Some(c) = col {
+                let idx = (c as usize).min(15);
+                self.rgba[off..off + 4].copy_from_slice(&PALETTE_RGBA[idx]);
+            } else {
+                self.rgba[off..off + 4].copy_from_slice(&[0, 0, 0, 0]);
+            }
+        }
+        self.pal_cache.borrow_mut().clear();
+    }
+
+    pub fn update_rect(&mut self, x: usize, y: usize, w: usize, h: usize, pixels: &[Option<u8>]) {
+        for row in 0..h {
+            let gy = y + row;
+            if gy >= BANK_HEIGHT {
+                break;
+            }
+            for col in 0..w {
+                let gx = x + col;
+                if gx >= BANK_WIDTH {
+                    break;
+                }
+                let src_idx = row * w + col;
+                if src_idx < pixels.len() {
+                    let dst_off = (gy * BANK_WIDTH + gx) * 4;
+                    if dst_off + 4 <= self.rgba.len() {
+                        if let Some(c) = pixels[src_idx] {
+                            let idx = (c as usize).min(15);
+                            self.rgba[dst_off..dst_off + 4].copy_from_slice(&PALETTE_RGBA[idx]);
+                        } else {
+                            self.rgba[dst_off..dst_off + 4].copy_from_slice(&[0, 0, 0, 0]);
+                        }
+                    }
+                }
+            }
+        }
         self.pal_cache.borrow_mut().clear();
     }
 
@@ -521,9 +564,13 @@ impl BankData {
             width: self.width,
             height: self.height,
         };
-        let texture = Texture2D::from_image(&image);
-        texture.set_filter(FilterMode::Nearest);
-        self.texture = Some(texture);
+        if let Some(ref texture) = self.texture {
+            texture.update(&image);
+        } else {
+            let texture = Texture2D::from_image(&image);
+            texture.set_filter(FilterMode::Nearest);
+            self.texture = Some(texture);
+        }
         self.pal_cache.borrow_mut().clear();
     }
 
@@ -1815,19 +1862,47 @@ fn draw_bank_rect(
     rotate_deg: f32,
     scale: f32,
 ) {
-    let Some((draw_x, draw_y, mut params)) = compute_sprite_draw_params(
-        w,
-        h,
-        x,
-        y,
-        flip_x,
-        flip_y,
-        rotate_deg,
-        scale,
-    ) else {
+    if !scale.is_finite() || scale.abs() < f32::EPSILON || w <= 0.0 || h <= 0.0 {
         return;
+    }
+    let (s, fx, fy) = if scale < 0.0 {
+        (-scale, !flip_x, !flip_y)
+    } else {
+        (scale, flip_x, flip_y)
     };
-    params.source = Some(Rect { x: u, y: v, w, h });
+
+    let (draw_x, draw_y, params) = if rotate_deg.abs() < f32::EPSILON {
+        // 回転なし: (x, y) を左上座標としてスケール (Pyxel blt 準拠)
+        let scaled_w = w * s;
+        let scaled_h = h * s;
+        let dx = x.floor();
+        let dy = y.floor();
+        let p = DrawTextureParams {
+            dest_size: Some(vec2(scaled_w, scaled_h)),
+            source: Some(Rect { x: u, y: v, w, h }),
+            rotation: 0.0,
+            flip_x: fx,
+            flip_y: fy,
+            pivot: None,
+        };
+        (dx, dy, p)
+    } else {
+        // 回転あり: 中心ピボット回転
+        let Some((dx, dy, mut p)) = compute_sprite_draw_params(
+            w,
+            h,
+            x,
+            y,
+            flip_x,
+            flip_y,
+            rotate_deg,
+            scale,
+        ) else {
+            return;
+        };
+        p.source = Some(Rect { x: u, y: v, w, h });
+        (dx, dy, p)
+    };
 
     if state.is_default_palette() {
         if let Some(ref texture) = bank.texture {
@@ -3378,6 +3453,58 @@ fn register_engine_api(
                 Ok(Rc::new(RObject::boolean(false)))
             }),
         );
+        let banks_for_headless_set_pixel = banks.clone();
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            "set_bank_pixel",
+            Box::new(move |_vm, args| {
+                let bank_id = arg_i32(args, 0, 0);
+                let x = arg_i32(args, 1, 0);
+                let y = arg_i32(args, 2, 0);
+                let col = match args.get(3).map(|v| &v.value) {
+                    Some(RValue::Integer(c)) if (0..=15).contains(c) => Some(*c as u8),
+                    _ => None,
+                };
+                if x >= 0 && x < BANK_WIDTH as i32 && y >= 0 && y < BANK_HEIGHT as i32 {
+                    let mut banks_mut = banks_for_headless_set_pixel.borrow_mut();
+                    let bank = banks_mut.entry(bank_id).or_insert_with(|| BankData::new(bank_id));
+                    bank.set_pixel(x as usize, y as usize, col);
+                    return Ok(Rc::new(RObject::boolean(true)));
+                }
+                Ok(Rc::new(RObject::boolean(false)))
+            }),
+        );
+        let banks_for_headless_update_rect = banks.clone();
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            "update_bank_rect",
+            Box::new(move |_vm, args| {
+                let bank_id = arg_i32(args, 0, 0);
+                let x = arg_i32(args, 1, 0).max(0) as usize;
+                let y = arg_i32(args, 2, 0).max(0) as usize;
+                let w = arg_i32(args, 3, 32).max(1) as usize;
+                let h = arg_i32(args, 4, 32).max(1) as usize;
+                if let Some(sixth) = args.get(5)
+                    && let RValue::Array(ref ary_cell) = sixth.value
+                {
+                    let ary = ary_cell.borrow();
+                    let mut pixels = Vec::with_capacity(ary.len());
+                    for val in ary.iter() {
+                        match &val.value {
+                            RValue::Integer(c) if (0..=15).contains(c) => pixels.push(Some(*c as u8)),
+                            _ => pixels.push(None),
+                        }
+                    }
+                    let mut banks_mut = banks_for_headless_update_rect.borrow_mut();
+                    let bank = banks_mut.entry(bank_id).or_insert_with(|| BankData::new(bank_id));
+                    bank.update_rect(x, y, w, h, &pixels);
+                    return Ok(Rc::new(RObject::boolean(true)));
+                }
+                Ok(Rc::new(RObject::boolean(false)))
+            }),
+        );
         let banks_for_headless_spr = banks.clone();
         let act_spr_for_headless = active_spr_bank.clone();
         let sprites_for_headless = sprites.clone();
@@ -3933,6 +4060,64 @@ fn register_engine_api(
                 let mut banks_mut = banks_for_update.borrow_mut();
                 let bank = banks_mut.entry(bank_id).or_insert_with(|| BankData::new(bank_id));
                 bank.update_pixels(&pixels);
+                bank.build_texture();
+                return Ok(Rc::new(RObject::boolean(true)));
+            }
+            Ok(Rc::new(RObject::boolean(false)))
+        }),
+    );
+
+    // set_bank_pixel(bank_id, x, y, col): 1ピクセルを即座に更新してテクスチャに反映
+    let banks_for_set_pixel = banks.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "set_bank_pixel",
+        Box::new(move |_vm, args| {
+            let bank_id = arg_i32(args, 0, 0);
+            let x = arg_i32(args, 1, 0);
+            let y = arg_i32(args, 2, 0);
+            let col = match args.get(3).map(|v| &v.value) {
+                Some(RValue::Integer(c)) if (0..=15).contains(c) => Some(*c as u8),
+                _ => None,
+            };
+            if x >= 0 && x < BANK_WIDTH as i32 && y >= 0 && y < BANK_HEIGHT as i32 {
+                let mut banks_mut = banks_for_set_pixel.borrow_mut();
+                let bank = banks_mut.entry(bank_id).or_insert_with(|| BankData::new(bank_id));
+                bank.set_pixel(x as usize, y as usize, col);
+                bank.build_texture();
+                return Ok(Rc::new(RObject::boolean(true)));
+            }
+            Ok(Rc::new(RObject::boolean(false)))
+        }),
+    );
+
+    // update_bank_rect(bank_id, x, y, w, h, pixels): 矩形領域ピクセル配列で部分更新
+    let banks_for_update_rect = banks.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "update_bank_rect",
+        Box::new(move |_vm, args| {
+            let bank_id = arg_i32(args, 0, 0);
+            let x = arg_i32(args, 1, 0).max(0) as usize;
+            let y = arg_i32(args, 2, 0).max(0) as usize;
+            let w = arg_i32(args, 3, 32).max(1) as usize;
+            let h = arg_i32(args, 4, 32).max(1) as usize;
+            if let Some(sixth) = args.get(5)
+                && let RValue::Array(ref ary_cell) = sixth.value
+            {
+                let ary = ary_cell.borrow();
+                let mut pixels = Vec::with_capacity(ary.len());
+                for val in ary.iter() {
+                    match &val.value {
+                        RValue::Integer(c) if (0..=15).contains(c) => pixels.push(Some(*c as u8)),
+                        _ => pixels.push(None),
+                    }
+                }
+                let mut banks_mut = banks_for_update_rect.borrow_mut();
+                let bank = banks_mut.entry(bank_id).or_insert_with(|| BankData::new(bank_id));
+                bank.update_rect(x, y, w, h, &pixels);
                 bank.build_texture();
                 return Ok(Rc::new(RObject::boolean(true)));
             }

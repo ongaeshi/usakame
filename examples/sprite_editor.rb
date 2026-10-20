@@ -159,7 +159,7 @@ def perform_undo
   $sel_x = sel_x
   $sel_y = sel_y
   set_canvas_pixels(sel_x, sel_y, saved_grid)
-  update_bank($current_bank, $bank_pixels)
+  update_bank_rect($current_bank, sel_x, sel_y, CANVAS_GRID, CANVAS_GRID, saved_grid)
   sfx(:click)
   notify("UNDO")
 end
@@ -283,7 +283,7 @@ def export_all
   notify("EXPORTED @BANK #{$current_bank} TO CONSOLE!")
 end
 
-# 塗りつぶし (Flood Fill on 32x32 canvas)
+# 塗りつぶし (Flood Fill on 32x32 canvas - 高速 DFS & 部分更新)
 def flood_fill(start_cx, start_cy, new_col)
   start_gx = $sel_x + start_cx
   start_gy = $sel_y + start_cy
@@ -293,11 +293,11 @@ def flood_fill(start_cx, start_cy, new_col)
   return if target_col == new_col
 
   push_undo
-  queue = [[start_cx, start_cy]]
-  visited = {}
+  stack = [[start_cx, start_cy]]
+  visited = Array.new(CANVAS_GRID * CANVAS_GRID, false)
 
-  while !queue.empty?
-    pt = queue.shift
+  while !stack.empty?
+    pt = stack.pop
     cx = pt[0]
     cy = pt[1]
     key = cy * CANVAS_GRID + cx
@@ -311,13 +311,13 @@ def flood_fill(start_cx, start_cy, new_col)
     idx = gy * BANK_SIZE + gx
     if $bank_pixels[idx] == target_col
       $bank_pixels[idx] = new_col
-      queue << [cx + 1, cy] if cx + 1 < CANVAS_GRID
-      queue << [cx - 1, cy] if cx - 1 >= 0
-      queue << [cx, cy + 1] if cy + 1 < CANVAS_GRID
-      queue << [cx, cy - 1] if cy - 1 >= 0
+      stack << [cx + 1, cy] if cx + 1 < CANVAS_GRID
+      stack << [cx - 1, cy] if cx - 1 >= 0
+      stack << [cx, cy + 1] if cy + 1 < CANVAS_GRID
+      stack << [cx, cy - 1] if cy - 1 >= 0
     end
   end
-  update_bank($current_bank, $bank_pixels)
+  update_bank_rect($current_bank, $sel_x, $sel_y, CANVAS_GRID, CANVAS_GRID, get_canvas_pixels($sel_x, $sel_y))
   sfx(:click)
 end
 
@@ -335,7 +335,7 @@ def flip_canvas(horizontal)
     end
   end
   set_canvas_pixels($sel_x, $sel_y, new_grid)
-  update_bank($current_bank, $bank_pixels)
+  update_bank_rect($current_bank, $sel_x, $sel_y, CANVAS_GRID, CANVAS_GRID, new_grid)
   sfx(:select)
 end
 
@@ -353,7 +353,7 @@ def shift_canvas(dx, dy)
     end
   end
   set_canvas_pixels($sel_x, $sel_y, new_grid)
-  update_bank($current_bank, $bank_pixels)
+  update_bank_rect($current_bank, $sel_x, $sel_y, CANVAS_GRID, CANVAS_GRID, new_grid)
   sfx(:cursor)
 end
 
@@ -361,7 +361,7 @@ def clear_canvas
   push_undo
   new_grid = Array.new(CANVAS_GRID * CANVAS_GRID, nil)
   set_canvas_pixels($sel_x, $sel_y, new_grid)
-  update_bank($current_bank, $bank_pixels)
+  update_bank_rect($current_bank, $sel_x, $sel_y, CANVAS_GRID, CANVAS_GRID, new_grid)
   sfx(:boom)
   notify("CLEARED 32x32 AT (#{$sel_x}, #{$sel_y})")
 end
@@ -553,12 +553,12 @@ def update
         if btn(:mouse_l)
           if $bank_pixels[idx] != $current_col
             $bank_pixels[idx] = $current_col
-            update_bank($current_bank, $bank_pixels)
+            set_bank_pixel($current_bank, gx, gy, $current_col)
           end
         elsif btn(:mouse_r)
           unless $bank_pixels[idx].nil?
             $bank_pixels[idx] = nil
-            update_bank($current_bank, $bank_pixels)
+            set_bank_pixel($current_bank, gx, gy, nil)
           end
         end
       when :eraser
@@ -566,7 +566,7 @@ def update
         if btn(:mouse_l)
           unless $bank_pixels[idx].nil?
             $bank_pixels[idx] = nil
-            update_bank($current_bank, $bank_pixels)
+            set_bank_pixel($current_bank, gx, gy, nil)
           end
         end
       when :fill
@@ -646,9 +646,8 @@ def draw
     end
   end
 
-  # バンクテクスチャから 32x32 を 6倍拡大描画 (1回の GPU 転送で爆速！)
-  # 中心拡大ピボット補正: (192 - 32) / 2 = 80
-  blt($canvas_x + 80, $canvas_y + 80, $current_bank, $sel_x, $sel_y, 32, 32, 0, 6.0)
+  # バンクテクスチャから 32x32 を 6倍拡大描画 (左上基準 blt で 192x192 ぴったり描画)
+  blt($canvas_x, $canvas_y, $current_bank, $sel_x, $sel_y, 32, 32, 0, 6.0)
 
   # グリッド線 (一括描画で高速化)
   if $show_grid
