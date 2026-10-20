@@ -636,27 +636,19 @@ def draw
   rectfill($canvas_x - 2, $canvas_y - 2, CANVAS_GRID * $cell_size + 4, CANVAS_GRID * $cell_size + 4, 1)
   rect($canvas_x - 2, $canvas_y - 2, CANVAS_GRID * $cell_size + 4, CANVAS_GRID * $cell_size + 4, 5)
 
-  CANVAS_GRID.times do |cy|
-    CANVAS_GRID.times do |cx|
-      px = $canvas_x + cx * $cell_size
-      py = $canvas_y + cy * $cell_size
-      gx = $sel_x + cx
-      gy = $sel_y + cy
-
-      if gx >= BANK_SIZE || gy >= BANK_SIZE
-        # バンク領域外
-        rectfill(px, py, $cell_size, $cell_size, 0)
-      else
-        c = $bank_pixels[gy * BANK_SIZE + gx]
-        if c.nil?
-          pattern_col = ((cx + cy) % 2 == 0) ? 0 : 5
-          rectfill(px, py, $cell_size, $cell_size, pattern_col)
-        else
-          rectfill(px, py, $cell_size, $cell_size, c)
-        end
+  # 背景市松模様: 黒ベースに偶数マスのみ描画 (8x8 = 64 回で極小負荷)
+  rectfill($canvas_x, $canvas_y, 192, 192, 0)
+  8.times do |cy|
+    8.times do |cx|
+      if (cx + cy) % 2 == 1
+        rectfill($canvas_x + cx * 24, $canvas_y + cy * 24, 24, 24, 5)
       end
     end
   end
+
+  # バンクテクスチャから 32x32 を 6倍拡大描画 (1回の GPU 転送で爆速！)
+  # 中心拡大ピボット補正: (192 - 32) / 2 = 80
+  blt($canvas_x + 80, $canvas_y + 80, $current_bank, $sel_x, $sel_y, 32, 32, 0, 6.0)
 
   # グリッド線 (一括描画で高速化)
   if $show_grid
