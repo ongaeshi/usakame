@@ -78,9 +78,6 @@ $notify_timer = 0
 # アンドゥ用履歴スタック (最大30手)
 $undo_stack = []
 
-# 256x256 バンクピクセルデータ (65536要素, nil または 0..15)
-$bank_pixels = Array.new(BANK_SIZE * BANK_SIZE, nil)
-
 # ------------------------------------------------------------------------------
 # ターゲットファイル検出 & バンク指定
 # ------------------------------------------------------------------------------
@@ -120,32 +117,14 @@ def notify(msg)
   $notify_timer = 120 # 約2秒表示
 end
 
-# 32x32 領域のピクセルを配列で取得
+# 32x32 領域のピクセルを配列で取得 (Rust ネイティブAPIで超高速取得)
 def get_canvas_pixels(bx, by)
-  pixels = Array.new(CANVAS_GRID * CANVAS_GRID, nil)
-  CANVAS_GRID.times do |cy|
-    CANVAS_GRID.times do |cx|
-      gx = bx + cx
-      gy = by + cy
-      if gx < BANK_SIZE && gy < BANK_SIZE
-        pixels[cy * CANVAS_GRID + cx] = $bank_pixels[gy * BANK_SIZE + gx]
-      end
-    end
-  end
-  pixels
+  get_bank_rect($current_bank, bx, by, CANVAS_GRID, CANVAS_GRID)
 end
 
-# 32x32 領域のピクセルを復元
+# 32x32 領域のピクセルを復元 (Rust ネイティブAPIで一括更新)
 def set_canvas_pixels(bx, by, pixels)
-  CANVAS_GRID.times do |cy|
-    CANVAS_GRID.times do |cx|
-      gx = bx + cx
-      gy = by + cy
-      if gx < BANK_SIZE && gy < BANK_SIZE
-        $bank_pixels[gy * BANK_SIZE + gx] = pixels[cy * CANVAS_GRID + cx]
-      end
-    end
-  end
+  update_bank_rect($current_bank, bx, by, CANVAS_GRID, CANVAS_GRID, pixels)
 end
 
 def push_undo
@@ -159,7 +138,6 @@ def perform_undo
   $sel_x = sel_x
   $sel_y = sel_y
   set_canvas_pixels(sel_x, sel_y, saved_grid)
-  update_bank_rect($current_bank, sel_x, sel_y, CANVAS_GRID, CANVAS_GRID, saved_grid)
   sfx(:click)
   notify("UNDO")
 end
@@ -169,8 +147,7 @@ load_source = ($save_path != $target_path && read_file($save_path)) ? $save_path
 loaded_bank = load_resource_bank(load_source, $current_bank)
 
 if loaded_bank && loaded_bank.size == BANK_SIZE * BANK_SIZE
-  $bank_pixels = loaded_bank
-  update_bank($current_bank, $bank_pixels)
+  update_bank($current_bank, loaded_bank)
   notify("LOADED BANK #{$current_bank} FROM #{load_source}")
 else
   # サンプルうさぎスプライトをバンク0の (0, 0) に初期設定
@@ -196,11 +173,10 @@ else
     16.times do |x|
       ch = row[x]
       if ch && ch != "."
-        $bank_pixels[y * BANK_SIZE + x] = ch.to_i(16)
+        set_bank_pixel($current_bank, x, y, ch.to_i(16))
       end
     end
   end
-  update_bank($current_bank, $bank_pixels)
   notify("TARGET: #{$target_path} (NEW BANK #{$current_bank})")
 end
 
@@ -215,11 +191,10 @@ def switch_bank(new_bank)
   load_source = ($save_path != $target_path && read_file($save_path)) ? $save_path : $target_path
   loaded = load_resource_bank(load_source, $current_bank)
   if loaded && loaded.size == BANK_SIZE * BANK_SIZE
-    $bank_pixels = loaded
+    update_bank($current_bank, loaded)
   else
-    $bank_pixels = Array.new(BANK_SIZE * BANK_SIZE, nil)
+    update_bank($current_bank, Array.new(BANK_SIZE * BANK_SIZE, nil))
   end
-  update_bank($current_bank, $bank_pixels)
   notify("SWITCHED TO BANK #{$current_bank}")
 end
 
@@ -227,7 +202,7 @@ end
 # 保存 & エクスポート処理
 # ------------------------------------------------------------------------------
 def save_to_target
-  b64 = bank_to_b64_png($bank_pixels)
+  b64 = bank_to_b64_png(get_bank_pixels($current_bank))
   unless b64
     sfx(:boom)
     notify("ERROR: FAILED TO ENCODE PNG")
@@ -272,7 +247,7 @@ def save_to_target
 end
 
 def export_all
-  b64 = bank_to_b64_png($bank_pixels)
+  b64 = bank_to_b64_png(get_bank_pixels($current_bank))
   puts "\n# =================================================="
   puts "# 🐰 USAKAME BANK DATA (Bank #{$current_bank})"
   puts "# =================================================="
@@ -289,7 +264,9 @@ def flood_fill(start_cx, start_cy, new_col)
   start_gy = $sel_y + start_cy
   return if start_gx >= BANK_SIZE || start_gy >= BANK_SIZE
 
-  target_col = $bank_pixels[start_gy * BANK_SIZE + start_gx]
+  cur_pixels = get_canvas_pixels($sel_x, $sel_y)
+  start_idx = start_cy * CANVAS_GRID + start_cx
+  target_col = cur_pixels[start_idx]
   return if target_col == new_col
 
   push_undo
@@ -304,20 +281,15 @@ def flood_fill(start_cx, start_cy, new_col)
     next if visited[key]
     visited[key] = true
 
-    gx = $sel_x + cx
-    gy = $sel_y + cy
-    next if gx >= BANK_SIZE || gy >= BANK_SIZE
-
-    idx = gy * BANK_SIZE + gx
-    if $bank_pixels[idx] == target_col
-      $bank_pixels[idx] = new_col
+    if cur_pixels[key] == target_col
+      cur_pixels[key] = new_col
       stack << [cx + 1, cy] if cx + 1 < CANVAS_GRID
       stack << [cx - 1, cy] if cx - 1 >= 0
       stack << [cx, cy + 1] if cy + 1 < CANVAS_GRID
       stack << [cx, cy - 1] if cy - 1 >= 0
     end
   end
-  update_bank_rect($current_bank, $sel_x, $sel_y, CANVAS_GRID, CANVAS_GRID, get_canvas_pixels($sel_x, $sel_y))
+  set_canvas_pixels($sel_x, $sel_y, cur_pixels)
   sfx(:click)
 end
 
@@ -335,7 +307,6 @@ def flip_canvas(horizontal)
     end
   end
   set_canvas_pixels($sel_x, $sel_y, new_grid)
-  update_bank_rect($current_bank, $sel_x, $sel_y, CANVAS_GRID, CANVAS_GRID, new_grid)
   sfx(:select)
 end
 
@@ -353,7 +324,6 @@ def shift_canvas(dx, dy)
     end
   end
   set_canvas_pixels($sel_x, $sel_y, new_grid)
-  update_bank_rect($current_bank, $sel_x, $sel_y, CANVAS_GRID, CANVAS_GRID, new_grid)
   sfx(:cursor)
 end
 
@@ -361,7 +331,6 @@ def clear_canvas
   push_undo
   new_grid = Array.new(CANVAS_GRID * CANVAS_GRID, nil)
   set_canvas_pixels($sel_x, $sel_y, new_grid)
-  update_bank_rect($current_bank, $sel_x, $sel_y, CANVAS_GRID, CANVAS_GRID, new_grid)
   sfx(:boom)
   notify("CLEARED 32x32 AT (#{$sel_x}, #{$sel_y})")
 end
@@ -551,23 +520,14 @@ def update
       when :pen
         push_undo if btnp(:mouse_l) || btnp(:mouse_r)
         if btn(:mouse_l)
-          if $bank_pixels[idx] != $current_col
-            $bank_pixels[idx] = $current_col
-            set_bank_pixel($current_bank, gx, gy, $current_col)
-          end
+          set_bank_pixel($current_bank, gx, gy, $current_col)
         elsif btn(:mouse_r)
-          unless $bank_pixels[idx].nil?
-            $bank_pixels[idx] = nil
-            set_bank_pixel($current_bank, gx, gy, nil)
-          end
+          set_bank_pixel($current_bank, gx, gy, nil)
         end
       when :eraser
         push_undo if btnp(:mouse_l)
         if btn(:mouse_l)
-          unless $bank_pixels[idx].nil?
-            $bank_pixels[idx] = nil
-            set_bank_pixel($current_bank, gx, gy, nil)
-          end
+          set_bank_pixel($current_bank, gx, gy, nil)
         end
       when :fill
         if btnp(:mouse_l)
@@ -577,7 +537,7 @@ def update
         end
       when :picker
         if btnp(:mouse_l)
-          picked = $bank_pixels[idx]
+          picked = get_bank_pixel($current_bank, gx, gy)
           $current_col = picked
           $current_tool = :pen
           sfx(:pickup)
@@ -828,7 +788,7 @@ def draw
     rect(30, 20, 420, 230, 7)
     print_text("--- BANK DATA PREVIEW (Click anywhere to close) ---", 40, 28, 10)
     print_text("@BANK #{$current_bank}", 40, 44, 7)
-    b64 = bank_to_b64_png($bank_pixels) || ""
+    b64 = bank_to_b64_png(get_bank_pixels($current_bank)) || ""
     16.times do |i|
       chunk = b64[i * 64, 64]
       break if chunk.nil? || chunk.empty?

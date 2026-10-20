@@ -408,6 +408,14 @@ pub const BANK_HEIGHT: usize = 256;
 pub const BANK_PIXELS: usize = BANK_WIDTH * BANK_HEIGHT;
 pub const BANK_RGBA_BYTES: usize = BANK_PIXELS * 4;
 
+pub fn rgba_to_palette_opt(rgba: &[u8]) -> Option<u8> {
+    if rgba.len() < 4 || rgba[3] < 128 {
+        None
+    } else {
+        Some(nearest_palette_index(rgba[0], rgba[1], rgba[2]) as u8)
+    }
+}
+
 #[derive(Clone)]
 pub struct BankData {
     pub id: i32,
@@ -415,6 +423,8 @@ pub struct BankData {
     pub height: u16,
     /// RGBA ピクセルデータ (256 * 256 * 4 bytes)
     pub rgba: Vec<u8>,
+    /// パレットインデックスデータ (256 * 256 elements, 0..15 or None)
+    pub indexed: Vec<Option<u8>>,
     pub texture: RefCell<Option<Texture2D>>,
     pub dirty: std::cell::Cell<bool>,
     /// パレット置換・透過設定ごとの変換済みテクスチャキャッシュ
@@ -434,6 +444,7 @@ impl BankData {
             width: BANK_WIDTH as u16,
             height: BANK_HEIGHT as u16,
             rgba: vec![0u8; BANK_RGBA_BYTES],
+            indexed: vec![None; BANK_PIXELS],
             texture: RefCell::new(None),
             dirty: std::cell::Cell::new(false),
             pal_cache: RefCell::new(HashMap::new()),
@@ -451,6 +462,13 @@ impl BankData {
             let dst_end = dst_start + copy_w * 4;
             if src_end <= img.bytes.len() && dst_end <= bank.rgba.len() {
                 bank.rgba[dst_start..dst_end].copy_from_slice(&img.bytes[src_start..src_end]);
+            }
+            for x in 0..copy_w {
+                let p_off = (y * img.width as usize + x) * 4;
+                if p_off + 4 <= img.bytes.len() {
+                    let col = rgba_to_palette_opt(&img.bytes[p_off..p_off + 4]);
+                    bank.indexed[y * BANK_WIDTH + x] = col;
+                }
             }
         }
         bank
@@ -496,6 +514,30 @@ impl BankData {
             if src_end <= src_rgba.len() && dst_end <= self.rgba.len() {
                 self.rgba[dst_start..dst_end].copy_from_slice(&src_rgba[src_start..src_end]);
             }
+            for x in 0..16 {
+                let p_off = src_start + x * 4;
+                if p_off + 4 <= src_rgba.len() {
+                    let col = rgba_to_palette_opt(&src_rgba[p_off..p_off + 4]);
+                    self.indexed[(slot_y + y) * BANK_WIDTH + slot_x + x] = col;
+                }
+            }
+        }
+        self.dirty.set(true);
+        self.pal_cache.borrow_mut().clear();
+    }
+
+    pub fn clear_16x16(&mut self, slot_id: usize) {
+        let slot_x = (slot_id % 16) * 16;
+        let slot_y = (slot_id / 16) * 16;
+        if slot_y + 16 > BANK_HEIGHT {
+            return;
+        }
+        for y in 0..16 {
+            for x in 0..16 {
+                let off = ((slot_y + y) * BANK_WIDTH + slot_x + x) * 4;
+                self.rgba[off..off + 4].copy_from_slice(&[0, 0, 0, 0]);
+                self.indexed[(slot_y + y) * BANK_WIDTH + slot_x + x] = None;
+            }
         }
         self.dirty.set(true);
         self.pal_cache.borrow_mut().clear();
@@ -503,6 +545,7 @@ impl BankData {
 
     pub fn update_pixels(&mut self, pixels: &[Option<u8>]) {
         for (i, opt_c) in pixels.iter().take(BANK_PIXELS).enumerate() {
+            self.indexed[i] = *opt_c;
             let off = i * 4;
             if off + 4 <= self.rgba.len() {
                 if let Some(c) = opt_c {
@@ -521,7 +564,9 @@ impl BankData {
         if x >= BANK_WIDTH || y >= BANK_HEIGHT {
             return;
         }
-        let off = (y * BANK_WIDTH + x) * 4;
+        let idx = y * BANK_WIDTH + x;
+        self.indexed[idx] = col;
+        let off = idx * 4;
         if off + 4 <= self.rgba.len() {
             if let Some(c) = col {
                 let idx = (c as usize).min(15);
@@ -547,9 +592,12 @@ impl BankData {
                 }
                 let src_idx = row * w + col;
                 if src_idx < pixels.len() {
-                    let dst_off = (gy * BANK_WIDTH + gx) * 4;
+                    let opt_c = pixels[src_idx];
+                    let idx = gy * BANK_WIDTH + gx;
+                    self.indexed[idx] = opt_c;
+                    let dst_off = idx * 4;
                     if dst_off + 4 <= self.rgba.len() {
-                        if let Some(c) = pixels[src_idx] {
+                        if let Some(c) = opt_c {
                             let idx = (c as usize).min(15);
                             self.rgba[dst_off..dst_off + 4].copy_from_slice(&PALETTE_RGBA[idx]);
                         } else {
@@ -561,6 +609,36 @@ impl BankData {
         }
         self.dirty.set(true);
         self.pal_cache.borrow_mut().clear();
+    }
+
+    pub fn get_pixel(&self, x: usize, y: usize) -> Option<u8> {
+        if x < BANK_WIDTH && y < BANK_HEIGHT {
+            self.indexed[y * BANK_WIDTH + x]
+        } else {
+            None
+        }
+    }
+
+    pub fn get_rect(&self, x: usize, y: usize, w: usize, h: usize) -> Vec<Option<u8>> {
+        let mut result = vec![None; w * h];
+        for row in 0..h {
+            let gy = y + row;
+            if gy >= BANK_HEIGHT {
+                break;
+            }
+            if x < BANK_WIDTH {
+                let copy_len = w.min(BANK_WIDTH - x);
+                let src_start = gy * BANK_WIDTH + x;
+                let dst_start = row * w;
+                result[dst_start..dst_start + copy_len]
+                    .copy_from_slice(&self.indexed[src_start..src_start + copy_len]);
+            }
+        }
+        result
+    }
+
+    pub fn get_pixels(&self) -> Vec<Option<u8>> {
+        self.indexed.clone()
     }
 
     pub fn ensure_texture(&self) {
@@ -3530,6 +3608,76 @@ fn register_engine_api(
                 Ok(Rc::new(RObject::boolean(false)))
             }),
         );
+        let banks_for_headless_get_rect = banks.clone();
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            "get_bank_rect",
+            Box::new(move |_vm, args| {
+                let bank_id = arg_i32(args, 0, 0);
+                let x = arg_i32(args, 1, 0).max(0) as usize;
+                let y = arg_i32(args, 2, 0).max(0) as usize;
+                let w = arg_i32(args, 3, 32).max(1) as usize;
+                let h = arg_i32(args, 4, 32).max(1) as usize;
+                let banks_ref = banks_for_headless_get_rect.borrow();
+                let rect_pixels = if let Some(bank) = banks_ref.get(&bank_id) {
+                    bank.get_rect(x, y, w, h)
+                } else {
+                    vec![None; w * h]
+                };
+                let ary: Vec<Rc<RObject>> = rect_pixels
+                    .into_iter()
+                    .map(|opt| match opt {
+                        Some(c) => Rc::new(RObject::integer(c as i64)),
+                        None => Rc::new(RObject::nil()),
+                    })
+                    .collect();
+                Ok(Rc::new(RObject::array(ary)))
+            }),
+        );
+        let banks_for_headless_get_pixel = banks.clone();
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            "get_bank_pixel",
+            Box::new(move |_vm, args| {
+                let bank_id = arg_i32(args, 0, 0);
+                let x = arg_i32(args, 1, 0);
+                let y = arg_i32(args, 2, 0);
+                if x >= 0 && x < BANK_WIDTH as i32 && y >= 0 && y < BANK_HEIGHT as i32 {
+                    let banks_ref = banks_for_headless_get_pixel.borrow();
+                    if let Some(bank) = banks_ref.get(&bank_id) {
+                        if let Some(col) = bank.get_pixel(x as usize, y as usize) {
+                            return Ok(Rc::new(RObject::integer(col as i64)));
+                        }
+                    }
+                }
+                Ok(Rc::new(RObject::nil()))
+            }),
+        );
+        let banks_for_headless_get_pixels = banks.clone();
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            "get_bank_pixels",
+            Box::new(move |_vm, args| {
+                let bank_id = arg_i32(args, 0, 0);
+                let banks_ref = banks_for_headless_get_pixels.borrow();
+                let pixels = if let Some(bank) = banks_ref.get(&bank_id) {
+                    bank.get_pixels()
+                } else {
+                    vec![None; BANK_PIXELS]
+                };
+                let ary: Vec<Rc<RObject>> = pixels
+                    .into_iter()
+                    .map(|opt| match opt {
+                        Some(c) => Rc::new(RObject::integer(c as i64)),
+                        None => Rc::new(RObject::nil()),
+                    })
+                    .collect();
+                Ok(Rc::new(RObject::array(ary)))
+            }),
+        );
         let banks_for_headless_spr = banks.clone();
         let act_spr_for_headless = active_spr_bank.clone();
         let sprites_for_headless = sprites.clone();
@@ -4144,6 +4292,82 @@ fn register_engine_api(
                 return Ok(Rc::new(RObject::boolean(true)));
             }
             Ok(Rc::new(RObject::boolean(false)))
+        }),
+    );
+
+    // get_bank_rect(bank_id, x, y, w, h): 矩形領域のピクセル配列を取得 ([Option<u8>])
+    let banks_for_get_rect = banks.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "get_bank_rect",
+        Box::new(move |_vm, args| {
+            let bank_id = arg_i32(args, 0, 0);
+            let x = arg_i32(args, 1, 0).max(0) as usize;
+            let y = arg_i32(args, 2, 0).max(0) as usize;
+            let w = arg_i32(args, 3, 32).max(1) as usize;
+            let h = arg_i32(args, 4, 32).max(1) as usize;
+            let banks_ref = banks_for_get_rect.borrow();
+            let rect_pixels = if let Some(bank) = banks_ref.get(&bank_id) {
+                bank.get_rect(x, y, w, h)
+            } else {
+                vec![None; w * h]
+            };
+            let ary: Vec<Rc<RObject>> = rect_pixels
+                .into_iter()
+                .map(|opt| match opt {
+                    Some(c) => Rc::new(RObject::integer(c as i64)),
+                    None => Rc::new(RObject::nil()),
+                })
+                .collect();
+            Ok(Rc::new(RObject::array(ary)))
+        }),
+    );
+
+    // get_bank_pixel(bank_id, x, y): 1ピクセルのカラー番号 (0..15 または nil) を取得
+    let banks_for_get_pixel = banks.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "get_bank_pixel",
+        Box::new(move |_vm, args| {
+            let bank_id = arg_i32(args, 0, 0);
+            let x = arg_i32(args, 1, 0);
+            let y = arg_i32(args, 2, 0);
+            if x >= 0 && x < BANK_WIDTH as i32 && y >= 0 && y < BANK_HEIGHT as i32 {
+                let banks_ref = banks_for_get_pixel.borrow();
+                if let Some(bank) = banks_ref.get(&bank_id) {
+                    if let Some(col) = bank.get_pixel(x as usize, y as usize) {
+                        return Ok(Rc::new(RObject::integer(col as i64)));
+                    }
+                }
+            }
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
+
+    // get_bank_pixels(bank_id): 256x256 の全ピクセル配列 (65536要素) を取得
+    let banks_for_get_pixels = banks.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "get_bank_pixels",
+        Box::new(move |_vm, args| {
+            let bank_id = arg_i32(args, 0, 0);
+            let banks_ref = banks_for_get_pixels.borrow();
+            let pixels = if let Some(bank) = banks_ref.get(&bank_id) {
+                bank.get_pixels()
+            } else {
+                vec![None; BANK_PIXELS]
+            };
+            let ary: Vec<Rc<RObject>> = pixels
+                .into_iter()
+                .map(|opt| match opt {
+                    Some(c) => Rc::new(RObject::integer(c as i64)),
+                    None => Rc::new(RObject::nil()),
+                })
+                .collect();
+            Ok(Rc::new(RObject::array(ary)))
         }),
     );
 
@@ -7188,6 +7412,55 @@ __END__
             assert_eq!(&bank.rgba[0..4], &PALETTE_RGBA[7]);
         } else {
             panic!("Expected $b64 to be a String");
+        }
+    }
+
+    #[test]
+    fn test_bank_get_set_pixel_and_rect_apis_in_ruby() {
+        let src = r#"
+# 1. 1ピクセル設定
+set_bank_pixel(0, 10, 20, 8)
+$p1 = get_bank_pixel(0, 10, 20)
+$p2 = get_bank_pixel(0, 11, 20)
+
+# 2. 矩形領域更新 & 取得
+rect_in = [1, 2, 3, 4]
+update_bank_rect(0, 5, 5, 2, 2, rect_in)
+$rect_out = get_bank_rect(0, 5, 5, 2, 2)
+
+# 3. 全体取得
+$all_pixels = get_bank_pixels(0)
+__END__
+"#;
+        let (tail_data, mrb_bytes) = cli::compile_ruby_script_str(src).unwrap();
+        let runtime = GameRuntime::new(&tail_data, &mrb_bytes, true).unwrap();
+        let vm = &runtime.vm;
+
+        // p1 == 8, p2 == nil
+        let p1 = vm.globals.get("$p1").unwrap();
+        assert!(matches!(p1.value, RValue::Integer(8)));
+        let p2 = vm.globals.get("$p2").unwrap();
+        assert!(matches!(p2.value, RValue::Nil));
+
+        // rect_out == [1, 2, 3, 4]
+        let r_val = vm.globals.get("$rect_out").unwrap();
+        if let RValue::Array(ref ary) = r_val.value {
+            let ary_b = ary.borrow();
+            assert_eq!(ary_b.len(), 4);
+            assert!(matches!(ary_b[0].value, RValue::Integer(1)));
+            assert!(matches!(ary_b[1].value, RValue::Integer(2)));
+            assert!(matches!(ary_b[2].value, RValue::Integer(3)));
+            assert!(matches!(ary_b[3].value, RValue::Integer(4)));
+        } else {
+            panic!("Expected $rect_out to be Array");
+        }
+
+        // all_pixels.len == 65536
+        let all_val = vm.globals.get("$all_pixels").unwrap();
+        if let RValue::Array(ref ary) = all_val.value {
+            assert_eq!(ary.borrow().len(), 256 * 256);
+        } else {
+            panic!("Expected $all_pixels to be Array");
         }
     }
 }
