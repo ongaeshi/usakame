@@ -6,6 +6,7 @@ pub mod sound;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use macroquad::prelude::*;
@@ -178,75 +179,7 @@ pub fn nearest_palette_index(r: u8, g: u8, b: u8) -> usize {
 // ==========================================
 // Base64 エンコード / デコード
 // ==========================================
-const B64_CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-pub fn encode_base64(input: &[u8]) -> String {
-    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
-    for chunk in input.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-
-        out.push(B64_CHARS[((triple >> 18) & 0x3F) as usize] as char);
-        out.push(B64_CHARS[((triple >> 12) & 0x3F) as usize] as char);
-        if chunk.len() > 1 {
-            out.push(B64_CHARS[((triple >> 6) & 0x3F) as usize] as char);
-        } else {
-            out.push('=');
-        }
-        if chunk.len() > 2 {
-            out.push(B64_CHARS[(triple & 0x3F) as usize] as char);
-        } else {
-            out.push('=');
-        }
-    }
-    out
-}
-
-pub fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
-    let mut clean = Vec::with_capacity(input.len());
-    for line in input.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('#') {
-            continue;
-        }
-        for b in trimmed.bytes() {
-            if !b.is_ascii_whitespace() {
-                clean.push(b);
-            }
-        }
-    }
-    if clean.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut out = Vec::with_capacity(clean.len() * 3 / 4);
-    let mut buf = 0u32;
-    let mut bits = 0u8;
-
-    for &b in &clean {
-        if b == b'=' {
-            break;
-        }
-        let val = match b {
-            b'A'..=b'Z' => b - b'A',
-            b'a'..=b'z' => b - b'a' + 26,
-            b'0'..=b'9' => b - b'0' + 52,
-            b'+' | b'-' => 62,
-            b'/' | b'_' => 63,
-            _ => return Err(format!("Invalid Base64 character: `{}`", b as char)),
-        };
-        buf = (buf << 6) | (val as u32);
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push(((buf >> bits) & 0xFF) as u8);
-        }
-    }
-
-    Ok(out)
-}
+pub use bundle::{decode_base64, encode_base64};
 
 // ==========================================
 // リソース管理 & 描画処理
@@ -467,6 +400,208 @@ impl SpriteData {
     }
 }
 
+// ==========================================
+// スプライトバンク管理 (256x256 シート)
+// ==========================================
+pub const BANK_WIDTH: usize = 256;
+pub const BANK_HEIGHT: usize = 256;
+pub const BANK_PIXELS: usize = BANK_WIDTH * BANK_HEIGHT;
+pub const BANK_RGBA_BYTES: usize = BANK_PIXELS * 4;
+
+#[derive(Clone)]
+pub struct BankData {
+    pub id: i32,
+    pub width: u16,
+    pub height: u16,
+    /// RGBA ピクセルデータ (256 * 256 * 4 bytes)
+    pub rgba: Vec<u8>,
+    pub texture: Option<Texture2D>,
+    /// パレット置換・透過設定ごとの変換済みテクスチャキャッシュ
+    pub pal_cache: RefCell<HashMap<([u8; 16], u16), Texture2D>>,
+}
+
+impl Default for BankData {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
+impl BankData {
+    pub fn new(id: i32) -> Self {
+        Self {
+            id,
+            width: BANK_WIDTH as u16,
+            height: BANK_HEIGHT as u16,
+            rgba: vec![0u8; BANK_RGBA_BYTES],
+            texture: None,
+            pal_cache: RefCell::new(HashMap::new()),
+        }
+    }
+
+    pub fn from_image(id: i32, img: &Image) -> Self {
+        let mut bank = Self::new(id);
+        let copy_w = (img.width as usize).min(BANK_WIDTH);
+        let copy_h = (img.height as usize).min(BANK_HEIGHT);
+        for y in 0..copy_h {
+            let src_start = (y * img.width as usize) * 4;
+            let src_end = src_start + copy_w * 4;
+            let dst_start = (y * BANK_WIDTH) * 4;
+            let dst_end = dst_start + copy_w * 4;
+            if src_end <= img.bytes.len() && dst_end <= bank.rgba.len() {
+                bank.rgba[dst_start..dst_end].copy_from_slice(&img.bytes[src_start..src_end]);
+            }
+        }
+        bank
+    }
+
+    pub fn from_png_bytes(id: i32, bytes: &[u8]) -> Result<Self, String> {
+        let img = Image::from_file_with_format(bytes, Some(ImageFormat::Png))
+            .map_err(|e| format!("Failed to decode PNG for bank {}: {:?}", id, e))?;
+        Ok(Self::from_image(id, &img))
+    }
+
+    pub fn from_base64_png(id: i32, b64_text: &str) -> Result<Self, String> {
+        let bytes = decode_base64(b64_text)?;
+        Self::from_png_bytes(id, &bytes)
+    }
+
+    pub fn from_file_or_base64(id: i32, text_or_path: &str, base_dir: Option<&Path>) -> Result<Self, String> {
+        let trimmed = text_or_path.trim();
+        let path_candidate = if let Some(dir) = base_dir {
+            dir.join(trimmed)
+        } else {
+            PathBuf::from(trimmed)
+        };
+        if path_candidate.is_file() {
+            let bytes = std::fs::read(&path_candidate)
+                .map_err(|e| format!("Failed to read PNG file {}: {}", path_candidate.display(), e))?;
+            return Self::from_png_bytes(id, &bytes);
+        }
+        Self::from_base64_png(id, trimmed)
+    }
+
+    pub fn write_16x16(&mut self, slot_id: usize, src_rgba: &[u8]) {
+        let slot_x = (slot_id % 16) * 16;
+        let slot_y = (slot_id / 16) * 16;
+        if slot_y + 16 > BANK_HEIGHT {
+            return;
+        }
+        for y in 0..16 {
+            let src_start = y * 16 * 4;
+            let src_end = src_start + 16 * 4;
+            let dst_start = ((slot_y + y) * BANK_WIDTH + slot_x) * 4;
+            let dst_end = dst_start + 16 * 4;
+            if src_end <= src_rgba.len() && dst_end <= self.rgba.len() {
+                self.rgba[dst_start..dst_end].copy_from_slice(&src_rgba[src_start..src_end]);
+            }
+        }
+        self.texture = None;
+        self.pal_cache.borrow_mut().clear();
+    }
+
+    pub fn update_pixels(&mut self, pixels: &[Option<u8>]) {
+        for (i, opt_c) in pixels.iter().take(BANK_PIXELS).enumerate() {
+            let off = i * 4;
+            if off + 4 <= self.rgba.len() {
+                if let Some(c) = opt_c {
+                    let idx = (*c as usize).min(15);
+                    self.rgba[off..off + 4].copy_from_slice(&PALETTE_RGBA[idx]);
+                } else {
+                    self.rgba[off..off + 4].copy_from_slice(&[0, 0, 0, 0]);
+                }
+            }
+        }
+        self.texture = None;
+        self.pal_cache.borrow_mut().clear();
+    }
+
+    pub fn build_texture(&mut self) {
+        let image = Image {
+            bytes: self.rgba.clone(),
+            width: self.width,
+            height: self.height,
+        };
+        let texture = Texture2D::from_image(&image);
+        texture.set_filter(FilterMode::Nearest);
+        self.texture = Some(texture);
+        self.pal_cache.borrow_mut().clear();
+    }
+
+    pub fn apply_palette(&self, pal_map: &[u8; 16], palt_mask: u16) -> Vec<u8> {
+        if *pal_map == DEFAULT_PAL_MAP && palt_mask == 0 {
+            return self.rgba.clone();
+        }
+        let mut out = self.rgba.clone();
+        for px in out.chunks_exact_mut(4) {
+            if px[3] == 0 {
+                continue;
+            }
+            let src_idx = nearest_palette_index(px[0], px[1], px[2]);
+            if (palt_mask & (1 << src_idx)) != 0 {
+                px[0] = 0;
+                px[1] = 0;
+                px[2] = 0;
+                px[3] = 0;
+            } else {
+                let dst_idx = (pal_map[src_idx] & 0x0F) as usize;
+                if dst_idx != src_idx {
+                    let dst_rgba = PALETTE_RGBA[dst_idx];
+                    px[0] = dst_rgba[0];
+                    px[1] = dst_rgba[1];
+                    px[2] = dst_rgba[2];
+                }
+            }
+        }
+        out
+    }
+
+    pub fn get_or_build_pal_texture(&self, pal_map: &[u8; 16], palt_mask: u16) -> Option<Texture2D> {
+        if *pal_map == DEFAULT_PAL_MAP && palt_mask == 0 {
+            return self.texture.clone();
+        }
+        let key = (*pal_map, palt_mask);
+        if let Some(tex) = self.pal_cache.borrow().get(&key) {
+            return Some(tex.clone());
+        }
+        let transformed_rgba = self.apply_palette(pal_map, palt_mask);
+        let image = Image {
+            bytes: transformed_rgba,
+            width: self.width,
+            height: self.height,
+        };
+        let texture = Texture2D::from_image(&image);
+        texture.set_filter(FilterMode::Nearest);
+        let mut cache = self.pal_cache.borrow_mut();
+        if cache.len() >= 32 {
+            cache.clear();
+        }
+        cache.insert(key, texture.clone());
+        Some(texture)
+    }
+
+    pub fn to_png_bytes(&self) -> Result<Vec<u8>, String> {
+        let mut out = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut out, self.width as u32, self.height as u32);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.set_compression(png::Compression::Fast);
+            let mut writer = encoder
+                .write_header()
+                .map_err(|e| format!("PNG write_header error: {:?}", e))?;
+            writer
+                .write_image_data(&self.rgba)
+                .map_err(|e| format!("PNG write_image_data error: {:?}", e))?;
+        }
+        Ok(out)
+    }
+
+    pub fn to_base64_png(&self) -> Result<String, String> {
+        let bytes = self.to_png_bytes()?;
+        Ok(encode_base64(&bytes))
+    }
+}
+
 /// PNG スプライトシート (Base64) を指定タイルサイズ (デフォルト 16x16) で分割して `sprites` に登録する
 pub fn decode_png_sheet_into_sprites(
     b64_text: &str,
@@ -517,6 +652,7 @@ enum ResourceBlockKind {
         tile_w: u16,
         tile_h: u16,
     },
+    Bank(i32),
 }
 
 fn parse_tile_dims(s: &str) -> Option<(u16, u16)> {
@@ -531,6 +667,8 @@ fn flush_resource_block(
     kind: Option<ResourceBlockKind>,
     lines: &mut Vec<String>,
     sprites: &mut HashMap<i32, SpriteData>,
+    banks: &mut HashMap<i32, BankData>,
+    base_dir: Option<&Path>,
 ) {
     let Some(block_kind) = kind else {
         lines.clear();
@@ -543,12 +681,21 @@ fn flush_resource_block(
     match block_kind {
         ResourceBlockKind::TextSprite(id) => {
             let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
-            sprites.insert(id, SpriteData::from_lines(&refs));
+            let sp = SpriteData::from_lines(&refs);
+            if (0..=255).contains(&id) {
+                let bank0 = banks.entry(0).or_insert_with(|| BankData::new(0));
+                bank0.write_16x16(id as usize, &sp.rgba);
+            }
+            sprites.insert(id, sp);
         }
         ResourceBlockKind::Base64Sprite(id) => {
             let joined = lines.join("");
             match SpriteData::from_base64(&joined) {
                 Ok(sp) => {
+                    if (0..=255).contains(&id) {
+                        let bank0 = banks.entry(0).or_insert_with(|| BankData::new(0));
+                        bank0.write_16x16(id as usize, &sp.rgba);
+                    }
                     sprites.insert(id, sp);
                 }
                 Err(e) => {
@@ -569,15 +716,39 @@ fn flush_resource_block(
                     "Warning: Failed to decode @SHEET starting at {}: {}",
                     start_id, e
                 );
+            } else {
+                let bank0 = banks.entry(0).or_insert_with(|| BankData::new(0));
+                for (id, sp) in sprites.iter() {
+                    if (0..=255).contains(id) && *id >= start_id {
+                        bank0.write_16x16(*id as usize, &sp.rgba);
+                    }
+                }
+            }
+        }
+        ResourceBlockKind::Bank(id) => {
+            let joined = lines.join("\n");
+            match BankData::from_file_or_base64(id, &joined, base_dir) {
+                Ok(bank) => {
+                    banks.insert(id, bank);
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to load @BANK {}: {}", id, e);
+                }
             }
         }
     }
     lines.clear();
 }
 
-/// `__END__` 以降のスプライト定義 (`@SPRITE`, `@PNG`, `@B64`, `@SHEET`) をパースする
-pub fn parse_tail_resources(data_section: &str) -> HashMap<i32, SpriteData> {
+/// `__END__` 以降のスプライトおよびバンク定義をパースする
+pub fn parse_tail_resources_full(
+    data_section: &str,
+    base_dir: Option<&Path>,
+) -> (HashMap<i32, SpriteData>, HashMap<i32, BankData>) {
     let mut sprites = HashMap::new();
+    let mut banks = HashMap::new();
+    banks.insert(0, BankData::new(0));
+
     let mut current_kind: Option<ResourceBlockKind> = None;
     let mut current_lines: Vec<String> = Vec::new();
     let mut emoji_atlas: Option<emoji::EmojiAtlas> = None;
@@ -588,12 +759,32 @@ pub fn parse_tail_resources(data_section: &str) -> HashMap<i32, SpriteData> {
             continue;
         }
 
-        if let Some(rest) = line
+        if let Some(rest) = line.strip_prefix("@BANK") {
+            flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites, &mut banks, base_dir);
+            let mut parts = rest.split_whitespace();
+            if let Some(id_str) = parts.next()
+                && let Ok(id) = id_str.parse::<i32>()
+            {
+                let inline_content: String = parts.collect::<Vec<_>>().join(" ");
+                if !inline_content.is_empty() {
+                    match BankData::from_file_or_base64(id, &inline_content, base_dir) {
+                        Ok(bank) => {
+                            banks.insert(id, bank);
+                        }
+                        Err(e) => {
+                            eprintln!("Warning: Failed to load inline @BANK {}: {}", id, e);
+                        }
+                    }
+                } else {
+                    current_kind = Some(ResourceBlockKind::Bank(id));
+                }
+            }
+        } else if let Some(rest) = line
             .strip_prefix("@SPRITE_B64")
             .or_else(|| line.strip_prefix("@PNG"))
             .or_else(|| line.strip_prefix("@B64"))
         {
-            flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites);
+            flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites, &mut banks, base_dir);
             let mut parts = rest.split_whitespace();
             if let Some(id_str) = parts.next()
                 && let Ok(id) = id_str.parse::<i32>()
@@ -601,6 +792,10 @@ pub fn parse_tail_resources(data_section: &str) -> HashMap<i32, SpriteData> {
                 let inline_b64: String = parts.collect::<Vec<_>>().join("");
                 if !inline_b64.is_empty() {
                     if let Ok(sp) = SpriteData::from_base64(&inline_b64) {
+                        if (0..=255).contains(&id) {
+                            let bank0 = banks.entry(0).or_insert_with(|| BankData::new(0));
+                            bank0.write_16x16(id as usize, &sp.rgba);
+                        }
                         sprites.insert(id, sp);
                     }
                 } else {
@@ -608,7 +803,7 @@ pub fn parse_tail_resources(data_section: &str) -> HashMap<i32, SpriteData> {
                 }
             }
         } else if let Some(rest) = line.strip_prefix("@SHEET") {
-            flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites);
+            flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites, &mut banks, base_dir);
             let mut parts = rest.split_whitespace();
             if let Some(id_str) = parts.next()
                 && let Ok(start_id) = id_str.parse::<i32>()
@@ -624,7 +819,7 @@ pub fn parse_tail_resources(data_section: &str) -> HashMap<i32, SpriteData> {
                 });
             }
         } else if let Some(rest) = line.strip_prefix("@SPRITE") {
-            flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites);
+            flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites, &mut banks, base_dir);
             let mut parts = rest.split_whitespace();
             if let Some(id_str) = parts.next()
                 && let Ok(id) = id_str.parse::<i32>()
@@ -636,6 +831,10 @@ pub fn parse_tail_resources(data_section: &str) -> HashMap<i32, SpriteData> {
                     } else {
                         let atlas = emoji_atlas.get_or_insert_with(emoji::EmojiAtlas::new);
                         if let Some(sp) = atlas.extract_sprite(emoji_token) {
+                            if (0..=255).contains(&id) {
+                                let bank0 = banks.entry(0).or_insert_with(|| BankData::new(0));
+                                bank0.write_16x16(id as usize, &sp.rgba);
+                            }
                             sprites.insert(id, sp);
                         } else {
                             current_kind = Some(ResourceBlockKind::TextSprite(id));
@@ -646,14 +845,19 @@ pub fn parse_tail_resources(data_section: &str) -> HashMap<i32, SpriteData> {
                 }
             }
         } else if line.starts_with('@') {
-            flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites);
+            flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites, &mut banks, base_dir);
         } else if current_kind.is_some() {
             current_lines.push(line.to_string());
         }
     }
 
-    flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites);
-    sprites
+    flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites, &mut banks, base_dir);
+    (sprites, banks)
+}
+
+/// `__END__` 以降のスプライト定義をパースする（後方互換ラッパー）
+pub fn parse_tail_resources(data_section: &str) -> HashMap<i32, SpriteData> {
+    parse_tail_resources_full(data_section, None).0
 }
 
 /// タイルマップ管理構造体（1セル = 16x16 スプライト番号、`0` は空タイル）
@@ -1597,6 +1801,43 @@ fn draw_sprite_transformed(
     }
 }
 
+fn draw_bank_rect(
+    bank: &BankData,
+    state: &DrawState,
+    x: f32,
+    y: f32,
+    u: f32,
+    v: f32,
+    w: f32,
+    h: f32,
+    flip_x: bool,
+    flip_y: bool,
+    rotate_deg: f32,
+    scale: f32,
+) {
+    let Some((draw_x, draw_y, mut params)) = compute_sprite_draw_params(
+        w,
+        h,
+        x,
+        y,
+        flip_x,
+        flip_y,
+        rotate_deg,
+        scale,
+    ) else {
+        return;
+    };
+    params.source = Some(Rect { x: u, y: v, w, h });
+
+    if state.is_default_palette() {
+        if let Some(ref texture) = bank.texture {
+            draw_texture_ex(texture, draw_x, draw_y, WHITE, params);
+        }
+    } else if let Some(texture) = bank.get_or_build_pal_texture(&state.pal_map, state.palt_mask) {
+        draw_texture_ex(&texture, draw_x, draw_y, WHITE, params);
+    }
+}
+
 /// メモリ上のピクセル配列（0..15 の整数または nil、16x16 スプライト）をダイレクト描画
 fn draw_pixel_data_direct(
     data: &[Rc<RObject>],
@@ -2272,6 +2513,9 @@ fn register_sound_api(vm: &mut VM, sound_bank: Rc<RefCell<sound::SoundBank>>) {
 fn register_engine_api(
     vm: &mut VM,
     sprites: Rc<RefCell<HashMap<i32, SpriteData>>>,
+    banks: Rc<RefCell<HashMap<i32, BankData>>>,
+    active_spr_bank: Rc<RefCell<i32>>,
+    active_map_bank: Rc<RefCell<i32>>,
     tilemap: Rc<RefCell<Tilemap>>,
     emoji_atlas: Rc<RefCell<emoji::EmojiAtlas>>,
     bitmap_font: Rc<BitmapFont>,
@@ -2280,6 +2524,32 @@ fn register_engine_api(
     headless: bool,
 ) {
     let obj_class = vm.object_class.clone();
+
+    // spr_bank(id = 0): spr の参照先バンクを設定
+    let active_spr_bank_for_spr_bank = active_spr_bank.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "spr_bank",
+        Box::new(move |_vm, args| {
+            let id = arg_i32(args, 0, 0);
+            *active_spr_bank_for_spr_bank.borrow_mut() = id;
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
+
+    // map_bank(id = 0): map の参照先バンクを設定
+    let active_map_bank_for_map_bank = active_map_bank.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "map_bank",
+        Box::new(move |_vm, args| {
+            let id = arg_i32(args, 0, 0);
+            *active_map_bank_for_map_bank.borrow_mut() = id;
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
 
     // config(opts): 画面解像度・倍率・フォント等の設定
     let cfg_for_config = config.clone();
@@ -2590,7 +2860,8 @@ fn register_engine_api(
                 String::new()
             };
 
-            let sprites = parse_tail_resources(&tail);
+            let (sprites, banks) = parse_tail_resources_full(&tail, p.parent());
+            let bank0_opt = banks.get(&0);
             let mut slot_list = Vec::with_capacity(num_slots);
 
             for sid in 0..num_slots {
@@ -2622,12 +2893,128 @@ fn register_engine_api(
                         }
                     }
                     slot_list.push(Rc::new(RObject::array(pixels)));
+                } else if let Some(bank) = bank0_opt {
+                    let mut pixels = Vec::with_capacity(256);
+                    let slot_x = (sid % 16) * 16;
+                    let slot_y = (sid / 16) * 16;
+                    let mut has_pixel = false;
+                    for y in 0..16 {
+                        for x in 0..16 {
+                            let off = ((slot_y + y) * BANK_WIDTH + slot_x + x) * 4;
+                            if off + 4 <= bank.rgba.len() {
+                                let a = bank.rgba[off + 3];
+                                if a == 0 {
+                                    pixels.push(Rc::new(RObject::nil()));
+                                } else {
+                                    has_pixel = true;
+                                    let c = nearest_palette_index(bank.rgba[off], bank.rgba[off + 1], bank.rgba[off + 2]) as i64;
+                                    pixels.push(Rc::new(RObject::integer(c)));
+                                }
+                            } else {
+                                pixels.push(Rc::new(RObject::nil()));
+                            }
+                        }
+                    }
+                    if has_pixel || sid == 0 {
+                        slot_list.push(Rc::new(RObject::array(pixels)));
+                    } else {
+                        slot_list.push(Rc::new(RObject::nil()));
+                    }
                 } else {
                     slot_list.push(Rc::new(RObject::nil()));
                 }
             }
 
             Ok(Rc::new(RObject::array(slot_list)))
+        }),
+    );
+
+    // load_resource_bank(path, bank_id = 0): バンク（256x256）全体のドット配列 (65536要素) を返す
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "load_resource_bank",
+        Box::new(|_vm, args| {
+            let path_str = args
+                .first()
+                .and_then(|v| String::try_from(v.as_ref()).ok())
+                .unwrap_or_default();
+            let bank_id = arg_i32(args, 1, 0);
+
+            let p = std::path::Path::new(&path_str);
+            let base_dir = p.parent();
+
+            if p.extension().and_then(|s| s.to_str()).map(|s| s.eq_ignore_ascii_case("png")) == Some(true)
+                && p.is_file()
+            {
+                if let Ok(bank) = BankData::from_file_or_base64(bank_id, &path_str, None) {
+                    let mut pixels = Vec::with_capacity(BANK_PIXELS);
+                    for px in bank.rgba.chunks_exact(4) {
+                        if px[3] == 0 {
+                            pixels.push(Rc::new(RObject::nil()));
+                        } else {
+                            let c = nearest_palette_index(px[0], px[1], px[2]) as i64;
+                            pixels.push(Rc::new(RObject::integer(c)));
+                        }
+                    }
+                    return Ok(Rc::new(RObject::array(pixels)));
+                }
+            }
+
+            let tail = if p.extension().and_then(|s| s.to_str()) == Some("rb") {
+                cli::compile_ruby_script_file(p)
+                    .map(|(_, t, _)| t)
+                    .unwrap_or_default()
+            } else if p.is_file() {
+                std::fs::read_to_string(p).unwrap_or_default()
+            } else {
+                String::new()
+            };
+
+            let (_sprites, banks) = parse_tail_resources_full(&tail, base_dir);
+            if let Some(bank) = banks.get(&bank_id) {
+                let mut pixels = Vec::with_capacity(BANK_PIXELS);
+                for px in bank.rgba.chunks_exact(4) {
+                    if px[3] == 0 {
+                        pixels.push(Rc::new(RObject::nil()));
+                    } else {
+                        let c = nearest_palette_index(px[0], px[1], px[2]) as i64;
+                        pixels.push(Rc::new(RObject::integer(c)));
+                    }
+                }
+                Ok(Rc::new(RObject::array(pixels)))
+            } else {
+                Ok(Rc::new(RObject::nil()))
+            }
+        }),
+    );
+
+    // bank_to_b64_png(pixels): 65536要素のカラーインデックス配列から Base64 PNG を生成
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "bank_to_b64_png",
+        Box::new(|_vm, args| {
+            if let Some(first) = args.first()
+                && let RValue::Array(ref ary_cell) = first.value
+            {
+                let ary = ary_cell.borrow();
+                let mut bank = BankData::new(0);
+                for (i, val) in ary.iter().take(BANK_PIXELS).enumerate() {
+                    let col_idx = match &val.value {
+                        RValue::Integer(c) if (0..=15).contains(c) => Some(*c as usize),
+                        _ => None,
+                    };
+                    if let Some(idx) = col_idx {
+                        let off = i * 4;
+                        bank.rgba[off..off + 4].copy_from_slice(&PALETTE_RGBA[idx]);
+                    }
+                }
+                if let Ok(b64) = bank.to_base64_png() {
+                    return Ok(Rc::new(RObject::string(b64)));
+                }
+            }
+            Ok(Rc::new(RObject::nil()))
         }),
     );
 
@@ -2927,6 +3314,72 @@ fn register_engine_api(
                 Ok(Rc::new(RObject::nil()))
             }),
         );
+        let banks_for_headless_blt = banks.clone();
+        let state_for_headless_blt = draw_state.clone();
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            "blt",
+            Box::new(move |_vm, args| {
+                let state = *state_for_headless_blt.borrow();
+                if state.is_clip_empty() {
+                    return Ok(Rc::new(RObject::nil()));
+                }
+                let x = arg_f32(args, 0, 0.0) - state.cam_x as f32;
+                let y = arg_f32(args, 1, 0.0) - state.cam_y as f32;
+                let bank_id = arg_i32(args, 2, 0);
+                let _u = arg_f32(args, 3, 0.0);
+                let _v = arg_f32(args, 4, 0.0);
+                let raw_w = arg_f32(args, 5, 16.0);
+                let raw_h = arg_f32(args, 6, 16.0);
+                let rotate = arg_f32(args, 7, 0.0);
+                let scale = arg_f32(args, 8, 1.0);
+                if raw_w == 0.0 || raw_h == 0.0 || scale <= 0.0 {
+                    return Ok(Rc::new(RObject::nil()));
+                }
+                let flip_x = raw_w < 0.0;
+                let flip_y = raw_h < 0.0;
+                let w = raw_w.abs();
+                let h = raw_h.abs();
+                if let Some(bank) = banks_for_headless_blt.borrow().get(&bank_id) {
+                    if !state.is_default_palette() {
+                        let _ = bank.apply_palette(&state.pal_map, state.palt_mask);
+                    }
+                    let _ = compute_sprite_draw_params(
+                        w, h, x, y, flip_x, flip_y, rotate, scale,
+                    );
+                }
+                Ok(Rc::new(RObject::nil()))
+            }),
+        );
+        let banks_for_headless_update = banks.clone();
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            "update_bank",
+            Box::new(move |_vm, args| {
+                let bank_id = arg_i32(args, 0, 0);
+                if let Some(second) = args.get(1)
+                    && let RValue::Array(ref ary_cell) = second.value
+                {
+                    let ary = ary_cell.borrow();
+                    let mut pixels = Vec::with_capacity(ary.len());
+                    for val in ary.iter() {
+                        match &val.value {
+                            RValue::Integer(c) if (0..=15).contains(c) => pixels.push(Some(*c as u8)),
+                            _ => pixels.push(None),
+                        }
+                    }
+                    let mut banks_mut = banks_for_headless_update.borrow_mut();
+                    let bank = banks_mut.entry(bank_id).or_insert_with(|| BankData::new(bank_id));
+                    bank.update_pixels(&pixels);
+                    return Ok(Rc::new(RObject::boolean(true)));
+                }
+                Ok(Rc::new(RObject::boolean(false)))
+            }),
+        );
+        let banks_for_headless_spr = banks.clone();
+        let act_spr_for_headless = active_spr_bank.clone();
         let sprites_for_headless = sprites.clone();
         let emoji_for_headless = emoji_atlas.clone();
         let state_for_headless_spr = draw_state.clone();
@@ -2943,10 +3396,28 @@ fn register_engine_api(
                 let default_scale = cfg_for_headless_spr.borrow().sprite_scale;
                 let x = arg_f32(args, 1, 0.0) - state.cam_x as f32;
                 let y = arg_f32(args, 2, 0.0) - state.cam_y as f32;
-                let flip_x = arg_bool(args, 3, false);
-                let flip_y = arg_bool(args, 4, false);
-                let rotate = arg_f32(args, 5, 0.0);
-                let scale = arg_f32(args, 6, default_scale);
+
+                let (tile_w, tile_h, flip_x, flip_y, rotate, scale) = if let Some(arg3) = args.get(3) {
+                    match &arg3.value {
+                        RValue::Bool(b) => {
+                            let fy = arg_bool(args, 4, false);
+                            let rot = arg_f32(args, 5, 0.0);
+                            let sc = arg_f32(args, 6, default_scale);
+                            (1, 1, *b, fy, rot, sc)
+                        }
+                        _ => {
+                            let tw = arg_i32(args, 3, 1).max(1);
+                            let th = arg_i32(args, 4, 1).max(1);
+                            let fx = arg_bool(args, 5, false);
+                            let fy = arg_bool(args, 6, false);
+                            let rot = arg_f32(args, 7, 0.0);
+                            let sc = arg_f32(args, 8, default_scale);
+                            (tw, th, fx, fy, rot, sc)
+                        }
+                    }
+                } else {
+                    (1, 1, false, false, 0.0, default_scale)
+                };
 
                 if let Some(first) = args.first() {
                     if let RValue::Array(_) = first.value {
@@ -2974,7 +3445,23 @@ fn register_engine_api(
                     }
                 }
                 let id = arg_i32(args, 0, 0);
-                if let Some(sp) = sprites_for_headless.borrow().get(&id) {
+                let cur_bank_id = *act_spr_for_headless.borrow();
+                let banks_ref = banks_for_headless_spr.borrow();
+                if let Some(bank) = banks_ref.get(&cur_bank_id) {
+                    if !state.is_default_palette() {
+                        let _ = bank.apply_palette(&state.pal_map, state.palt_mask);
+                    }
+                    let _ = compute_sprite_draw_params(
+                        (tile_w * 16) as f32,
+                        (tile_h * 16) as f32,
+                        x,
+                        y,
+                        flip_x,
+                        flip_y,
+                        rotate,
+                        scale,
+                    );
+                } else if let Some(sp) = sprites_for_headless.borrow().get(&id) {
                     if !state.is_default_palette() {
                         let _ = sp.apply_palette(&state.pal_map, state.palt_mask);
                     }
@@ -2992,6 +3479,8 @@ fn register_engine_api(
                 Ok(Rc::new(RObject::nil()))
             }),
         );
+        let banks_for_headless_map = banks.clone();
+        let act_map_for_headless = active_map_bank.clone();
         let sprites_for_headless_map = sprites.clone();
         let map_for_headless = tilemap.clone();
         let state_for_headless_map = draw_state.clone();
@@ -3016,9 +3505,16 @@ fn register_engine_api(
                 let sy = arg_i32(args, 3, 0);
                 let cel_w = arg_i32(args, 4, tmap.width.max(16));
                 let cel_h = arg_i32(args, 5, tmap.height.max(16));
+                let target_bank_id = if args.len() >= 7 && !args[6].is_nil() {
+                    arg_i32(args, 6, 0)
+                } else {
+                    *act_map_for_headless.borrow()
+                };
                 if cel_w <= 0 || cel_h <= 0 {
                     return Ok(Rc::new(RObject::nil()));
                 }
+                let banks_ref = banks_for_headless_map.borrow();
+                let bank_opt = banks_ref.get(&target_bank_id);
                 let sprites_ref = sprites_for_headless_map.borrow();
                 let step = (SPRITE_SIZE as f32 * sp_scale) as i32;
                 for dy in 0..cel_h {
@@ -3027,18 +3523,32 @@ fn register_engine_api(
                         if tile_id <= 0 {
                             continue;
                         }
-                        if let Some(sp) = sprites_ref.get(&tile_id) {
-                            let draw_x =
-                                (sx + dx * step - state.cam_x) as f32;
-                            let draw_y =
-                                (sy + dy * step - state.cam_y) as f32;
-                            if draw_x + sp.width as f32 * sp_scale <= 0.0
-                                || draw_x >= sw
-                                || draw_y + sp.height as f32 * sp_scale <= 0.0
-                                || draw_y >= sh
-                            {
-                                continue;
+                        let draw_x =
+                            (sx + dx * step - state.cam_x) as f32;
+                        let draw_y =
+                            (sy + dy * step - state.cam_y) as f32;
+                        if draw_x + 16.0 * sp_scale <= 0.0
+                            || draw_x >= sw
+                            || draw_y + 16.0 * sp_scale <= 0.0
+                            || draw_y >= sh
+                        {
+                            continue;
+                        }
+                        if let Some(bank) = bank_opt {
+                            if !state.is_default_palette() {
+                                let _ = bank.apply_palette(&state.pal_map, state.palt_mask);
                             }
+                            let _ = compute_sprite_draw_params(
+                                16.0,
+                                16.0,
+                                draw_x,
+                                draw_y,
+                                false,
+                                false,
+                                0.0,
+                                sp_scale,
+                            );
+                        } else if let Some(sp) = sprites_ref.get(&tile_id) {
                             if !state.is_default_palette() {
                                 let _ = sp.apply_palette(&state.pal_map, state.palt_mask);
                             }
@@ -3349,7 +3859,90 @@ fn register_engine_api(
         }),
     );
 
-    // spr(id_or_emoji, x = 0, y = 0, flip_x = false, flip_y = false, rotate = 0, scale = 1.0): スプライトまたは16x16絵文字描画
+    // blt(x, y, bank, u, v, w, h, rotate = 0, scale = 1.0): ピクセル矩形転送
+    let banks_for_blt = banks.clone();
+    let state_for_blt = draw_state.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "blt",
+        Box::new(move |_vm, args| {
+            let state = *state_for_blt.borrow();
+            if state.is_clip_empty() {
+                return Ok(Rc::new(RObject::nil()));
+            }
+            let x = arg_f32(args, 0, 0.0) - state.cam_x as f32;
+            let y = arg_f32(args, 1, 0.0) - state.cam_y as f32;
+            let bank_id = arg_i32(args, 2, 0);
+            let u = arg_f32(args, 3, 0.0);
+            let v = arg_f32(args, 4, 0.0);
+            let raw_w = arg_f32(args, 5, 16.0);
+            let raw_h = arg_f32(args, 6, 16.0);
+            let rotate = arg_f32(args, 7, 0.0);
+            let scale = arg_f32(args, 8, 1.0);
+
+            if raw_w == 0.0 || raw_h == 0.0 || scale <= 0.0 {
+                return Ok(Rc::new(RObject::nil()));
+            }
+
+            let flip_x = raw_w < 0.0;
+            let flip_y = raw_h < 0.0;
+            let w = raw_w.abs();
+            let h = raw_h.abs();
+
+            let banks_ref = banks_for_blt.borrow();
+            if let Some(bank) = banks_ref.get(&bank_id) {
+                draw_bank_rect(
+                    bank,
+                    &state,
+                    x,
+                    y,
+                    u,
+                    v,
+                    w,
+                    h,
+                    flip_x,
+                    flip_y,
+                    rotate,
+                    scale,
+                );
+            }
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
+
+    // update_bank(bank_id, pixels): ランタイム内のバンクデータを更新し、テクスチャを再構築
+    let banks_for_update = banks.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "update_bank",
+        Box::new(move |_vm, args| {
+            let bank_id = arg_i32(args, 0, 0);
+            if let Some(second) = args.get(1)
+                && let RValue::Array(ref ary_cell) = second.value
+            {
+                let ary = ary_cell.borrow();
+                let mut pixels = Vec::with_capacity(ary.len());
+                for val in ary.iter() {
+                    match &val.value {
+                        RValue::Integer(c) if (0..=15).contains(c) => pixels.push(Some(*c as u8)),
+                        _ => pixels.push(None),
+                    }
+                }
+                let mut banks_mut = banks_for_update.borrow_mut();
+                let bank = banks_mut.entry(bank_id).or_insert_with(|| BankData::new(bank_id));
+                bank.update_pixels(&pixels);
+                bank.build_texture();
+                return Ok(Rc::new(RObject::boolean(true)));
+            }
+            Ok(Rc::new(RObject::boolean(false)))
+        }),
+    );
+
+    // spr(id_or_emoji, x = 0, y = 0, w = 1, h = 1, flip_x = false, flip_y = false): スプライトまたは絵文字描画
+    let banks_for_spr = banks.clone();
+    let act_spr_for_spr = active_spr_bank.clone();
     let sprites_for_spr = sprites.clone();
     let emoji_for_spr = emoji_atlas.clone();
     let state_for_spr = draw_state.clone();
@@ -3366,10 +3959,29 @@ fn register_engine_api(
             let default_scale = cfg_for_spr.borrow().sprite_scale;
             let x = arg_f32(args, 1, 0.0) - state.cam_x as f32;
             let y = arg_f32(args, 2, 0.0) - state.cam_y as f32;
-            let flip_x = arg_bool(args, 3, false);
-            let flip_y = arg_bool(args, 4, false);
-            let rotate = arg_f32(args, 5, 0.0);
-            let scale = arg_f32(args, 6, default_scale);
+
+            // 第4引数の型によるスマート判定 (数値なら w, h / 真偽値なら flip_x, flip_y)
+            let (tile_w, tile_h, flip_x, flip_y, rotate, scale) = if let Some(arg3) = args.get(3) {
+                match &arg3.value {
+                    RValue::Bool(b) => {
+                        let fy = arg_bool(args, 4, false);
+                        let rot = arg_f32(args, 5, 0.0);
+                        let sc = arg_f32(args, 6, default_scale);
+                        (1, 1, *b, fy, rot, sc)
+                    }
+                    _ => {
+                        let tw = arg_i32(args, 3, 1).max(1);
+                        let th = arg_i32(args, 4, 1).max(1);
+                        let fx = arg_bool(args, 5, false);
+                        let fy = arg_bool(args, 6, false);
+                        let rot = arg_f32(args, 7, 0.0);
+                        let sc = arg_f32(args, 8, default_scale);
+                        (tw, th, fx, fy, rot, sc)
+                    }
+                }
+            } else {
+                (1, 1, false, false, 0.0, default_scale)
+            };
 
             if let Some(first) = args.first() {
                 if let RValue::Array(ref ary_cell) = first.value {
@@ -3389,9 +4001,32 @@ fn register_engine_api(
             }
 
             let id = arg_i32(args, 0, 0);
-            let sprites_ref = sprites_for_spr.borrow();
-            if let Some(sprite) = sprites_ref.get(&id) {
-                draw_sprite_transformed(sprite, &state, x, y, flip_x, flip_y, rotate, scale);
+            let cur_bank_id = *act_spr_for_spr.borrow();
+            let banks_ref = banks_for_spr.borrow();
+            if let Some(bank) = banks_ref.get(&cur_bank_id) {
+                let u = ((id % 16) * 16) as f32;
+                let v = ((id / 16) * 16) as f32;
+                let w = (tile_w * 16) as f32;
+                let h = (tile_h * 16) as f32;
+                draw_bank_rect(
+                    bank,
+                    &state,
+                    x,
+                    y,
+                    u,
+                    v,
+                    w,
+                    h,
+                    flip_x,
+                    flip_y,
+                    rotate,
+                    scale,
+                );
+            } else {
+                let sprites_ref = sprites_for_spr.borrow();
+                if let Some(sprite) = sprites_ref.get(&id) {
+                    draw_sprite_transformed(sprite, &state, x, y, flip_x, flip_y, rotate, scale);
+                }
             }
             Ok(Rc::new(RObject::nil()))
         }),
@@ -3454,7 +4089,9 @@ fn register_engine_api(
         }),
     );
 
-    // map(cel_x = 0, cel_y = 0, sx = 0, sy = 0, cel_w = map.width, cel_h = map.height): タイルマップを描画（0は空タイル）
+    // map(cel_x = 0, cel_y = 0, sx = 0, sy = 0, cel_w = map.width, cel_h = map.height, bank = nil): タイルマップを描画
+    let banks_for_map = banks.clone();
+    let act_map_for_map = active_map_bank.clone();
     let sprites_for_map = sprites.clone();
     let map_for_draw = tilemap.clone();
     let state_for_map = draw_state.clone();
@@ -3479,9 +4116,16 @@ fn register_engine_api(
             let sy = arg_i32(args, 3, 0);
             let cel_w = arg_i32(args, 4, tmap.width.max(16));
             let cel_h = arg_i32(args, 5, tmap.height.max(16));
+            let target_bank_id = if args.len() >= 7 && !args[6].is_nil() {
+                arg_i32(args, 6, 0)
+            } else {
+                *act_map_for_map.borrow()
+            };
             if cel_w <= 0 || cel_h <= 0 {
                 return Ok(Rc::new(RObject::nil()));
             }
+            let banks_ref = banks_for_map.borrow();
+            let bank_opt = banks_ref.get(&target_bank_id);
             let sprites_ref = sprites_for_map.borrow();
             let step = (SPRITE_SIZE as f32 * sp_scale) as i32;
             for dy in 0..cel_h {
@@ -3490,16 +4134,34 @@ fn register_engine_api(
                     if tile_id <= 0 {
                         continue;
                     }
-                    if let Some(sprite) = sprites_ref.get(&tile_id) {
-                        let draw_x = (sx + dx * step - state.cam_x) as f32;
-                        let draw_y = (sy + dy * step - state.cam_y) as f32;
-                        if draw_x + sprite.width as f32 * sp_scale <= 0.0
-                            || draw_x >= sw
-                            || draw_y + sprite.height as f32 * sp_scale <= 0.0
-                            || draw_y >= sh
-                        {
-                            continue;
-                        }
+                    let draw_x = (sx + dx * step - state.cam_x) as f32;
+                    let draw_y = (sy + dy * step - state.cam_y) as f32;
+                    let tile_size_scaled = SPRITE_SIZE as f32 * sp_scale;
+                    if draw_x + tile_size_scaled <= 0.0
+                        || draw_x >= sw
+                        || draw_y + tile_size_scaled <= 0.0
+                        || draw_y >= sh
+                    {
+                        continue;
+                    }
+                    if let Some(bank) = bank_opt {
+                        let u = ((tile_id % 16) * 16) as f32;
+                        let v = ((tile_id / 16) * 16) as f32;
+                        draw_bank_rect(
+                            bank,
+                            &state,
+                            draw_x,
+                            draw_y,
+                            u,
+                            v,
+                            16.0,
+                            16.0,
+                            false,
+                            false,
+                            0.0,
+                            sp_scale,
+                        );
+                    } else if let Some(sprite) = sprites_ref.get(&tile_id) {
                         draw_sprite_transformed(
                             sprite, &state, draw_x, draw_y, false, false, 0.0, sp_scale,
                         );
@@ -3685,6 +4347,9 @@ fn snapshot_globals(vm: &VM) -> HashMap<String, Rc<RObject>> {
 pub struct GameRuntime {
     pub vm: VM,
     pub sprites: Rc<RefCell<HashMap<i32, SpriteData>>>,
+    pub banks: Rc<RefCell<HashMap<i32, BankData>>>,
+    pub active_spr_bank: Rc<RefCell<i32>>,
+    pub active_map_bank: Rc<RefCell<i32>>,
     pub tilemap: Rc<RefCell<Tilemap>>,
     pub emoji_atlas: Rc<RefCell<emoji::EmojiAtlas>>,
     pub bitmap_font: Rc<BitmapFont>,
@@ -3708,7 +4373,7 @@ impl GameRuntime {
         headless: bool,
         script_args: &[String],
     ) -> Result<Self, String> {
-        let mut sprites_map = parse_tail_resources(tail_data);
+        let (mut sprites_map, mut banks_map) = parse_tail_resources_full(tail_data, None);
         let tail_map = parse_tail_map(tail_data);
         let (mut sfx_map, mut music_map) = sound::parse_tail_sounds(tail_data);
 
@@ -3726,6 +4391,9 @@ impl GameRuntime {
         vm.globals.insert("$ARGV".to_string(), argv_obj);
 
         let sprites = Rc::new(RefCell::new(HashMap::new()));
+        let banks = Rc::new(RefCell::new(HashMap::new()));
+        let active_spr_bank = Rc::new(RefCell::new(0));
+        let active_map_bank = Rc::new(RefCell::new(0));
         let tilemap = Rc::new(RefCell::new(tail_map.clone()));
         let emoji_atlas = Rc::new(RefCell::new(emoji::EmojiAtlas::new()));
         let bitmap_font = Rc::new(BitmapFont::new(!headless));
@@ -3739,6 +4407,9 @@ impl GameRuntime {
         register_engine_api(
             &mut vm,
             sprites.clone(),
+            banks.clone(),
+            active_spr_bank.clone(),
+            active_map_bank.clone(),
             tilemap.clone(),
             emoji_atlas.clone(),
             bitmap_font.clone(),
@@ -3761,8 +4432,12 @@ impl GameRuntime {
             for sprite in sprites_map.values_mut() {
                 sprite.build_texture();
             }
+            for bank in banks_map.values_mut() {
+                bank.build_texture();
+            }
         }
         *sprites.borrow_mut() = sprites_map;
+        *banks.borrow_mut() = banks_map;
 
         let initial_globals = snapshot_globals(&vm);
         let initial_tail_map = tilemap.borrow().clone();
@@ -3770,6 +4445,9 @@ impl GameRuntime {
         Ok(Self {
             vm,
             sprites,
+            banks,
+            active_spr_bank,
+            active_map_bank,
             tilemap,
             emoji_atlas,
             bitmap_font,
@@ -3787,7 +4465,7 @@ impl GameRuntime {
     /// メソッド定義とスプライト・マップ定義をホットリロードする。
     /// ただしスクリプト上のトップレベル初期値や `@MAP` 自体が書き換えられた場合は新しい定義を採用する。
     pub fn hot_reload(&mut self, new_tail_data: &str, new_mrb_bytes: &[u8]) -> Result<(), String> {
-        let mut new_sprites_map = parse_tail_resources(new_tail_data);
+        let (mut new_sprites_map, mut new_banks_map) = parse_tail_resources_full(new_tail_data, None);
         let new_tail_map = parse_tail_map(new_tail_data);
         let (mut new_sfx_map, mut new_music_map) = sound::parse_tail_sounds(new_tail_data);
 
@@ -3823,6 +4501,9 @@ impl GameRuntime {
         register_engine_api(
             &mut new_vm,
             self.sprites.clone(),
+            self.banks.clone(),
+            self.active_spr_bank.clone(),
+            self.active_map_bank.clone(),
             temp_tilemap.clone(),
             self.emoji_atlas.clone(),
             self.bitmap_font.clone(),
@@ -3861,8 +4542,14 @@ impl GameRuntime {
             for sprite in new_sprites_map.values_mut() {
                 sprite.build_texture();
             }
+            for bank in new_banks_map.values_mut() {
+                bank.build_texture();
+            }
         }
         *self.sprites.borrow_mut() = new_sprites_map;
+        *self.banks.borrow_mut() = new_banks_map;
+        *self.active_spr_bank.borrow_mut() = 0;
+        *self.active_map_bank.borrow_mut() = 0;
 
         let new_initial_map = temp_tilemap.borrow().clone();
         if new_initial_map != self.initial_tail_map {
@@ -3873,6 +4560,9 @@ impl GameRuntime {
         register_engine_api(
             &mut new_vm,
             self.sprites.clone(),
+            self.banks.clone(),
+            self.active_spr_bank.clone(),
+            self.active_map_bank.clone(),
             self.tilemap.clone(),
             self.emoji_atlas.clone(),
             self.bitmap_font.clone(),
@@ -4512,6 +5202,60 @@ end
             runtime.vm.globals.get("$ok").map(|v| v.as_ref().clone()),
             Some(RObject::boolean(true))
         );
+    }
+
+    #[test]
+    fn bench_slot_rendering() {
+        let old_script = r#"
+            $slots = Array.new(16) { Array.new(256, 8) }
+            def draw
+              16.times do |sid|
+                sgrid = $slots[sid]
+                16.times do |py|
+                  16.times do |px|
+                    c = sgrid[py * 16 + px]
+                    pset(px, py, c) if c
+                  end
+                end
+              end
+            end
+        "#;
+        let new_script = r#"
+            $slots = Array.new(16) { Array.new(256, 8) }
+            def draw
+              16.times do |sid|
+                spr($slots[sid], 0, 0)
+              end
+            end
+        "#;
+        let (_, old_mrb) = cli::compile_ruby_script_str(old_script).unwrap();
+        let mut old_rt = GameRuntime::new("", &old_mrb, true).unwrap();
+
+        let (_, new_mrb) = cli::compile_ruby_script_str(new_script).unwrap();
+        let mut new_rt = GameRuntime::new("", &new_mrb, true).unwrap();
+
+        for _ in 0..10 {
+            old_rt.call_draw();
+            new_rt.call_draw();
+        }
+
+        let iters = 20;
+        let t0 = std::time::Instant::now();
+        for _ in 0..iters {
+            old_rt.call_draw();
+        }
+        let old_dur = t0.elapsed();
+
+        let t1 = std::time::Instant::now();
+        for _ in 0..iters {
+            new_rt.call_draw();
+        }
+        let new_dur = t1.elapsed();
+
+        let old_frame_ms = old_dur.as_secs_f64() * 1000.0 / iters as f64;
+        let new_frame_ms = new_dur.as_secs_f64() * 1000.0 / iters as f64;
+
+        assert!(old_frame_ms > new_frame_ms, "spr direct drawing should be significantly faster than pset loops");
     }
 
     #[test]
@@ -6123,6 +6867,106 @@ save_file($save, $map_text)
         assert!(packed_content.contains("@SFX 0"));
 
         let _ = std::fs::remove_file(&temp_packed);
+    }
+
+    #[test]
+    fn test_bank_parse_and_sprite_sync() {
+        let tail = "@SPRITE 0\n7777\n7777\n@SPRITE 1\n8888\n8888\n";
+        let (sprites, banks) = parse_tail_resources_full(tail, None);
+
+        assert!(sprites.contains_key(&0));
+        assert!(sprites.contains_key(&1));
+        assert!(banks.contains_key(&0));
+
+        let bank0 = &banks[&0];
+        assert_eq!(bank0.width, 256);
+        assert_eq!(bank0.height, 256);
+
+        // Bank 0 の (0, 0) にスプライト 0 (色 7 = 白) が反映されていること
+        let off0 = 0;
+        assert_eq!(&bank0.rgba[off0..off0 + 4], &PALETTE_RGBA[7]);
+
+        // Bank 0 の (16, 0) にスプライト 1 (色 8 = 赤) が反映されていること
+        let off1 = 16 * 4;
+        assert_eq!(&bank0.rgba[off1..off1 + 4], &PALETTE_RGBA[8]);
+
+        // PNG エンコードとデコードの往復
+        let png_bytes = bank0.to_png_bytes().expect("Should encode bank to PNG");
+        let decoded_bank = BankData::from_png_bytes(0, &png_bytes).expect("Should decode bank from PNG");
+        assert_eq!(bank0.rgba, decoded_bank.rgba);
+    }
+
+    #[test]
+    fn test_bank_api_and_blt_in_ruby_script() {
+        let src = r#"
+spr_bank(0)
+map_bank(0)
+
+def update
+end
+
+def draw
+  cls(0)
+  # 基本スプライト (16x16)
+  spr(0, 10, 20)
+  # 左右反転
+  spr(0, 30, 20, true, false)
+  # PICO-8 スタイル: 2x2タイル (32x32) 描画
+  spr(0, 50, 20, 2, 2)
+  # PICO-8 スタイル: 2x2タイル + 左右反転
+  spr(0, 90, 20, 2, 2, true, false)
+
+  # blt: バンク0の (0, 0) から 18x16 px を描画
+  blt(10, 60, 0, 0, 0, 18, 16)
+  # blt: 負数フリップ (左右反転)
+  blt(40, 60, 0, 0, 0, -18, 16)
+  # blt: 回転と拡大
+  blt(80, 60, 0, 0, 0, 18, 16, 45, 1.5)
+
+  # マップ描画 (第7引数でバンク指定も可能)
+  map(0, 0, 0, 100, 4, 4, 0)
+end
+__END__
+@SPRITE 0
+7777777777777777
+7777777777777777
+"#;
+        let (tail_data, mrb_bytes) = cli::compile_ruby_script_str(src).unwrap();
+        let mut runtime = GameRuntime::new(&tail_data, &mrb_bytes, true).unwrap();
+
+        // update, draw が正常に動作すること
+        runtime.call_update_result().unwrap();
+        runtime.call_draw_result().unwrap();
+
+        assert_eq!(*runtime.active_spr_bank.borrow(), 0);
+        assert_eq!(*runtime.active_map_bank.borrow(), 0);
+    }
+
+    #[test]
+    fn test_bank_load_and_b64_helpers_in_ruby() {
+        let src = r#"
+$pixels = Array.new(256 * 256, 7)
+$b64 = bank_to_b64_png($pixels)
+__END__
+@SPRITE 0
+8888
+"#;
+        let (tail_data, mrb_bytes) = cli::compile_ruby_script_str(src).unwrap();
+        let runtime = GameRuntime::new(&tail_data, &mrb_bytes, true).unwrap();
+
+        let vm = &runtime.vm;
+        let b64_val = vm.globals.get("$b64").expect("$b64 should be set");
+        if let RValue::String(ref s, _) = b64_val.value {
+            let str_val = String::from_utf8_lossy(&s.borrow()).to_string();
+            assert!(!str_val.is_empty());
+            // デコードして 256x256 BankData に復元できるか検証
+            let bank = BankData::from_base64_png(0, &str_val).expect("Should decode generated b64");
+            assert_eq!(bank.width, 256);
+            assert_eq!(bank.height, 256);
+            assert_eq!(&bank.rgba[0..4], &PALETTE_RGBA[7]);
+        } else {
+            panic!("Expected $b64 to be a String");
+        }
     }
 }
 

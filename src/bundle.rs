@@ -12,6 +12,76 @@ pub const BUNDLE_MAGIC: &[u8; 8] = b"USAKAME1";
 /// フッター全体のサイズ: tail_len (8B) + mrb_len (8B) + BUNDLE_MAGIC (8B) = 24 bytes
 pub const FOOTER_SIZE: usize = 24;
 
+const B64_CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+pub fn encode_base64(input: &[u8]) -> String {
+    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+
+        out.push(B64_CHARS[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(B64_CHARS[((triple >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(B64_CHARS[((triple >> 6) & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(B64_CHARS[(triple & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+pub fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
+    let mut clean = Vec::with_capacity(input.len());
+    for line in input.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        for b in trimmed.bytes() {
+            if !b.is_ascii_whitespace() {
+                clean.push(b);
+            }
+        }
+    }
+    if clean.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut out = Vec::with_capacity(clean.len() * 3 / 4);
+    let mut buf = 0u32;
+    let mut bits = 0u8;
+
+    for &b in &clean {
+        if b == b'=' {
+            break;
+        }
+        let val = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            _ => return Err(format!("Invalid Base64 character: `{}`", b as char)),
+        };
+        buf = (buf << 6) | (val as u32);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buf >> bits) & 0xFF) as u8);
+        }
+    }
+
+    Ok(out)
+}
+
 /// `tail_data` (`__END__` 以降のリソース) と `.mrb` バイトコードを単一バイナリペイロードへパックする。
 ///
 /// フォーマット:
@@ -299,13 +369,72 @@ pub fn pack_script_to_standalone_source(script_path: &Path) -> Result<String, St
 
     let (ruby_code, embedded_tail) = split_ruby_source_and_tail(&full_source);
     let (merged_tail, _) = load_merged_tail_data(script_path, embedded_tail);
+    let parent_dir = script_path.parent().unwrap_or_else(|| Path::new(""));
+    let final_tail = inline_bank_file_paths_in_tail(&merged_tail, parent_dir);
 
     let trimmed_code = ruby_code.trim_end();
-    if merged_tail.trim().is_empty() {
+    if final_tail.trim().is_empty() {
         Ok(trimmed_code.to_string() + "\n")
     } else {
-        Ok(format!("{}\n\n__END__\n{}", trimmed_code, merged_tail))
+        Ok(format!("{}\n\n__END__\n{}", trimmed_code, final_tail))
     }
+}
+
+/// `@BANK <id> path/to/image.png` のような外部ファイル参照を Base64 にインライン化する
+pub fn inline_bank_file_paths_in_tail(tail_data: &str, base_dir: &Path) -> String {
+    let mut out_lines = Vec::new();
+    let mut in_bank_block = false;
+    let mut current_bank_id = None;
+
+    for line in tail_data.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("@BANK") {
+            in_bank_block = true;
+            let mut parts = rest.split_whitespace();
+            if let Some(id_str) = parts.next()
+                && let Ok(id) = id_str.parse::<i32>()
+            {
+                current_bank_id = Some(id);
+                let inline_content = parts.collect::<Vec<_>>().join(" ");
+                if !inline_content.is_empty() {
+                    let path_candidate = base_dir.join(&inline_content);
+                    if path_candidate.is_file() {
+                        if let Ok(bytes) = std::fs::read(&path_candidate) {
+                            let b64 = encode_base64(&bytes);
+                            out_lines.push(format!("@BANK {}", id));
+                            out_lines.push(b64);
+                            in_bank_block = false;
+                            continue;
+                        }
+                    }
+                }
+            }
+            out_lines.push(line.to_string());
+            continue;
+        }
+
+        if in_bank_block {
+            if trimmed.starts_with('@') {
+                in_bank_block = false;
+                current_bank_id = None;
+            } else if let Some(_id) = current_bank_id {
+                let path_candidate = base_dir.join(trimmed);
+                if path_candidate.is_file() {
+                    if let Ok(bytes) = std::fs::read(&path_candidate) {
+                        let b64 = encode_base64(&bytes);
+                        out_lines.push(b64);
+                        in_bank_block = false;
+                        current_bank_id = None;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        out_lines.push(line.to_string());
+    }
+
+    out_lines.join("\n")
 }
 
 /// `tail_data` の各行・ブロックを、スプライト／マップ／サウンドに分類して抽出する。
@@ -330,6 +459,7 @@ pub fn unpack_tail_data_to_sections(
     for line in tail_data.lines() {
         let trimmed = line.trim();
         let detected = if trimmed.starts_with("@SPRITE")
+            || trimmed.starts_with("@BANK")
             || trimmed.starts_with("@PNG")
             || trimmed.starts_with("@SHEET")
             || trimmed.starts_with("@B64")
@@ -498,6 +628,24 @@ c2 e2 g2
         let sfx_str = sfx.unwrap();
         assert!(sfx_str.contains("@SFX 0"));
         assert!(!sfx_str.contains("@SPRITE"));
+    }
+
+    #[test]
+    fn test_inline_bank_file_paths_in_tail() {
+        let temp_dir = std::env::temp_dir().join("test_inline_bank");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let png_file = temp_dir.join("test.png");
+        std::fs::write(&png_file, b"FAKE_PNG_BYTES").unwrap();
+
+        let tail = "@BANK 0 test.png\n@MAP\n0 0\n";
+        let inlined = inline_bank_file_paths_in_tail(tail, &temp_dir);
+
+        assert!(inlined.contains("@BANK 0"));
+        assert!(inlined.contains(&encode_base64(b"FAKE_PNG_BYTES")));
+        assert!(!inlined.contains("test.png"));
+        assert!(inlined.contains("@MAP"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
 

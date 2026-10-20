@@ -87,8 +87,17 @@ $cached_export_text = ""
 # ターゲットファイル検出 & 初期ロード
 # ------------------------------------------------------------------------------
 $target_path = "game.rb"
+$ref_bank = 0
+
 if ARGV && ARGV.size > 0 && ARGV[0]
-  $target_path = ARGV[0]
+  if ARGV[0] =~ /^[0-9]+$/
+    $ref_bank = ARGV[0].to_i
+  else
+    $target_path = ARGV[0]
+  end
+end
+if ARGV && ARGV.size > 1 && ARGV[1]
+  $ref_bank = ARGV[1].to_i
 end
 
 $save_path = $target_path
@@ -151,24 +160,42 @@ def tile_to_char(tid)
   end
 end
 
-# 外部スプライトの再読み込み
+# 外部スプライト／バンクの再読み込み
 def reload_custom_sprites
-  return if $spr_path.nil?
-  cur_mtime = file_mtime($spr_path)
-  return if cur_mtime == 0
-  $last_spr_mtime = cur_mtime
+  src = ($spr_path && read_file($spr_path)) ? $spr_path : $target_path
 
-  slots = load_resource_sprites($spr_path, NUM_TILES)
-  count = 0
-  slots.each_with_index do |sgrid, sid|
-    if sgrid
-      $custom_sprites[sid] = sgrid
-      count += 1
+  # 1. 256x256 バンクデータの読み込み
+  bank_pixels = load_resource_bank(src, $ref_bank)
+  if bank_pixels && bank_pixels.size == 256 * 256
+    update_bank($ref_bank, bank_pixels)
+    notify("SYNCED BANK #{$ref_bank} FROM #{src}")
+  end
+
+  # 2. 旧形式の個別スプライトもフォールバック読み込み
+  if $spr_path && read_file($spr_path)
+    cur_mtime = file_mtime($spr_path)
+    if cur_mtime > 0
+      $last_spr_mtime = cur_mtime
     end
+    slots = load_resource_sprites($spr_path, NUM_TILES)
+    count = 0
+    slots.each_with_index do |sgrid, sid|
+      if sgrid
+        $custom_sprites[sid] = sgrid
+        count += 1
+      end
+    end
+    notify("SYNCED #{count} SPRITES FROM #{$spr_path}") if count > 0 && !bank_pixels
   end
-  if count > 0
-    notify("SYNCED #{count} SPRITES FROM #{$spr_path}")
-  end
+end
+
+def switch_ref_bank(bank_id)
+  return if bank_id < 0
+  $ref_bank = bank_id
+  spr_bank($ref_bank)
+  map_bank($ref_bank)
+  reload_custom_sprites
+  notify("SWITCHED TO BANK #{$ref_bank}")
 end
 
 # サンプルマップ初期化（見本ダンジョン）
@@ -234,7 +261,9 @@ else
   notify("TARGET: #{$target_path} (SAMPLE MAP)")
 end
 
-# スプライトの初期ロード
+# スプライト & バンクの初期ロード
+spr_bank($ref_bank)
+map_bank($ref_bank)
 reload_custom_sprites
 
 # 塗りつぶし (バケツ / Flood Fill)
@@ -335,7 +364,9 @@ def draw_tile_at(tid, px, py, scale = 1.0)
   if custom
     spr(custom, px, py, false, false, 0, scale)
   else
-    spr(tid, px, py, false, false, 0, scale)
+    u = (tid % 16) * 16
+    v = (tid / 16) * 16
+    blt(px, py, $ref_bank, u, v, 16, 16, 0, scale)
   end
 end
 
@@ -447,6 +478,17 @@ def update
 
   # --- UI クリック判定 ---
   if btnp(:mouse_l)
+    # 0. バンク切替ボタン (x: 400..470, y: 88..102)
+    if my >= 88 && my <= 102
+      if mx >= 400 && mx <= 414
+        switch_ref_bank([$ref_bank - 1, 0].max)
+        sfx(:click)
+      elsif mx >= 456 && mx <= 470
+        switch_ref_bank($ref_bank + 1)
+        sfx(:click)
+      end
+    end
+
     # 1. タイルパレット (x: 336..464, y: 96..192) - 4x4 グリッド (各 32x24 px)
     if mx >= 336 && mx < 464 && my >= 96 && my < 192
       col = ((mx - 336) / 32).to_i
@@ -694,8 +736,20 @@ def draw
   cam_vh = (VIEW_H / $cell_size).to_i * 2
   rect(336 + $cam_x * 2, 24 + $cam_y * 2, cam_vw, cam_vh, 7)
 
-  # パレットヘッダー
-  print_text("TILES (4x4)", 336, 92, 6)
+  # パレットヘッダー & バンク選択
+  print_text("TILES", 336, 91, 6)
+
+  rectfill(400, 88, 14, 12, 2)
+  rect(400, 88, 14, 12, 6)
+  print_text("<", 405, 90, 7)
+
+  rectfill(418, 88, 34, 12, 1)
+  rect(418, 88, 34, 12, 5)
+  print_text("B#{$ref_bank}", 424, 90, 10)
+
+  rectfill(456, 88, 14, 12, 2)
+  rect(456, 88, 14, 12, 6)
+  print_text(">", 461, 90, 7)
 
   # 4x4 タイルグリッド (x: 336..464, y: 102..192) - 各 32x22 px
   4.times do |row|
