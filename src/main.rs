@@ -415,7 +415,8 @@ pub struct BankData {
     pub height: u16,
     /// RGBA ピクセルデータ (256 * 256 * 4 bytes)
     pub rgba: Vec<u8>,
-    pub texture: Option<Texture2D>,
+    pub texture: RefCell<Option<Texture2D>>,
+    pub dirty: std::cell::Cell<bool>,
     /// パレット置換・透過設定ごとの変換済みテクスチャキャッシュ
     pub pal_cache: RefCell<HashMap<([u8; 16], u16), Texture2D>>,
 }
@@ -433,7 +434,8 @@ impl BankData {
             width: BANK_WIDTH as u16,
             height: BANK_HEIGHT as u16,
             rgba: vec![0u8; BANK_RGBA_BYTES],
-            texture: None,
+            texture: RefCell::new(None),
+            dirty: std::cell::Cell::new(false),
             pal_cache: RefCell::new(HashMap::new()),
         }
     }
@@ -495,7 +497,7 @@ impl BankData {
                 self.rgba[dst_start..dst_end].copy_from_slice(&src_rgba[src_start..src_end]);
             }
         }
-        self.texture = None;
+        self.dirty.set(true);
         self.pal_cache.borrow_mut().clear();
     }
 
@@ -511,6 +513,7 @@ impl BankData {
                 }
             }
         }
+        self.dirty.set(true);
         self.pal_cache.borrow_mut().clear();
     }
 
@@ -527,6 +530,7 @@ impl BankData {
                 self.rgba[off..off + 4].copy_from_slice(&[0, 0, 0, 0]);
             }
         }
+        self.dirty.set(true);
         self.pal_cache.borrow_mut().clear();
     }
 
@@ -555,23 +559,41 @@ impl BankData {
                 }
             }
         }
+        self.dirty.set(true);
         self.pal_cache.borrow_mut().clear();
     }
 
-    pub fn build_texture(&mut self) {
-        let image = Image {
-            bytes: self.rgba.clone(),
-            width: self.width,
-            height: self.height,
-        };
-        if let Some(ref texture) = self.texture {
-            texture.update(&image);
-        } else {
-            let texture = Texture2D::from_image(&image);
-            texture.set_filter(FilterMode::Nearest);
-            self.texture = Some(texture);
+    pub fn ensure_texture(&self) {
+        #[cfg(test)]
+        {
+            return;
         }
-        self.pal_cache.borrow_mut().clear();
+        #[cfg(not(test))]
+        {
+            if !self.dirty.get() && self.texture.borrow().is_some() {
+                return;
+            }
+            let image = Image {
+                bytes: self.rgba.clone(),
+                width: self.width,
+                height: self.height,
+            };
+            let mut tex_ref = self.texture.borrow_mut();
+            if let Some(ref tex) = *tex_ref {
+                tex.update(&image);
+            } else {
+                let tex = Texture2D::from_image(&image);
+                tex.set_filter(FilterMode::Nearest);
+                *tex_ref = Some(tex);
+            }
+            self.dirty.set(false);
+            self.pal_cache.borrow_mut().clear();
+        }
+    }
+
+    pub fn build_texture(&self) {
+        self.dirty.set(true);
+        self.ensure_texture();
     }
 
     pub fn apply_palette(&self, pal_map: &[u8; 16], palt_mask: u16) -> Vec<u8> {
@@ -603,8 +625,9 @@ impl BankData {
     }
 
     pub fn get_or_build_pal_texture(&self, pal_map: &[u8; 16], palt_mask: u16) -> Option<Texture2D> {
+        self.ensure_texture();
         if *pal_map == DEFAULT_PAL_MAP && palt_mask == 0 {
-            return self.texture.clone();
+            return self.texture.borrow().clone();
         }
         let key = (*pal_map, palt_mask);
         if let Some(tex) = self.pal_cache.borrow().get(&key) {
@@ -1904,8 +1927,10 @@ fn draw_bank_rect(
         (dx, dy, p)
     };
 
+    bank.ensure_texture();
+
     if state.is_default_palette() {
-        if let Some(ref texture) = bank.texture {
+        if let Some(ref texture) = *bank.texture.borrow() {
             draw_texture_ex(texture, draw_x, draw_y, WHITE, params);
         }
     } else if let Some(texture) = bank.get_or_build_pal_texture(&state.pal_map, state.palt_mask) {
@@ -4060,14 +4085,13 @@ fn register_engine_api(
                 let mut banks_mut = banks_for_update.borrow_mut();
                 let bank = banks_mut.entry(bank_id).or_insert_with(|| BankData::new(bank_id));
                 bank.update_pixels(&pixels);
-                bank.build_texture();
                 return Ok(Rc::new(RObject::boolean(true)));
             }
             Ok(Rc::new(RObject::boolean(false)))
         }),
     );
 
-    // set_bank_pixel(bank_id, x, y, col): 1ピクセルを即座に更新してテクスチャに反映
+    // set_bank_pixel(bank_id, x, y, col): 1ピクセルを即座に更新 (描画時に自動テクスチャ更新)
     let banks_for_set_pixel = banks.clone();
     mrb_define_cmethod(
         vm,
@@ -4085,14 +4109,13 @@ fn register_engine_api(
                 let mut banks_mut = banks_for_set_pixel.borrow_mut();
                 let bank = banks_mut.entry(bank_id).or_insert_with(|| BankData::new(bank_id));
                 bank.set_pixel(x as usize, y as usize, col);
-                bank.build_texture();
                 return Ok(Rc::new(RObject::boolean(true)));
             }
             Ok(Rc::new(RObject::boolean(false)))
         }),
     );
 
-    // update_bank_rect(bank_id, x, y, w, h, pixels): 矩形領域ピクセル配列で部分更新
+    // update_bank_rect(bank_id, x, y, w, h, pixels): 矩形領域ピクセル配列で部分更新 (描画時に自動テクスチャ更新)
     let banks_for_update_rect = banks.clone();
     mrb_define_cmethod(
         vm,
@@ -4118,7 +4141,6 @@ fn register_engine_api(
                 let mut banks_mut = banks_for_update_rect.borrow_mut();
                 let bank = banks_mut.entry(bank_id).or_insert_with(|| BankData::new(bank_id));
                 bank.update_rect(x, y, w, h, &pixels);
-                bank.build_texture();
                 return Ok(Rc::new(RObject::boolean(true)));
             }
             Ok(Rc::new(RObject::boolean(false)))
@@ -4630,7 +4652,7 @@ impl GameRuntime {
                 }
             }
             for bank in banks.borrow_mut().values_mut() {
-                if bank.texture.is_none() {
+                if bank.texture.borrow().is_none() {
                     bank.build_texture();
                 }
             }
