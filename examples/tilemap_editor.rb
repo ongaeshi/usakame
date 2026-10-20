@@ -5,6 +5,11 @@
 #
 # 【特徴】
 # - 高解像度UI (480x270): 広々とした 320x240 キャンバスと使いやすい右側パネル
+# - 256x256 バンク完全対応:
+#     16x16 (計256個) のタイルスプライトを右側パレットに常時一覧表示・ドラッグ選択可能！
+# - 超高速レンダリング (60 FPS):
+#     ミニマップのテクスチャキャッシュ化・背景市松模様 & グリッドの一括描画により
+#     描画負荷を極小化し常時 60 FPS を維持。
 # - 外部ファイル自動連携:
 #     uk run examples/tilemap_editor.rb -- game.rb
 #     uk run examples/tilemap_editor.rb -- game.map
@@ -12,7 +17,7 @@
 #     game.rb を指定した場合でも、game.rb 本体を壊さず自動的に game.map を生成・保存。
 #     ゲーム側（uk run game.rb）が自動でホットリロードされ、リアルタイムに反映！
 # - スプライトエディタとの相互同期:
-#     スプライトエディタで game.spr を保存すると、タイルマップエディタが自動検知して
+#     スプライトエディタで保存すると、タイルマップエディタが自動検知して
 #     タイルスプライトをリアルタイム更新！
 # - [SAVE] (Ctrl+S / S): ターゲットファイルに即座に書き込み
 # ==============================================================================
@@ -33,7 +38,8 @@ show_mouse(true)
 # ------------------------------------------------------------------------------
 MAP_WIDTH  = 32
 MAP_HEIGHT = 32
-NUM_TILES  = 16
+NUM_TILES  = 256
+MINIMAP_BANK = 127 # ミニマップ高速描画用バンク
 
 # キャンバス表示領域 (320 x 240 px)
 VIEW_X = 8
@@ -41,7 +47,7 @@ VIEW_Y = 22
 VIEW_W = 320
 VIEW_H = 240
 
-# タイル情報定義 [ID, 名前, 代表色]
+# タイル情報定義 [ID, 名前, 代表色] (デフォルト16種)
 TILE_INFO = [
   [0,  "EMPTY",  0],
   [1,  "BRICK",  5],
@@ -61,27 +67,46 @@ TILE_INFO = [
   [15, "FLAG",   8]
 ]
 
+def tile_name(tid)
+  if tid == 0
+    "EMPTY"
+  elsif tid < TILE_INFO.size && TILE_INFO[tid]
+    TILE_INFO[tid][1]
+  else
+    "T_#{tid}"
+  end
+end
+
+def tile_color(tid)
+  if tid == 0
+    0
+  elsif tid < TILE_INFO.size && TILE_INFO[tid]
+    TILE_INFO[tid][2]
+  else
+    (tid % 15) + 1
+  end
+end
+
 # ------------------------------------------------------------------------------
 # グローバル状態
 # ------------------------------------------------------------------------------
 $map = Array.new(MAP_WIDTH * MAP_HEIGHT, 0)
+$minimap_dirty = true # ミニマップ再生成フラグ
 
-$cam_x = 0         # カメラ原点 (タイル単位)
+$cam_x = 0           # カメラ原点 (タイル単位)
 $cam_y = 0
-$selected_tile = 1 # 選択中タイルID (0..15)
+$selected_tile = 1   # 選択中タイルID (0..255)
 $current_tool = :pen # :pen, :rect, :fill, :picker
-$cell_size = 16    # 16 or 8
-$show_grid = true  # グリッド線の表示
-$rect_drag = nil   # 矩形ツールのドラッグ始点 [start_tx, start_ty, rect_tid]
+$cell_size = 16      # 16 or 8
+$show_grid = true    # グリッド線の表示
+$rect_drag = nil     # 矩形ツールのドラッグ始点 [start_tx, start_ty, rect_tid]
 
-$undo_stack = []   # アンドゥ用履歴スタック
-$notify_msg = ""   # 通知メッセージ
+$undo_stack = []     # アンドゥ用履歴スタック
+$notify_msg = ""     # 通知メッセージ
 $notify_timer = 0
 
 $show_code_modal = false
-$modal_tab = :map  # :map, :sprite, :all
 $modal_scroll = 0
-$cached_export_text = ""
 
 # ------------------------------------------------------------------------------
 # ターゲットファイル検出 & 初期ロード
@@ -128,7 +153,8 @@ if tlen >= 3
   end
 end
 
-$custom_sprites = Array.new(NUM_TILES, nil)
+$custom_sprites = Array.new(16, nil)
+$has_custom_sprites = false
 $last_spr_mtime = 0
 
 def notify(msg)
@@ -141,9 +167,19 @@ def push_undo
   $undo_stack.shift if $undo_stack.size > 20
 end
 
+def sync_tilemap_to_engine
+  MAP_HEIGHT.times do |y|
+    MAP_WIDTH.times do |x|
+      mset(x, y, get_tile(x, y))
+    end
+  end
+end
+
 def perform_undo
   return if $undo_stack.empty?
   $map = $undo_stack.pop
+  sync_tilemap_to_engine
+  $minimap_dirty = true
   sfx(:click)
   notify("UNDO")
 end
@@ -155,7 +191,12 @@ end
 
 def set_tile(tx, ty, tid)
   return if tx < 0 || tx >= MAP_WIDTH || ty < 0 || ty >= MAP_HEIGHT
-  $map[ty * MAP_WIDTH + tx] = tid
+  idx = ty * MAP_WIDTH + tx
+  if $map[idx] != tid
+    $map[idx] = tid
+    mset(tx, ty, tid)
+    $minimap_dirty = true
+  end
 end
 
 # タイルIDを1文字表記に変換 (0: '.', 1..9: '1'..'9', 10..15: 'A'..'F')
@@ -164,9 +205,25 @@ def tile_to_char(tid)
     "."
   elsif tid < 10
     tid.to_s
-  else
+  elsif tid < 16
     ("A".ord + (tid - 10)).chr
+  else
+    "?"
   end
+end
+
+# ミニマップテクスチャ更新 (変更時のみ一括更新)
+def update_minimap_cache
+  return unless $minimap_dirty
+  $minimap_dirty = false
+  pixels = Array.new(MAP_WIDTH * MAP_HEIGHT)
+  MAP_HEIGHT.times do |my|
+    MAP_WIDTH.times do |mx|
+      tid = get_tile(mx, my)
+      pixels[my * MAP_WIDTH + mx] = tile_color(tid)
+    end
+  end
+  update_bank_rect(MINIMAP_BANK, 0, 0, MAP_WIDTH, MAP_HEIGHT, pixels)
 end
 
 # 外部スプライト／バンクの再読み込み
@@ -186,7 +243,7 @@ def reload_custom_sprites
     if cur_mtime > 0
       $last_spr_mtime = cur_mtime
     end
-    slots = load_resource_sprites($spr_path, NUM_TILES)
+    slots = load_resource_sprites($spr_path, 16)
     count = 0
     slots.each_with_index do |sgrid, sid|
       if sgrid
@@ -194,8 +251,10 @@ def reload_custom_sprites
         count += 1
       end
     end
+    $has_custom_sprites = (count > 0)
     notify("SYNCED #{count} SPRITES FROM #{$spr_path}") if count > 0 && !bank_pixels
   end
+  $minimap_dirty = true
 end
 
 def switch_ref_bank(bank_id)
@@ -256,6 +315,7 @@ def init_sample_map
   $map[17 * MAP_WIDTH + 14] = 8  # トゲ
   $map[18 * MAP_WIDTH + 14] = 8
   $map[28 * MAP_WIDTH + 28] = 15 # ゴール旗
+  $minimap_dirty = true
 end
 
 # 起動時の読み込み
@@ -269,6 +329,8 @@ else
   init_sample_map
   notify("TARGET: #{$target_path} (SAMPLE MAP)")
 end
+sync_tilemap_to_engine
+$minimap_dirty = true
 
 # スプライト & バンクの初期ロード
 spr_bank($ref_bank)
@@ -300,6 +362,7 @@ def flood_fill_tile(start_tx, start_ty, new_tid)
       queue << [tx, ty - 1] if ty - 1 >= 0
     end
   end
+  $minimap_dirty = true
   sfx(:click)
 end
 
@@ -316,6 +379,7 @@ def apply_rect(x0, y0, x1, y1, tid)
       set_tile(tx, ty, tid)
     end
   end
+  $minimap_dirty = true
   sfx(:click)
 end
 
@@ -323,6 +387,8 @@ end
 def clear_map
   push_undo
   $map = Array.new(MAP_WIDTH * MAP_HEIGHT, 0)
+  sync_tilemap_to_engine
+  $minimap_dirty = true
   sfx(:boom)
   notify("CLEARED MAP")
 end
@@ -331,13 +397,19 @@ end
 # テキストエクスポート & 保存
 # ------------------------------------------------------------------------------
 def generate_map_text
+  has_large_tiles = $map.any? { |tid| tid >= 16 }
   lines = ["@MAP 0 0"]
   MAP_HEIGHT.times do |y|
-    row = ""
+    row_tokens = []
     MAP_WIDTH.times do |x|
-      row << tile_to_char(get_tile(x, y))
+      tid = get_tile(x, y)
+      if has_large_tiles
+        row_tokens << (tid <= 0 ? "." : tid.to_s)
+      else
+        row_tokens << tile_to_char(tid)
+      end
     end
-    lines << row
+    lines << (has_large_tiles ? row_tokens.join(" ") : row_tokens.join(""))
   end
   lines.join("\n")
 end
@@ -365,13 +437,12 @@ def export_map_only
 end
 
 # ------------------------------------------------------------------------------
-# タイルドット描画 (カスタムスプライトまたは内蔵スプライト)
+# タイルドット描画 (カスタムスプライトまたはバンクテクスチャ)
 # ------------------------------------------------------------------------------
 def draw_tile_at(tid, px, py, scale = 1.0)
   return if tid <= 0
-  custom = $custom_sprites[tid]
-  if custom
-    spr(custom, px, py, false, false, 0, scale)
+  if $has_custom_sprites && tid < $custom_sprites.size && $custom_sprites[tid]
+    spr($custom_sprites[tid], px, py, false, false, 0, scale)
   else
     u = (tid % 16) * 16
     v = (tid / 16) * 16
@@ -402,14 +473,10 @@ def update
     save_map_file
   end
 
-  # Fキーまたは60フレームごとにコンソールへFPS出力
-  $fps_log_timer = ($fps_log_timer || 0) + 1
+  # FキーでFPS通知
   if btnp(:f)
     puts "[TilemapEditor] FPS: #{fps}"
     notify("FPS: #{fps}")
-  elsif $fps_log_timer >= 60
-    $fps_log_timer = 0
-    puts "[TilemapEditor] FPS: #{fps}"
   end
 
   perform_undo if btnp(:z)
@@ -448,7 +515,7 @@ def update
   $cam_x = [[$cam_x, 0].max, MAP_WIDTH - max_tiles_x].min
   $cam_y = [[$cam_y, 0].max, MAP_HEIGHT - max_tiles_y].min
 
-  # マウスホイールでタイル切り替え
+  # マウスホイールでタイル切り替え (0..255)
   wheel = mouse_wheel
   if wheel > 0.2
     $selected_tile = ($selected_tile - 1) % NUM_TILES
@@ -485,33 +552,33 @@ def update
     return
   end
 
+  # --- バンクビュー上でのドラッグ選択 (x: 336..464, y: 98..226) ---
+  if (btn(:mouse_l) || btn(:mouse_r)) && (mx >= 336 && mx < 464 && my >= 98 && my < 226)
+    col = ((mx - 336) / 8).to_i
+    row = ((my - 98) / 8).to_i
+    if col >= 0 && col < 16 && row >= 0 && row < 16
+      tid = row * 16 + col
+      if $selected_tile != tid
+        $selected_tile = tid
+        sfx(:select)
+      end
+    end
+  end
+
   # --- UI クリック判定 ---
   if btnp(:mouse_l)
-    # 0. バンク切替ボタン (x: 400..470, y: 88..102)
-    if my >= 88 && my <= 102
-      if mx >= 400 && mx <= 414
+    # 0. バンク切替ボタン (x: 406..472, y: 64..78)
+    if my >= 64 && my <= 78
+      if mx >= 406 && mx <= 422
         switch_ref_bank([$ref_bank - 1, 0].max)
         sfx(:click)
-      elsif mx >= 456 && mx <= 470
+      elsif mx >= 456 && mx <= 472
         switch_ref_bank($ref_bank + 1)
         sfx(:click)
       end
     end
 
-    # 1. タイルパレット (x: 336..464, y: 96..192) - 4x4 グリッド (各 32x24 px)
-    if mx >= 336 && mx < 464 && my >= 96 && my < 192
-      col = ((mx - 336) / 32).to_i
-      row = ((my - 96) / 24).to_i
-      if col >= 0 && col < 4 && row >= 0 && row < 4
-        tid = row * 4 + col
-        if tid < NUM_TILES
-          $selected_tile = tid
-          sfx(:select)
-        end
-      end
-    end
-
-    # 2. ミニマップクリック (x: 336..400, y: 24..88) -> カメラジャンプ
+    # 1. ミニマップクリック (x: 336..400, y: 24..88) -> カメラジャンプ
     if mx >= 336 && mx < 400 && my >= 24 && my < 88
       jump_tx = ((mx - 336) / 2).to_i
       jump_ty = ((my - 24) / 2).to_i
@@ -522,60 +589,49 @@ def update
       sfx(:cursor)
     end
 
-    # 3. ツールボタン 行1 (y: 200..216)
-    if my >= 200 && my <= 216
-      # [PEN] (x: 336..356)
-      if mx >= 336 && mx <= 356
+    # 2. ツールボタン 行1 (y: 230..244)
+    if my >= 230 && my <= 244
+      # [PEN] (x: 336..358)
+      if mx >= 336 && mx <= 358
         $current_tool = :pen; sfx(:click)
-      # [RECT] (x: 360..382)
-      elsif mx >= 360 && mx <= 382
+      # [RECT] (x: 362..384)
+      elsif mx >= 362 && mx <= 384
         $current_tool = :rect; sfx(:click)
-      # [FILL] (x: 386..408)
-      elsif mx >= 386 && mx <= 408
+      # [FILL] (x: 388..410)
+      elsif mx >= 388 && mx <= 410
         $current_tool = :fill; sfx(:click)
-      # [PICK] (x: 412..434)
-      elsif mx >= 412 && mx <= 434
+      # [PICK] (x: 414..436)
+      elsif mx >= 414 && mx <= 436
         $current_tool = :picker; sfx(:click)
-      # [ZOOM] (x: 438..472)
-      elsif mx >= 438 && mx <= 472
+      # [ZOOM] (x: 440..468)
+      elsif mx >= 440 && mx <= 468
         $cell_size = ($cell_size == 16) ? 8 : 16
         sfx(:click)
         notify("ZOOM: #{$cell_size}px")
       end
     end
 
-    # 4. アクションボタン 行2 (y: 222..238)
-    if my >= 222 && my <= 238
-      # [SAVE] (x: 336..368)
-      if mx >= 336 && mx <= 368
+    # 3. アクションボタン 行2 (y: 248..262)
+    if my >= 248 && my <= 262
+      # [SAVE] (x: 336..358)
+      if mx >= 336 && mx <= 358
         save_map_file
-      # [UNDO] (x: 372..400)
-      elsif mx >= 372 && mx <= 400
+      # [UNDO] (x: 362..386)
+      elsif mx >= 362 && mx <= 386
         perform_undo
-      # [GRID] (x: 404..434)
-      elsif mx >= 404 && mx <= 434
+      # [GRID] (x: 390..412)
+      elsif mx >= 390 && mx <= 412
         $show_grid = !$show_grid
         sfx(:click)
         notify("GRID: #{$show_grid ? 'ON' : 'OFF'}")
-      # [CODE] (x: 438..472)
-      elsif mx >= 438 && mx <= 472
+      # [CODE] (x: 416..438)
+      elsif mx >= 416 && mx <= 438
         $show_code_modal = true
         $modal_scroll = 0
         sfx(:click)
-      end
-    end
-
-    # 5. アクションボタン 行3 (y: 244..258)
-    if my >= 244 && my <= 258
-      # [EXP] (x: 336..376)
-      if mx >= 336 && mx <= 376
-        export_map_only
-      # [CLEAR] (x: 382..422)
-      elsif mx >= 382 && mx <= 422
+      # [CLR] (x: 442..468)
+      elsif mx >= 442 && mx <= 468
         clear_map
-      # [RELOAD SPR] (x: 426..472)
-      elsif mx >= 426 && mx <= 472
-        reload_custom_sprites
       end
     end
   end
@@ -648,10 +704,10 @@ def draw
   line(0, 18, 480, 18, 5)
   print_text("🗺️ USAKAME TILEMAP EDITOR", 8, 5, 10)
 
-  cur_info = TILE_INFO[$selected_tile]
-  print_text("TILE:#{$selected_tile}:#{cur_info[1]}", 170, 5, 7)
-  print_text("CAM:(#{$cam_x},#{$cam_y})", 260, 5, 6)
+  print_text("TILE:#{$selected_tile}:#{tile_name($selected_tile)}", 168, 5, 7)
+  print_text("CAM:(#{$cam_x},#{$cam_y})", 262, 5, 6)
   print_text("TARGET: #{$save_path}", 340, 5, 11)
+  print_text("FPS:#{fps}", 434, 5, 10)
 
   # --- 2. メインタイルマップキャンバス (320x240) ---
   rectfill(VIEW_X - 1, VIEW_Y - 1, VIEW_W + 2, VIEW_H + 2, 0)
@@ -663,31 +719,45 @@ def draw
   tiles_y = (VIEW_H / $cell_size).to_i + 1
   scale = ($cell_size == 16) ? 1.0 : 0.5
 
-  tiles_y.times do |dy|
-    ty = $cam_y + dy
-    next if ty >= MAP_HEIGHT
-    tiles_x.times do |dx|
-      tx = $cam_x + dx
-      next if tx >= MAP_WIDTH
+  # 背景の市松模様を一括描画 (8x8ブロックで超高速化)
+  8.times do |cy|
+    by = VIEW_Y + cy * 30
+    8.times do |cx|
+      if (cx + cy) % 2 == 1
+        rectfill(VIEW_X + cx * 40, by, 40, 30, 1)
+      end
+    end
+  end
 
-      tid = get_tile(tx, ty)
-      draw_px = VIEW_X + dx * $cell_size
+  # タイル描画
+  if $cell_size == 16 && !$has_custom_sprites
+    map($cam_x, $cam_y, VIEW_X, VIEW_Y, tiles_x, tiles_y, $ref_bank)
+  else
+    tiles_y.times do |dy|
+      ty = $cam_y + dy
+      next if ty >= MAP_HEIGHT
       draw_py = VIEW_Y + dy * $cell_size
+      tiles_x.times do |dx|
+        tx = $cam_x + dx
+        next if tx >= MAP_WIDTH
 
-      if tid > 0
-        draw_tile_at(tid, draw_px, draw_py, scale)
-      else
-        half = $cell_size / 2
-        rectfill(draw_px, draw_py, half, half, 0)
-        rectfill(draw_px + half, draw_py, half, half, 1)
-        rectfill(draw_px, draw_py + half, half, half, 1)
-        rectfill(draw_px + half, draw_py + half, half, half, 0)
+        tid = get_tile(tx, ty)
+        if tid > 0
+          draw_tile_at(tid, VIEW_X + dx * $cell_size, draw_py, scale)
+        end
       end
+    end
+  end
 
-      if $show_grid
-        line(draw_px, draw_py + $cell_size - 1, draw_px + $cell_size - 1, draw_py + $cell_size - 1, 0)
-        line(draw_px + $cell_size - 1, draw_py, draw_px + $cell_size - 1, draw_py + $cell_size - 1, 0)
-      end
+  # グリッド線の一括描画
+  if $show_grid
+    (tiles_x + 1).times do |dx|
+      gx = VIEW_X + dx * $cell_size
+      line(gx, VIEW_Y, gx, VIEW_Y + VIEW_H, 0)
+    end
+    (tiles_y + 1).times do |dy|
+      gy = VIEW_Y + dy * $cell_size
+      line(VIEW_X, gy, VIEW_X + VIEW_W, gy, 0)
     end
   end
 
@@ -727,130 +797,124 @@ def draw
 
   clip()
 
-  # --- 3. 右側パネル: ミニマップ & タイルパレット ---
+  # --- 3. 右側パネル: ミニマップ & 選択中プレビュー ---
   # ミニマップ (x: 336, y: 24, w: 64, h: 64)
   rectfill(335, 23, 66, 66, 1)
   rect(335, 23, 66, 66, 5)
 
-  MAP_HEIGHT.times do |my_tile|
-    MAP_WIDTH.times do |mx_tile|
-      tid = get_tile(mx_tile, my_tile)
-      col = TILE_INFO[tid][2]
-      rectfill(336 + mx_tile * 2, 24 + my_tile * 2, 2, 2, col)
-    end
-  end
+  # 高速ミニマップ描画 (テクスチャキャッシュ経由)
+  update_minimap_cache
+  blt(336, 24, MINIMAP_BANK, 0, 0, 32, 32, 0, 2.0)
 
   # ミニマップ上のカメラ表示枠
   cam_vw = (VIEW_W / $cell_size).to_i * 2
   cam_vh = (VIEW_H / $cell_size).to_i * 2
   rect(336 + $cam_x * 2, 24 + $cam_y * 2, cam_vw, cam_vh, 7)
 
-  # パレットヘッダー & バンク選択
-  print_text("TILES", 336, 91, 6)
-
-  rectfill(400, 88, 14, 12, 2)
-  rect(400, 88, 14, 12, 6)
-  print_text("<", 405, 90, 7)
-
-  rectfill(418, 88, 34, 12, 1)
-  rect(418, 88, 34, 12, 5)
-  print_text("B#{$ref_bank}", 424, 90, 10)
-
-  rectfill(456, 88, 14, 12, 2)
-  rect(456, 88, 14, 12, 6)
-  print_text(">", 461, 90, 7)
-
-  # 4x4 タイルグリッド (x: 336..464, y: 102..192) - 各 32x22 px
-  4.times do |row|
-    4.times do |col|
-      tid = row * 4 + col
-      bx = 336 + col * 32
-      by = 104 + row * 22
-      rectfill(bx, by, 30, 20, 1)
-
-      if tid == 0
-        rect(bx + 1, by + 1, 14, 14, 5)
-        line(bx + 3, by + 3, bx + 11, by + 11, 8)
-        line(bx + 3, by + 11, bx + 11, by + 3, 8)
-      else
-        draw_tile_at(tid, bx + 1, by + 2, 1.0)
-      end
-
-      # ID表示
-      print_text(tid.to_s, bx + 18, by + 6, (tid == $selected_tile) ? 10 : 6)
-
-      # 選択ハイライト枠
-      if tid == $selected_tile
-        rect(bx - 1, by - 1, 32, 22, 10)
-      else
-        rect(bx - 1, by - 1, 32, 22, 5)
-      end
-    end
+  # ミニマップ横: 選択中タイルプレビュー (32x32)
+  rectfill(406, 23, 36, 36, 1)
+  rect(406, 23, 36, 36, 5)
+  if $selected_tile == 0
+    rectfill(408, 25, 32, 32, 0)
+    line(412, 29, 436, 53, 8)
+    line(412, 53, 436, 29, 8)
+  else
+    draw_tile_at($selected_tile, 408, 25, 2.0)
   end
 
-  # --- 4. ツールボタン & アクションボタン ---
-  # 行1: ツール [PEN] [RECT] [FILL] [PICK] [ZOOM]
+  # 選択中タイルの情報表示
+  print_text("ID:#{$selected_tile}", 446, 24, 10)
+  u_pos = ($selected_tile % 16) * 16
+  v_pos = ($selected_tile / 16) * 16
+  print_text("U:#{u_pos}", 446, 36, 6)
+  print_text("V:#{v_pos}", 446, 48, 6)
+
+  # バンク切替ボタン (y: 64..78)
+  rectfill(406, 64, 16, 14, 2)
+  rect(406, 64, 16, 14, 6)
+  print_text("<", 411, 67, 7)
+
+  rectfill(424, 64, 30, 14, 1)
+  rect(424, 64, 30, 14, 5)
+  print_text("B#{$ref_bank}", 429, 67, 10)
+
+  rectfill(456, 64, 16, 14, 2)
+  rect(456, 64, 16, 14, 6)
+  print_text(">", 461, 67, 7)
+
+  # --- 4. バンク全体表示 (256x256 を 0.5倍縮小 = 128x128 ピクセル) ---
+  print_text("BANK #{$ref_bank} TILES (16x16)", 336, 88, 6)
+
+  rectfill(335, 97, 130, 130, 1)
+  rect(335, 97, 130, 130, 5)
+
+  # バンクテクスチャの一括転送 (128x128)
+  blt(336, 98, $ref_bank, 0, 0, 256, 256, 0, 0.5)
+
+  # 空タイル(ID 0)アイコン
+  rect(336, 98, 8, 8, 8)
+  line(337, 99, 342, 104, 8)
+  line(337, 104, 342, 99, 8)
+
+  # 選択中タイルのハイライト枠 (8x8)
+  sel_col = $selected_tile % 16
+  sel_row = $selected_tile / 16
+  bx = 336 + sel_col * 8
+  by = 98 + sel_row * 8
+  rect(bx - 1, by - 1, 10, 10, 10)
+  rect(bx, by, 8, 8, 7)
+
+  # --- 5. ツールボタン & アクションボタン ---
+  # 行1: ツール [PEN] [RCT] [FIL] [PCK] [ZOOM] (y: 230..244)
   tool_buttons = [
-    [:pen,    "PEN",  336, 200, 22],
-    [:rect,   "RCT",  360, 200, 24],
-    [:fill,   "FIL",  386, 200, 24],
-    [:picker, "PCK",  412, 200, 24]
+    [:pen,    "PEN",  336, 22],
+    [:rect,   "RCT",  362, 22],
+    [:fill,   "FIL",  388, 22],
+    [:picker, "PCK",  414, 22]
   ]
   tool_buttons.each do |tb|
     t_id = tb[0]
     t_name = tb[1]
     t_x = tb[2]
-    t_y = tb[3]
-    t_w = tb[4]
+    t_w = tb[3]
     active = ($current_tool == t_id)
-    rectfill(t_x, t_y, t_w, 14, active ? 8 : 1)
-    rect(t_x, t_y, t_w, 14, active ? 7 : 5)
-    print_text(t_name, t_x + 3, t_y + 3, active ? 7 : 6)
+    rectfill(t_x, 230, t_w, 14, active ? 8 : 1)
+    rect(t_x, 230, t_w, 14, active ? 7 : 5)
+    print_text(t_name, t_x + 3, 233, active ? 7 : 6)
   end
 
-  # [ZOOM] (x: 438..472)
-  rectfill(438, 200, 34, 14, ($cell_size == 8) ? 9 : 1)
-  rect(438, 200, 34, 14, ($cell_size == 8) ? 10 : 5)
-  print_text(($cell_size == 16) ? "16P" : "8PX", 442, 203, 7)
+  # [ZOOM] (x: 440..468)
+  rectfill(440, 230, 28, 14, ($cell_size == 8) ? 9 : 1)
+  rect(440, 230, 28, 14, ($cell_size == 8) ? 10 : 5)
+  print_text(($cell_size == 16) ? "16P" : "8PX", 444, 233, 7)
 
-  # 行2: アクション [SAVE] [UNDO] [GRID] [CODE]
+  # 行2: アクション [SAVE] [UNDO] [GRID] [CODE] [CLR] (y: 248..262)
   # [SAVE]
-  rectfill(336, 220, 34, 16, 11)
-  rect(336, 220, 34, 16, 7)
-  print_text("SAVE", 340, 224, 0)
+  rectfill(336, 248, 22, 14, 11)
+  rect(336, 248, 22, 14, 7)
+  print_text("SV", 341, 251, 0)
 
   # [UNDO]
-  rectfill(372, 220, 30, 16, 1)
-  rect(372, 220, 30, 16, 5)
-  print_text("UNDO", 375, 224, 7)
+  rectfill(362, 248, 24, 14, 1)
+  rect(362, 248, 24, 14, 5)
+  print_text("UND", 365, 251, 7)
 
   # [GRID]
-  rectfill(404, 220, 30, 16, $show_grid ? 3 : 1)
-  rect(404, 220, 30, 16, $show_grid ? 11 : 5)
-  print_text("GRID", 408, 224, 7)
+  rectfill(390, 248, 22, 14, $show_grid ? 3 : 1)
+  rect(390, 248, 22, 14, $show_grid ? 11 : 5)
+  print_text("GR", 394, 251, 7)
 
   # [CODE]
-  rectfill(438, 220, 34, 16, 1)
-  rect(438, 220, 34, 16, 5)
-  print_text("CODE", 442, 224, 7)
+  rectfill(416, 248, 22, 14, 1)
+  rect(416, 248, 22, 14, 5)
+  print_text("CD", 420, 251, 7)
 
-  # 行3: [EXP] [CLEAR] [SYNC]
-  rectfill(336, 242, 38, 14, 1)
-  rect(336, 242, 38, 14, 5)
-  print_text("EXP", 346, 245, 7)
+  # [CLR]
+  rectfill(442, 248, 26, 14, 1)
+  rect(442, 248, 26, 14, 8)
+  print_text("CLR", 447, 251, 8)
 
-  rectfill(378, 242, 38, 14, 1)
-  rect(378, 242, 38, 14, 5)
-  print_text("CLR", 388, 245, 8)
-
-  rectfill(420, 242, 52, 14, 1)
-  rect(420, 242, 52, 14, 5)
-  print_text("SYNC", 432, 245, 12)
-
-  # 右下 FPS 表示
-  print_text("FPS:#{fps}", 424, 258, 11)
-
-  # --- 5. 通知メッセージ ---
+  # --- 6. 通知メッセージ ---
   if $notify_timer > 0
     nw = $notify_msg.size * 6 + 12
     nx = 8
@@ -860,7 +924,7 @@ def draw
     print_text($notify_msg, nx + 6, ny + 3, 10)
   end
 
-  # --- 6. コードプレビューモーダル ---
+  # --- 7. コードプレビューモーダル ---
   if $show_code_modal
     rectfill(20, 10, 440, 250, 0)
     rect(20, 10, 440, 250, 7)

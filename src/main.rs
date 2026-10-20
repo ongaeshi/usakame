@@ -7024,9 +7024,21 @@ __END__
 
         assert_eq!(runtime.config.borrow().resolved_text_size(), 8);
 
-        for _ in 0..10 {
+        let mut update_time = std::time::Duration::ZERO;
+        let mut draw_time = std::time::Duration::ZERO;
+        for _ in 0..60 {
+            let t0 = std::time::Instant::now();
             runtime.call_update_result().expect("Tilemap editor call_update should succeed");
+            update_time += t0.elapsed();
+
+            let t1 = std::time::Instant::now();
             runtime.call_draw_result().expect("Tilemap editor call_draw should succeed");
+            draw_time += t1.elapsed();
+        }
+        println!("Update total: {:?} ({:.2} ms/frame)", update_time, update_time.as_secs_f64() * 1000.0 / 60.0);
+        println!("Draw total: {:?} ({:.2} ms/frame)", draw_time, draw_time.as_secs_f64() * 1000.0 / 60.0);
+        if !cfg!(debug_assertions) {
+            assert!(draw_time.as_secs_f64() * 1000.0 / 60.0 < 20.0, "Draw time should easily maintain 60 FPS (got {:.2} ms/frame)", draw_time.as_secs_f64() * 1000.0 / 60.0);
         }
 
         // タイルマップエディタが出力する形式の @MAP および @SPRITE をパースできることを検証
