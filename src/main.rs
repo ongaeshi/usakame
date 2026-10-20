@@ -4575,8 +4575,17 @@ impl GameRuntime {
         vm.consts.insert("ARGV".to_string(), argv_obj.clone());
         vm.globals.insert("$ARGV".to_string(), argv_obj);
 
-        let sprites = Rc::new(RefCell::new(HashMap::new()));
-        let banks = Rc::new(RefCell::new(HashMap::new()));
+        if !headless {
+            for sprite in sprites_map.values_mut() {
+                sprite.build_texture();
+            }
+            for bank in banks_map.values_mut() {
+                bank.build_texture();
+            }
+        }
+
+        let sprites = Rc::new(RefCell::new(sprites_map));
+        let banks = Rc::new(RefCell::new(banks_map));
         let active_spr_bank = Rc::new(RefCell::new(0));
         let active_map_bank = Rc::new(RefCell::new(0));
         let tilemap = Rc::new(RefCell::new(tail_map.clone()));
@@ -4607,22 +4616,26 @@ impl GameRuntime {
         vm.run()
             .map_err(|e| format!("Failed to run top-level Ruby script: {:?}", e))?;
 
-        parse_ruby_sprites_global(&vm, &mut sprites_map, &emoji_atlas.borrow());
+        let mut current_sprites = sprites.borrow().clone();
+        parse_ruby_sprites_global(&vm, &mut current_sprites, &emoji_atlas.borrow());
         parse_ruby_map_global(&vm, &mut tilemap.borrow_mut());
         sound::parse_ruby_sounds_globals(&vm, &mut sfx_map, &mut music_map);
         sound_bank
             .borrow_mut()
             .update_definitions(sfx_map, music_map);
         if !headless {
-            for sprite in sprites_map.values_mut() {
-                sprite.build_texture();
+            for sprite in current_sprites.values_mut() {
+                if sprite.texture.is_none() {
+                    sprite.build_texture();
+                }
             }
-            for bank in banks_map.values_mut() {
-                bank.build_texture();
+            for bank in banks.borrow_mut().values_mut() {
+                if bank.texture.is_none() {
+                    bank.build_texture();
+                }
             }
         }
-        *sprites.borrow_mut() = sprites_map;
-        *banks.borrow_mut() = banks_map;
+        *sprites.borrow_mut() = current_sprites;
 
         let initial_globals = snapshot_globals(&vm);
         let initial_tail_map = tilemap.borrow().clone();
@@ -6482,6 +6495,7 @@ ch0 T120 L4 O4 c d e f
                 .expect("Sprite editor should initialize with args");
 
         assert_eq!(runtime.config.borrow().resolved_text_size(), 8);
+        assert!(runtime.banks.borrow().contains_key(&0), "Bank 0 should be retained in runtime right after initialization");
 
         for _ in 0..10 {
             runtime.call_update_result().expect("call_update should succeed");
