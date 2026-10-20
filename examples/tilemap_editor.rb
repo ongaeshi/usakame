@@ -86,11 +86,20 @@ $cached_export_text = ""
 # ------------------------------------------------------------------------------
 # ターゲットファイル検出 & 初期ロード
 # ------------------------------------------------------------------------------
+def is_numeric_arg?(s)
+  return false if s.nil? || s.empty?
+  s.size.times do |i|
+    ch = s[i]
+    return false if ch < "0" || ch > "9"
+  end
+  true
+end
+
 $target_path = "game.rb"
 $ref_bank = 0
 
 if ARGV && ARGV.size > 0 && ARGV[0]
-  if ARGV[0] =~ /^[0-9]+$/
+  if is_numeric_arg?(ARGV[0])
     $ref_bank = ARGV[0].to_i
   else
     $target_path = ARGV[0]

@@ -6293,7 +6293,8 @@ ch0 T120 L4 O4 c d e f
                 .expect("examples/sprite_editor.rb should compile");
 
         let mut runtime =
-            GameRuntime::new(&tail_data, &mrb_bytes, true).expect("Sprite editor should initialize");
+            GameRuntime::new_with_args(&tail_data, &mrb_bytes, true, &["game.rb".to_string()])
+                .expect("Sprite editor should initialize with args");
 
         assert_eq!(runtime.config.borrow().resolved_text_size(), 8);
 

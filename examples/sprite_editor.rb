@@ -84,10 +84,19 @@ $bank_pixels = Array.new(BANK_SIZE * BANK_SIZE, nil)
 # ------------------------------------------------------------------------------
 # ターゲットファイル検出 & バンク指定
 # ------------------------------------------------------------------------------
+def is_numeric_arg?(s)
+  return false if s.nil? || s.empty?
+  s.size.times do |i|
+    ch = s[i]
+    return false if ch < "0" || ch > "9"
+  end
+  true
+end
+
 $target_path = "game.rb"
 if ARGV && ARGV.size > 0 && ARGV[0]
   # 第1引数が数値ならバンク番号、それ以外ならパス
-  if ARGV[0] =~ /^[0-9]+$/
+  if is_numeric_arg?(ARGV[0])
     $current_bank = ARGV[0].to_i
   else
     $target_path = ARGV[0]
@@ -829,11 +838,11 @@ def draw
     print_text("--- BANK DATA PREVIEW (Click anywhere to close) ---", 40, 28, 10)
     print_text("@BANK #{$current_bank}", 40, 44, 7)
     b64 = bank_to_b64_png($bank_pixels) || ""
-    lines = b64.scan(/.{1,64}/)
-    lines.each_with_index do |pl, i|
-      break if i > 16
-      print_text(pl, 40, 58 + i * 10, 6)
+    16.times do |i|
+      chunk = b64[i * 64, 64]
+      break if chunk.nil? || chunk.empty?
+      print_text(chunk, 40, 58 + i * 10, 6)
     end
-    print_text("... (truncated)", 40, 58 + 17 * 10, 5) if lines.size > 17
+    print_text("... (truncated)", 40, 58 + 16 * 10, 5) if b64.size > 16 * 64
   end
 end
