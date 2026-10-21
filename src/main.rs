@@ -7328,6 +7328,37 @@ save_file($save, $map_text)
     }
 
     #[test]
+    fn test_rabbit_knight_example_script() {
+        let script = std::path::Path::new("examples/rabbit_knight.rb");
+        assert!(script.exists());
+
+        let (_full_src, tail_data, mrb_bytes) =
+            cli::compile_ruby_script_file(script).expect("rabbit_knight.rb should compile");
+
+        let mut runtime =
+            GameRuntime::new(&tail_data, &mrb_bytes, true).expect("rabbit_knight.rb should initialize");
+
+        // スプライト 0〜5 (うさぎ剣士) と 6〜8 (タイル) が存在すること
+        for id in 0..=8 {
+            assert!(
+                runtime.sprites.borrow().contains_key(&id),
+                "Sprite {} should be defined",
+                id
+            );
+        }
+
+        // 複数フレーム実行 (update と draw)
+        for _ in 0..15 {
+            runtime
+                .call_update_result()
+                .expect("rabbit_knight update should succeed");
+            runtime
+                .call_draw_result()
+                .expect("rabbit_knight draw should succeed");
+        }
+    }
+
+    #[test]
     fn test_bank_parse_and_sprite_sync() {
         let tail = "@SPRITE 0\n7777\n7777\n@SPRITE 1\n8888\n8888\n";
         let (sprites, banks) = parse_tail_resources_full(tail, None);

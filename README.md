@@ -48,6 +48,9 @@ cargo build --release
 # サウンドデモの実行（上下キーでSE選択、Zで再生、XでBGM再生）
 uk run examples/sound.rb
 
+# うさぎ剣士の四方向歩行 & タイルマップ壁衝突デモ
+uk run examples/rabbit_knight.rb
+
 # サバイバルアクションゲーム「USAKAME SURVIVORS」の実行
 uk run game.rb
 
