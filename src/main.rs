@@ -7356,6 +7356,16 @@ save_file($save, $map_text)
                 .call_draw_result()
                 .expect("rabbit_knight draw should succeed");
         }
+
+        // can_move_to? (移動判定) が正常に動作することを検証
+        let can_move = mrb_funcall(
+            &mut runtime.vm,
+            None,
+            "can_move_to?",
+            &[Rc::new(RObject::integer(32)), Rc::new(RObject::integer(32))],
+        )
+        .expect("can_move_to? should succeed");
+        assert_eq!(can_move.as_ref(), &RObject::boolean(true));
     }
 
     #[test]

@@ -74,9 +74,9 @@ def can_move_to?(nx, ny)
   y1 = (ny + 15) / 16
 
   return false if solid_tile?(mget(x0, y0))
-  return false if solid_tile?(x1, y0)
-  return false if solid_tile?(x0, y1)
-  return false if solid_tile?(x1, y1)
+  return false if solid_tile?(mget(x1, y0))
+  return false if solid_tile?(mget(x0, y1))
+  return false if solid_tile?(mget(x1, y1))
   true
 end
 
