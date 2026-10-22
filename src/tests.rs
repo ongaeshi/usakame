@@ -2230,3 +2230,31 @@ fn test_tiny_dungeon_example_script() {
     assert_eq!(can_walk.as_ref(), &RObject::boolean(true));
 }
 
+#[test]
+fn test_png_backed_resource_read_only_in_sprite_editor() {
+    // 外部 PNG 参照リソースの判定テスト
+    assert!(check_resource_read_only("examples/tiny_dungeon.spr"));
+    assert!(check_resource_read_only("examples/tiny_dungeon.rb"));
+    assert!(check_resource_read_only("examples/tiny_dungeon.png"));
+    assert!(!check_resource_read_only("game.rb"));
+
+    // スプライトエディタで tiny_dungeon.rb を開いて正常に読み込み専用として起動・描画できること
+    let (_, tail_data, mrb_bytes) =
+        cli::compile_ruby_script_file(std::path::Path::new("examples/sprite_editor.rb"))
+            .expect("examples/sprite_editor.rb should compile");
+
+    let mut runtime =
+        GameRuntime::new_with_args(&tail_data, &mrb_bytes, true, &["examples/tiny_dungeon.rb".to_string()])
+            .expect("Sprite editor should initialize with tiny_dungeon.rb");
+
+    for _ in 0..10 {
+        runtime.call_update_result().expect("call_update should succeed");
+        runtime.call_draw_result().expect("call_draw should succeed");
+    }
+
+    // $is_read_only グローバル変数が true であること
+    let is_ro = runtime.vm.globals.get("$is_read_only");
+    assert_eq!(is_ro.map(|v| v.as_ref().clone()), Some(RObject::boolean(true)));
+}
+
+

@@ -144,11 +144,16 @@ end
 
 # 起動時の読み込み
 load_source = ($save_path != $target_path && read_file($save_path)) ? $save_path : $target_path
+$is_read_only = is_resource_read_only(load_source) || is_resource_read_only($save_path) || is_resource_read_only($target_path)
 loaded_bank = load_resource_bank(load_source, $current_bank)
 
 if loaded_bank && loaded_bank.size == BANK_SIZE * BANK_SIZE
   update_bank($current_bank, loaded_bank)
-  notify("LOADED BANK #{$current_bank} FROM #{load_source}")
+  if $is_read_only
+    notify("LOADED BANK #{$current_bank} (READ-ONLY: PNG REFERENCE)")
+  else
+    notify("LOADED BANK #{$current_bank} FROM #{load_source}")
+  end
 else
   # サンプルうさぎスプライトをバンク0の (0, 0) に初期設定
   sample_usagi = [
@@ -189,6 +194,7 @@ def switch_bank(new_bank)
   $undo_stack.clear
 
   load_source = ($save_path != $target_path && read_file($save_path)) ? $save_path : $target_path
+  $is_read_only = is_resource_read_only(load_source) || is_resource_read_only($save_path) || is_resource_read_only($target_path)
   loaded = load_resource_bank(load_source, $current_bank)
   if loaded && loaded.size == BANK_SIZE * BANK_SIZE
     update_bank($current_bank, loaded)
@@ -202,6 +208,12 @@ end
 # 保存 & エクスポート処理
 # ------------------------------------------------------------------------------
 def save_to_target
+  if $is_read_only
+    sfx(:boom)
+    notify("READ ONLY: Cannot overwrite PNG-backed resource!")
+    return
+  end
+
   b64 = bank_to_b64_png(get_bank_pixels($current_bank))
   unless b64
     sfx(:boom)
@@ -577,10 +589,16 @@ def draw
   rect(324, 4, 16, 16, 6)
   print_text(">", 330, 8, 7)
 
-  # [SAVE] ボタン (緑)
-  rectfill(346, 4, 44, 16, 11)
-  rect(346, 4, 44, 16, 7)
-  print_text("SAVE", 356, 8, 0)
+  # [SAVE] ボタン (通常: 緑 / 読み込み専用: 灰色)
+  if $is_read_only
+    rectfill(346, 4, 44, 16, 5)
+    rect(346, 4, 44, 16, 6)
+    print_text("R-ONLY", 348, 8, 7)
+  else
+    rectfill(346, 4, 44, 16, 11)
+    rect(346, 4, 44, 16, 7)
+    print_text("SAVE", 356, 8, 0)
+  end
 
   # [EXP] ボタン
   rectfill(395, 4, 35, 16, 2)
@@ -777,6 +795,8 @@ def draw
 
   if $notify_timer > 0
     print_text("▶ #{$notify_msg}", 10, 256, 10)
+  elsif $is_read_only
+    print_text("🔒 READ-ONLY: Direct PNG reference (view-only). Edit PNG in external tool.", 10, 256, 10)
   else
     print_text("Ready. Bank #{$current_bank} | [SAVE] to write #{$save_path}. Hot-reload active.", 10, 256, 6)
   end

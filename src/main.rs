@@ -2100,6 +2100,58 @@ fn register_sound_api(vm: &mut VM, sound_bank: Rc<RefCell<sound::SoundBank>>) {
     );
 }
 
+/// 指定したリソースパス（または関連ファイル）が外部 PNG を直接参照しているタイプかどうか判定する。
+/// 外部 PNG 直接参照タイプのリソースは、スプライトエディタ等で上書き保存できない読み込み専用として扱う。
+pub fn check_resource_read_only(path_str: &str) -> bool {
+    if path_str.is_empty() {
+        return false;
+    }
+    let p = Path::new(path_str);
+    if p.extension().and_then(|s| s.to_str()).map(|s| s.eq_ignore_ascii_case("png")) == Some(true) {
+        return true;
+    }
+
+    let check_content = |content: &str| -> bool {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some(rest) = trimmed.strip_prefix("@BANK") {
+                let parts: Vec<&str> = rest.split_whitespace().collect();
+                if parts.len() >= 2 && parts[1].to_ascii_lowercase().ends_with(".png") {
+                    return true;
+                }
+            } else if let Some(rest) = trimmed.strip_prefix("@SHEET") {
+                let parts: Vec<&str> = rest.split_whitespace().collect();
+                for part in parts.iter().skip(1) {
+                    if part.to_ascii_lowercase().ends_with(".png") {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    };
+
+    if let Ok(content) = std::fs::read_to_string(p) {
+        if check_content(&content) {
+            return true;
+        }
+    }
+
+    if p.extension().and_then(|s| s.to_str()) == Some("rb") {
+        let spr_path = p.with_extension("spr");
+        if let Ok(content) = std::fs::read_to_string(&spr_path) {
+            if check_content(&content) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 fn register_engine_api(
     vm: &mut VM,
     sprites: Rc<RefCell<HashMap<i32, SpriteData>>>,
@@ -2442,6 +2494,32 @@ fn register_engine_api(
                     Ok(Rc::new(RObject::boolean(false)))
                 }
             }
+        }),
+    );
+
+    // is_resource_read_only(path) / resource_read_only?(path): リソースが外部PNG直接参照で読み込み専用かどうか判定
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "is_resource_read_only",
+        Box::new(|_vm, args| {
+            let path = args
+                .first()
+                .and_then(|v| String::try_from(v.as_ref()).ok())
+                .unwrap_or_default();
+            Ok(Rc::new(RObject::boolean(check_resource_read_only(&path))))
+        }),
+    );
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "resource_read_only?",
+        Box::new(|_vm, args| {
+            let path = args
+                .first()
+                .and_then(|v| String::try_from(v.as_ref()).ok())
+                .unwrap_or_default();
+            Ok(Rc::new(RObject::boolean(check_resource_read_only(&path))))
         }),
     );
 
