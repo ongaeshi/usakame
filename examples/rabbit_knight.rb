@@ -39,9 +39,9 @@ $initial_apples = [
   [32,  112],
   [112, 112],
   [208, 128],
-  [48,  192],
+  [48-32,  192],
   [112, 208],
-  [192, 192]
+  [192+16, 192+32]
 ]
 
 def init_apples
@@ -131,7 +131,7 @@ def update
   $anim_frame = ($anim_timer / 10) % 2
 
   # --- 移動 & 壁衝突判定 (X軸・Y軸の独立スライド処理) ---
-  move_speed = 2
+  move_speed = 1
 
   if dx != 0
     nx = $px + dx * move_speed
