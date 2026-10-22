@@ -291,6 +291,10 @@ uk encode se.wav --id 10
 ## 📜 ライセンス
 
 - エンジン本体: MIT License
+- コンパイラ・サードパーティ:
+  - [mruby-compiler2](https://github.com/hasumikin/mruby-compiler2) (HASUMI Hitoshi 氏) - MIT License
+  - [mruby-compiler2-sys](https://github.com/mruby/mruby-compiler2-sys) (Uchio Kondo 氏) - MIT License
+  - [Prism](https://github.com/ruby/prism) (Ruby Core Team) - MIT License
 - 内蔵フォント:
   - 美咲ゴシック (8x8): フリーフォント（門真 なほ 氏制作）
   - 東雲ゴシック (16x16 / 8x16): パブリックドメイン（古川 泰之 氏制作）
