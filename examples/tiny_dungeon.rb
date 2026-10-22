@@ -1,48 +1,77 @@
 # ==============================================================================
-# 🏰 Kenney Tiny Dungeon Demo (タイルマップ & ダンジョン探索サンプル) 🗡️
+# 🏰 Kenney Tiny Dungeon Demo (広大ダンジョン & 画面端スクロール探索) 🗡️
 # ------------------------------------------------------------------------------
 # 実行コマンド: uk run examples/tiny_dungeon.rb
 #
 # 特徴:
-#   - Kenney 氏制作のパブリックドメイン (CC0) 16x16 素材「Tiny Dungeon」を
-#     シングルスクリプト完結の @SHEET 形式で内蔵！
-#   - 操作: 矢印キー または WASD で移動
-#   - TAB キー: 「ゲームモード」と「132タイル全一覧リファレンス」の切り替え
-#   - 宝箱を開けるとコイン取得 SE が鳴り、中身が手に入る！
-#   - スライムやスケルトンなどの徘徊モンスター
+#   - 32x32 タイル (512x512 ピクセル) の広大なダンジョンマップ
+#   - プレイヤーが画面端 (マージン 72px) に近づくとカメラがスムーズにスクロール！
+#   - 右上にリアルタイム・ミニマップ (プレイヤー現在地レーダー付き)
+#   - 矢印キー または WASD で移動
+#   - 宝箱 (全9箇所) を開けてスコアを集めよう！
+#   - 徘徊するスライムとスケルトン
+#   - Z キー: 「ゲームモード」と「132タイル全一覧リファレンス」の切り替え
 # ==============================================================================
 
 config(
   width: 256,
   height: 256,
   scale: 2.0,
-  title: "🏰 Kenney Tiny Dungeon Explorer"
+  title: "🏰 Kenney Tiny Dungeon Explorer (Scroll Map)"
 )
+
+# --- ダンジョン寸法 ---
+MAP_COLS = 32
+MAP_ROWS = 32
+MAP_W = MAP_COLS * 16 # 512px
+MAP_H = MAP_ROWS * 16 # 512px
+VIEW_W = 256
+VIEW_H = 256
 
 # --- ゲームモード ---
 # :game = ダンジョン探索, :viewer = タイル一覧リファレンス
 $mode = :game
 
-# --- プレイヤー初期状態 ---
-$px = 64
-$py = 64
+# --- カメラ座標 ---
+$cam_x = 0
+$cam_y = 0
+
+# --- プレイヤー初期状態 (左上スタート部屋) ---
+$px = 48
+$py = 48
 $pdir = :right
 $score = 0
 $keys = 0
 $hp = 3
 
-# --- 宝箱 & アイテム状態 ---
+# --- 宝箱 & アイテム状態 (全9箇所) ---
 $chests = [
-  { x: 32,  y: 32,  opened: false, item: :gem },
-  { x: 192, y: 32,  opened: false, item: :key },
-  { x: 192, y: 192, opened: false, item: :coin },
-  { x: 48,  y: 192, opened: false, item: :potion }
+  # 部屋1: 左上エントランス
+  { x: 32,  y: 32,  opened: false },
+  { x: 112, y: 32,  opened: false },
+  # 部屋2: 右上大広間
+  { x: 320, y: 32,  opened: false },
+  { x: 448, y: 112, opened: false },
+  # 部屋3: 中央大回廊
+  { x: 256, y: 224, opened: false },
+  # 部屋4: 左下牢獄
+  { x: 48,  y: 360, opened: false },
+  { x: 128, y: 440, opened: false },
+  # 部屋5: 右下最深部 (黄金の宝物庫)
+  { x: 360, y: 360, opened: false },
+  { x: 448, y: 440, opened: false }
 ]
 
-# --- モンスター (スライム・スケルトン) ---
+# --- モンスター (スライム・スケルトン計6体) ---
 $monsters = [
-  { x: 128, y: 80,  vx: 0.5, vy: 0,   id: 109, name: "Slime", dir: 1, min_x: 96, max_x: 160 },
-  { x: 160, y: 144, vx: 0,   vy: 0.5, id: 111, name: "Skeleton", dir: 1, min_y: 112, max_y: 176 }
+  # スライム (左右徘徊)
+  { x: 180, y: 80,  vx: 0.6, vy: 0,   id: 109, dir: 1, min_x: 130, max_x: 230 },
+  { x: 240, y: 240, vx: 0.5, vy: 0,   id: 109, dir: 1, min_x: 190, max_x: 300 },
+  { x: 80,  y: 400, vx: 0.5, vy: 0,   id: 109, dir: 1, min_x: 40,  max_x: 140 },
+  # スケルトン (上下徘徊)
+  { x: 380, y: 64,  vx: 0,   vy: 0.5, id: 111, dir: 1, min_y: 32,  max_y: 120 },
+  { x: 144, y: 240, vx: 0,   vy: 0.6, id: 111, dir: 1, min_y: 200, max_y: 300 },
+  { x: 416, y: 380, vx: 0.5, vy: 0,   id: 111, dir: 1, min_x: 340, max_x: 440 }
 ]
 
 # --- エフェクト (パーティクル) ---
@@ -59,6 +88,9 @@ end
 
 # 足元コライダー判定
 def can_walk?(nx, ny)
+  # マップ境界外判定
+  return false if nx < 0 || ny < 0 || nx + 16 > MAP_W || ny + 16 > MAP_H
+
   # 16x16 スプライトの足元領域 (中央 12x8)
   tx0 = (nx + 2) / 16
   tx1 = (nx + 13) / 16
@@ -77,22 +109,16 @@ def add_sparkle(x, y, col = 10)
     $particles << {
       x: x + 8,
       y: y + 8,
-      vx: (rand(11) - 5) * 0.3,
-      vy: (rand(11) - 5) * 0.3 - 0.5,
+      vx: (rand(11) - 5) * 0.4,
+      vy: (rand(11) - 5) * 0.4 - 0.6,
       col: col,
-      life: 15
+      life: 18
     }
   end
 end
 
 def update
-  # TAB キーでビューアモードと探索モードをトグル
-  if btnp(:x) || btnp(4) # Xキーまたはスペースキーでもトグル可能
-    # 何かのアクション
-  end
-
   if btnp(:mouse_r) || btnp(:z)
-    # Zキーでビューア切り替え
     $mode = ($mode == :game) ? :viewer : :game
     sfx(:select)
   end
@@ -126,6 +152,28 @@ def update_game
     $py += dy
   end
 
+  # --- 画面端スクロールカメラ処理 (マージン 72px) ---
+  margin_x = 72
+  margin_y = 72
+
+  # 左右端スクロール
+  if $px - $cam_x < margin_x
+    $cam_x = $px - margin_x
+  elsif $px - $cam_x > VIEW_W - margin_x - 16
+    $cam_x = $px - (VIEW_W - margin_x - 16)
+  end
+
+  # 上下端スクロール
+  if $py - $cam_y < margin_y
+    $cam_y = $py - margin_y
+  elsif $py - $cam_y > VIEW_H - margin_y - 16
+    $cam_y = $py - (VIEW_H - margin_y - 16)
+  end
+
+  # マップ外へ出ないようにクランプ
+  $cam_x = [[$cam_x, 0].max, MAP_W - VIEW_W].min
+  $cam_y = [[$cam_y, 0].max, MAP_H - VIEW_H].min
+
   # 宝箱との当たり判定 (12px 近接)
   $chests.each do |ch|
     if !ch[:opened]
@@ -152,13 +200,6 @@ def update_game
         m[:dir] *= -1
       end
     end
-
-    # プレイヤーとの接触判定
-    dist = ($px - m[:x]).abs + ($py - m[:y]).abs
-    if dist < 10
-      # 接触音
-      # sfx(:hurt)
-    end
   end
 end
 
@@ -173,37 +214,62 @@ end
 def draw_game
   cls(0)
 
-  # タイルマップ一括描画 (16x16 セル = 256x256 ピクセル)
-  map(0, 0, 0, 0, 16, 16)
+  # 1. ワールド座標系カメラ設定
+  camera($cam_x, $cam_y)
 
-  # 宝箱の描画 (85: 閉じた宝箱, 86: 開いた宝箱)
+  # 2. タイルマップ一括描画 (32x32セル = 512x512px、画面外は内部で自動カリング)
+  map(0, 0, 0, 0, MAP_COLS, MAP_ROWS)
+
+  # 3. 宝箱の描画 (85: 閉じた宝箱, 86: 開いた宝箱)
   $chests.each do |ch|
     tile_id = ch[:opened] ? 86 : 85
     spr(tile_id, ch[:x], ch[:y])
   end
 
-  # モンスターの描画
+  # 4. モンスターの描画
   $monsters.each do |m|
     spr(m[:id], m[:x], m[:y], m[:dir] < 0)
   end
 
-  # プレイヤーの描画 (ID 96: ナイト / 勇者)
+  # 5. プレイヤーの描画 (ID 96: ナイト / 勇者)
   flip = ($pdir == :left)
   spr(96, $px, $py, flip)
 
-  # パーティクル描画
+  # 6. パーティクル描画
   $particles.each do |p|
     pset(p[:x], p[:y], p[:col])
   end
 
-  # HUD (スコア & 操作ヘルプ)
-  rectfill(0, 0, 256, 12, 1)
-  print_text("SCORE: #{$score}", 6, 2, 10)
-  print_text("HP: #{"♥" * $hp}", 100, 2, 8)
-  print_text("[Z]: VIEW TILES", 160, 2, 7)
+  # ============================================================================
+  # 画面固定 HUD 描画 (カメラを (0, 0) にリセット)
+  # ============================================================================
+  camera()
+
+  # 上部ステータスバー
+  rectfill(0, 0, 256, 14, 0)
+  line(0, 14, 256, 14, 1)
+  print_text("SCORE: #{$score}", 6, 3, 10)
+  print_text("HP: #{"♥" * $hp}", 90, 3, 8)
+  print_text("[Z]: TILES", 145, 3, 7)
+
+  # 右上ミニマップ (32x32 マップを 1セル=1px で表示)
+  # 背景枠: (218, 18, 34, 34)
+  rectfill(218, 18, 34, 34, 0)
+  rect(217, 17, 36, 36, 5)
+
+  # カメラ可動矩形の枠表示 (白点線)
+  cam_mx = 219 + ($cam_x / 16)
+  cam_my = 219 + ($cam_y / 16)
+  rect(cam_mx, cam_my, 16, 16, 6)
+
+  # プレイヤー位置 (点滅する黄色ドット)
+  pl_mx = 219 + ($px / 16)
+  pl_my = 219 + ($py / 16)
+  pset(pl_mx, pl_my, (rand(2) == 0 ? 10 : 7))
 end
 
 def draw_viewer
+  camera()
   cls(1)
   rectfill(0, 0, 256, 18, 0)
   print_text("Kenney Tiny Dungeon - 132 Tiles", 6, 5, 7)

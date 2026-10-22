@@ -2228,6 +2228,17 @@ fn test_tiny_dungeon_example_script() {
     )
     .expect("can_walk? should succeed");
     assert_eq!(can_walk.as_ref(), &RObject::boolean(true));
+
+    // 画面端スクロールのテスト (プレイヤーが右下へ移動するとカメラがスクロールすること)
+    runtime.vm.globals.insert("$px".to_string(), Rc::new(RObject::integer(300)));
+    runtime.vm.globals.insert("$py".to_string(), Rc::new(RObject::integer(300)));
+    runtime.call_update_result().expect("update should succeed");
+    runtime.call_draw_result().expect("draw should succeed");
+
+    let cam_x: i32 = runtime.vm.globals.get("$cam_x").unwrap().as_ref().try_into().unwrap();
+    let cam_y: i32 = runtime.vm.globals.get("$cam_y").unwrap().as_ref().try_into().unwrap();
+    assert!(cam_x > 0, "cam_x should scroll when player moves right");
+    assert!(cam_y > 0, "cam_y should scroll when player moves down");
 }
 
 #[test]
