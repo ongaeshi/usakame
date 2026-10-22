@@ -2101,3 +2101,86 @@ end
     let f2 = runtime.vm.globals.get("$frame").unwrap();
     assert!(matches!(f2.value, RValue::Integer(2)));
 }
+
+#[test]
+fn test_game_restart_resets_globals_and_state() {
+    let script = r#"
+$score = 100
+$x = 10
+
+def update
+  $score += 50
+  $x += 20
+end
+
+def draw
+end
+"#;
+    let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
+    let mut runtime = GameRuntime::new(&tail, &mrb, true).unwrap();
+
+    // 初期状態の確認
+    let s0: i32 = runtime.vm.globals.get("$score").unwrap().as_ref().try_into().unwrap();
+    let x0: i32 = runtime.vm.globals.get("$x").unwrap().as_ref().try_into().unwrap();
+    assert_eq!(s0, 100);
+    assert_eq!(x0, 10);
+
+    // 1フレーム実行
+    runtime.call_update();
+    let s1: i32 = runtime.vm.globals.get("$score").unwrap().as_ref().try_into().unwrap();
+    let x1: i32 = runtime.vm.globals.get("$x").unwrap().as_ref().try_into().unwrap();
+    assert_eq!(s1, 150);
+    assert_eq!(x1, 30);
+
+    // ホットリロード時は状態が継続される（普段の動作）
+    runtime.hot_reload(&tail, &mrb).expect("Hot reload should succeed");
+    let s_reloaded: i32 = runtime.vm.globals.get("$score").unwrap().as_ref().try_into().unwrap();
+    let x_reloaded: i32 = runtime.vm.globals.get("$x").unwrap().as_ref().try_into().unwrap();
+    assert_eq!(s_reloaded, 150);
+    assert_eq!(x_reloaded, 30);
+
+    // リスタート時は先頭からやり直される（初期値にリセットされる）
+    runtime.restart(&tail, &mrb).expect("Restart should succeed");
+    let s_restarted: i32 = runtime.vm.globals.get("$score").unwrap().as_ref().try_into().unwrap();
+    let x_restarted: i32 = runtime.vm.globals.get("$x").unwrap().as_ref().try_into().unwrap();
+    assert_eq!(s_restarted, 100);
+    assert_eq!(x_restarted, 10);
+}
+
+#[test]
+fn test_ruby_restart_api() {
+    let script = r#"
+def update
+  restart
+end
+
+def draw
+end
+"#;
+    let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
+    let mut runtime = GameRuntime::new(&tail, &mrb, true).unwrap();
+
+    assert!(!runtime.is_restart_requested());
+
+    // update 内で restart を呼び出す
+    runtime.call_update();
+    assert!(runtime.is_restart_requested());
+
+    runtime.reset_restart_request();
+    assert!(!runtime.is_restart_requested());
+
+    // reset エイリアスのテスト
+    let script_reset = r#"
+def update
+  reset
+end
+
+def draw
+end
+"#;
+    let (tail2, mrb2) = cli::compile_ruby_script_str(script_reset).unwrap();
+    let mut runtime2 = GameRuntime::new(&tail2, &mrb2, true).unwrap();
+    assert!(!runtime2.is_restart_requested());
+    runtime2.call_update();
+    assert!(runtime2.is_restart_requested());
+}

@@ -1195,6 +1195,18 @@ pub fn is_button_pressed(btn: ButtonId) -> bool {
     }
 }
 
+/// F5 キー、または Ctrl+R / Cmd+R (Super+R) が押されたか判定する
+pub fn is_restart_key_pressed() -> bool {
+    if is_key_pressed(KeyCode::F5) {
+        return true;
+    }
+    let ctrl_or_super = is_key_down(KeyCode::LeftControl)
+        || is_key_down(KeyCode::RightControl)
+        || is_key_down(KeyCode::LeftSuper)
+        || is_key_down(KeyCode::RightSuper);
+    ctrl_or_super && is_key_pressed(KeyCode::R)
+}
+
 /// OS ウィンドウ上のスクリーン座標 (mx, my) を、
 /// レターボックス比率（アスペクト比維持）に基づき 仮想画面 (virt_w x virt_h) の座標 (vx, vy) に変換する
 pub fn screen_to_virtual(
@@ -2065,9 +2077,32 @@ fn register_engine_api(
     bitmap_font: Rc<BitmapFont>,
     draw_state: Rc<RefCell<DrawState>>,
     config: Rc<RefCell<AppConfig>>,
+    restart_requested: Rc<RefCell<bool>>,
     headless: bool,
 ) {
     let obj_class = vm.object_class.clone();
+
+    // restart / reset: ゲームの先頭からのリスタートを要求する
+    let restart_flag_for_restart = restart_requested.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "restart",
+        Box::new(move |_vm, _args| {
+            *restart_flag_for_restart.borrow_mut() = true;
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
+    let restart_flag_for_reset = restart_requested;
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "reset",
+        Box::new(move |_vm, _args| {
+            *restart_flag_for_reset.borrow_mut() = true;
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
 
     // spr_bank(id = 0): spr の参照先バンクを設定
     let active_spr_bank_for_spr_bank = active_spr_bank.clone();
@@ -4436,6 +4471,7 @@ pub struct GameRuntime {
     pub draw_state: Rc<RefCell<DrawState>>,
     pub sound_bank: Rc<RefCell<sound::SoundBank>>,
     pub config: Rc<RefCell<AppConfig>>,
+    pub restart_requested: Rc<RefCell<bool>>,
     pub script_args: Vec<String>,
     initial_globals: HashMap<String, Rc<RObject>>,
     initial_tail_map: Tilemap,
@@ -4492,6 +4528,7 @@ impl GameRuntime {
             HashMap::new(),
         )));
         let config = Rc::new(RefCell::new(AppConfig::default()));
+        let restart_requested = Rc::new(RefCell::new(false));
 
         register_engine_api(
             &mut vm,
@@ -4504,6 +4541,7 @@ impl GameRuntime {
             bitmap_font.clone(),
             draw_state.clone(),
             config.clone(),
+            restart_requested.clone(),
             headless,
         );
         register_sound_api(&mut vm, sound_bank.clone());
@@ -4548,11 +4586,37 @@ impl GameRuntime {
             draw_state,
             sound_bank,
             config,
+            restart_requested,
             script_args: script_args.to_vec(),
             initial_globals,
             initial_tail_map,
             headless,
         })
+    }
+
+    pub fn is_restart_requested(&self) -> bool {
+        *self.restart_requested.borrow()
+    }
+
+    pub fn request_restart(&self) {
+        *self.restart_requested.borrow_mut() = true;
+    }
+
+    pub fn reset_restart_request(&self) {
+        *self.restart_requested.borrow_mut() = false;
+    }
+
+    /// ランタイムを初期状態から再生成してリスタートする（トップレベルを再実行し、グローバル変数も初期化）
+    pub fn restart(&mut self, tail_data: &str, mrb_bytes: &[u8]) -> Result<(), ScriptError> {
+        let new_rt = Self::new_with_args(tail_data, mrb_bytes, self.headless, &self.script_args)?;
+        if *self.config.borrow() != AppConfig::default() {
+            let cfg = self.config.borrow().clone();
+            *new_rt.config.borrow_mut() = cfg.clone();
+            new_rt.draw_state.borrow_mut().screen_w = cfg.screen_width as i32;
+            new_rt.draw_state.borrow_mut().screen_h = cfg.screen_height as i32;
+        }
+        *self = new_rt;
+        Ok(())
     }
 
     /// グローバル変数（`$x`, `$y`, `$t` 等）や実行時タイルマップの操作状態を維持したまま、
@@ -4603,6 +4667,7 @@ impl GameRuntime {
             self.bitmap_font.clone(),
             self.draw_state.clone(),
             self.config.clone(),
+            self.restart_requested.clone(),
             self.headless,
         );
         register_sound_api(&mut new_vm, self.sound_bank.clone());
@@ -4662,6 +4727,7 @@ impl GameRuntime {
             self.bitmap_font.clone(),
             self.draw_state.clone(),
             self.config.clone(),
+            self.restart_requested.clone(),
             self.headless,
         );
 
@@ -4890,8 +4956,70 @@ async fn run_native_with_hot_reload(
     loop {
         frame_count = frame_count.wrapping_add(1);
 
-        // 15フレーム (~0.25秒) ごとにスクリプトファイルおよび外部リソースの変更を検知してホットリロード / 再スタート
-        if frame_count.is_multiple_of(15) {
+        // リスタート要求判定（ショートカットキー F5 / Ctrl+R / Cmd+R、または Ruby スクリプトからの restart / reset 呼び出し）
+        let restart_requested = is_restart_key_pressed()
+            || runtime_opt.as_ref().map_or(false, |rt| rt.is_restart_requested());
+
+        if restart_requested {
+            last_snapshot = bundle::get_script_and_resources_snapshot(&script_path);
+            match cli::compile_ruby_script_file(&script_path) {
+                Ok((new_source, new_tail, new_mrb)) => {
+                    let new_parsed_config = parse_config_from_source(&new_source);
+                    match GameRuntime::new_with_args(&new_tail, &new_mrb, false, &script_args) {
+                        Ok(mut new_rt) => {
+                            if new_parsed_config != AppConfig::default() {
+                                let mut cfg = new_rt.config.borrow_mut();
+                                *cfg = new_parsed_config;
+                                new_rt.draw_state.borrow_mut().screen_w = cfg.screen_width as i32;
+                                new_rt.draw_state.borrow_mut().screen_h = cfg.screen_height as i32;
+                            }
+                            new_rt.preload_audio().await;
+                            println!("[uk run] Restarted `{}`", script_path.display());
+                            current_error = None;
+                            error_overlay_frames = 0;
+                            reload_banner_text = "RESTARTED".to_string();
+                            reload_banner_frames = 60;
+
+                            let (new_w, new_h) = {
+                                let cfg = new_rt.config.borrow();
+                                (cfg.screen_width, cfg.screen_height)
+                            };
+                            if new_w != cur_virt_w || new_h != cur_virt_h {
+                                cur_virt_w = new_w;
+                                cur_virt_h = new_h;
+                                let (rt_screen, cam) = create_virtual_screen(cur_virt_w, cur_virt_h);
+                                render_target = rt_screen;
+                                virtual_camera = cam;
+                            }
+                            runtime_opt = Some(Box::new(new_rt));
+                        }
+                        Err(restart_err) => {
+                            eprintln!(
+                                "[uk run] Restart error in `{}`:\n{}",
+                                script_path.display(),
+                                restart_err.full_message
+                            );
+                            current_error = Some(restart_err);
+                            error_overlay_frames = ERROR_OVERLAY_DURATION_FRAMES;
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[uk run] Compile error on restart in `{}`:\n{}",
+                        script_path.display(),
+                        e
+                    );
+                    current_error = Some(ScriptError {
+                        title: "Syntax / Compilation Error".to_string(),
+                        backtrace: Vec::new(),
+                        full_message: e,
+                    });
+                    error_overlay_frames = ERROR_OVERLAY_DURATION_FRAMES;
+                }
+            }
+        } else if frame_count.is_multiple_of(15) {
+            // 15フレーム (~0.25秒) ごとにスクリプトファイルおよび外部リソースの変更を検知してホットリロード / 再スタート
             let current_snapshot = bundle::get_script_and_resources_snapshot(&script_path);
             if current_snapshot != last_snapshot {
                 last_snapshot = current_snapshot;
@@ -5091,17 +5219,44 @@ async fn run_embedded_game(tail_data: String, mrb_bytes: Vec<u8>) {
         }
     };
 
-    let (virt_w, virt_h) = {
+    let (mut virt_w, mut virt_h) = {
         let cfg = runtime.config.borrow();
         (cfg.screen_width, cfg.screen_height)
     };
-    let (render_target, virtual_camera) = create_virtual_screen(virt_w, virt_h);
+    let (mut render_target, mut virtual_camera) = create_virtual_screen(virt_w, virt_h);
     runtime.preload_audio().await;
+    let mut reload_banner_frames: u32 = 0;
+    let mut reload_banner_text: String = String::new();
 
     loop {
         if is_key_pressed(KeyCode::F3) {
             let mut cfg = runtime.config.borrow_mut();
             cfg.show_fps = !cfg.show_fps;
+        }
+
+        if is_restart_key_pressed() || runtime.is_restart_requested() {
+            match GameRuntime::new(&tail_data, &mrb_bytes, false) {
+                Ok(mut new_rt) => {
+                    new_rt.preload_audio().await;
+                    reload_banner_text = "RESTARTED".to_string();
+                    reload_banner_frames = 60;
+                    let (new_w, new_h) = {
+                        let cfg = new_rt.config.borrow();
+                        (cfg.screen_width, cfg.screen_height)
+                    };
+                    if new_w != virt_w || new_h != virt_h {
+                        virt_w = new_w;
+                        virt_h = new_h;
+                        let (rt_screen, cam) = create_virtual_screen(virt_w, virt_h);
+                        render_target = rt_screen;
+                        virtual_camera = cam;
+                    }
+                    runtime = new_rt;
+                }
+                Err(e) => {
+                    eprintln!("[embedded] Restart error: {}", e.full_message);
+                }
+            }
         }
 
         runtime.call_update();
@@ -5111,7 +5266,15 @@ async fn run_embedded_game(tail_data: String, mrb_bytes: Vec<u8>) {
         runtime.call_draw();
 
         let show_fps = runtime.config.borrow().show_fps;
-        present_virtual_screen(&render_target, virt_w, virt_h, 0, "", show_fps);
+        present_virtual_screen(
+            &render_target,
+            virt_w,
+            virt_h,
+            reload_banner_frames,
+            &reload_banner_text,
+            show_fps,
+        );
+        reload_banner_frames = reload_banner_frames.saturating_sub(1);
 
         next_frame().await;
     }
@@ -5277,7 +5440,43 @@ async fn main() {
     let mut error_overlay_frames: u32 = 0;
 
     loop {
-        if WASM_RELOAD_REQUESTED.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        // リスタート要求判定（ショートカットキー F5 / Ctrl+R / Cmd+R、または Ruby スクリプトからの restart / reset 呼び出し）
+        let restart_requested = is_restart_key_pressed()
+            || runtime_opt.as_ref().map_or(false, |rt| rt.is_restart_requested());
+
+        if restart_requested {
+            let url = format!("__uk_bundle.bin?t={}", macroquad::time::get_time());
+            let (use_tail, use_mrb) = match macroquad::file::load_file(&url).await {
+                Ok(bytes) => bundle::unpack_bundle_from_bytes(&bytes).unwrap_or((tail_data.clone(), mrb_bytes.clone())),
+                Err(_) => (tail_data.clone(), mrb_bytes.clone()),
+            };
+            match GameRuntime::new(&use_tail, &use_mrb, false) {
+                Ok(mut new_rt) => {
+                    new_rt.preload_audio().await;
+                    current_error = None;
+                    error_overlay_frames = 0;
+                    reload_banner_text = "RESTARTED".to_string();
+                    reload_banner_frames = 60;
+                    let (new_w, new_h) = {
+                        let cfg = new_rt.config.borrow();
+                        (cfg.screen_width, cfg.screen_height)
+                    };
+                    if new_w != cur_virt_w || new_h != cur_virt_h {
+                        cur_virt_w = new_w;
+                        cur_virt_h = new_h;
+                        let (rt_screen, cam) = create_virtual_screen(cur_virt_w, cur_virt_h);
+                        render_target = rt_screen;
+                        virtual_camera = cam;
+                    }
+                    runtime_opt = Some(new_rt);
+                }
+                Err(e) => {
+                    eprintln!("Restart error in browser: {}", e.full_message);
+                    current_error = Some(e);
+                    error_overlay_frames = ERROR_OVERLAY_DURATION_FRAMES;
+                }
+            }
+        } else if WASM_RELOAD_REQUESTED.swap(false, std::sync::atomic::Ordering::SeqCst) {
             let url = format!("__uk_bundle.bin?t={}", macroquad::time::get_time());
             if let Ok(bytes) = macroquad::file::load_file(&url).await
                 && let Some((new_tail, new_mrb)) = bundle::unpack_bundle_from_bytes(&bytes)
