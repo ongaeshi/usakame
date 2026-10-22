@@ -197,6 +197,16 @@ $custom_sprites = Array.new(16, nil)
 $has_custom_sprites = false
 $last_spr_mtime = 0
 
+def snap_floor(v, step)
+  return v if step <= 1
+  (v / step).to_i * step
+end
+
+def snap_round(v, step)
+  return v if step <= 1
+  ((v + step / 2) / step).to_i * step
+end
+
 def notify(msg)
   $notify_msg = msg
   $notify_timer = 120
@@ -684,18 +694,18 @@ def update
   if btnp(:mouse_l)
     # ヘッダーバーでのモード切替 & スナップ切替 (y: 2..16)
     if my >= 2 && my <= 16
-      # [TERRAIN] (x: 136..186)
-      if mx >= 136 && mx <= 186
+      # [TERRAIN] (x: 76..128)
+      if mx >= 76 && mx <= 128
         $current_mode = :terrain
         sfx(:click)
         notify("MODE: TERRAIN")
-      # [OBJECTS] (x: 190..242)
-      elsif mx >= 190 && mx <= 242
+      # [OBJECTS] (x: 132..184)
+      elsif mx >= 132 && mx <= 184
         $current_mode = :objects
         sfx(:click)
         notify("MODE: OBJECTS")
-      # [SNAP] (x: 246..304)
-      elsif mx >= 246 && mx <= 304
+      # [SNAP] (x: 188..246)
+      elsif mx >= 188 && mx <= 246
         $grid_snap = ($grid_snap == 16) ? 8 : (($grid_snap == 8) ? 1 : 16)
         sfx(:click)
         notify("SNAP: #{$grid_snap == 1 ? 'FREE' : "#{$grid_snap}PX"}")
@@ -757,45 +767,39 @@ def update
         end
       end
 
-      # プロパティパネル操作 (y: 192..244)
+      # プロパティパネル操作 (y: 230..244)
       if $selected_obj_idx && $selected_obj_idx < $objects.size
         cur_obj = $objects[$selected_obj_idx]
-        # [DEL] ボタン (x: 442..466, y: 194..206)
-        if mx >= 442 && mx <= 466 && my >= 194 && my <= 206
-          push_undo
-          $objects.delete_at($selected_obj_idx)
-          $selected_obj_idx = nil
-          $dragging_obj_idx = nil
-          sfx(:boom)
-          notify("DELETED OBJECT")
-        # クイックプロパティ調整 (y: 228..242)
-        elsif my >= 228 && my <= 242
-          # [+HP] (x: 336..360)
-          if mx >= 336 && mx <= 360
+        if my >= 230 && my <= 244
+          # [DEL] (x: 336..358)
+          if mx >= 336 && mx <= 358
+            push_undo
+            $objects.delete_at($selected_obj_idx)
+            $selected_obj_idx = nil
+            $dragging_obj_idx = nil
+            sfx(:boom)
+            notify("DELETED OBJECT")
+          # [+HP] (x: 362..384)
+          elsif mx >= 362 && mx <= 384
             push_undo
             cur_obj[:hp] = ((cur_obj[:hp] || 0) + 10)
             sfx(:click)
             notify("HP: #{cur_obj[:hp]}")
-          # [+SC] (x: 364..388)
-          elsif mx >= 364 && mx <= 388
+          # [+SC] (x: 388..410)
+          elsif mx >= 388 && mx <= 410
             push_undo
             cur_obj[:score] = ((cur_obj[:score] || 0) + 50)
             sfx(:click)
             notify("SCORE: #{cur_obj[:score]}")
-          # [+W] (x: 392..414)
-          elsif mx >= 392 && mx <= 414
+          # [+W] (x: 414..434)
+          elsif mx >= 414 && mx <= 434
             push_undo
             cur_obj[:w] = ((cur_obj[:w] || 16) == 16) ? 32 : (((cur_obj[:w] == 32) ? 48 : 16))
+            cur_obj[:h] = cur_obj[:w]
             sfx(:click)
-            notify("WIDTH: #{cur_obj[:w]}")
-          # [+H] (x: 418..440)
-          elsif mx >= 418 && mx <= 440
-            push_undo
-            cur_obj[:h] = ((cur_obj[:h] || 16) == 16) ? 32 : (((cur_obj[:h] == 32) ? 48 : 16))
-            sfx(:click)
-            notify("HEIGHT: #{cur_obj[:h]}")
-          # [SET SPR] (x: 444..468)
-          elsif mx >= 444 && mx <= 468
+            notify("SIZE: #{cur_obj[:w]}x#{cur_obj[:h]}")
+          # [SET] (x: 438..464)
+          elsif mx >= 438 && mx <= 464
             push_undo
             new_spr = ($obj_palette_tab == :emoji) ? EMOJI_PALETTE[$selected_emoji_idx] : $selected_tile
             cur_obj[:spr] = new_spr
@@ -906,13 +910,8 @@ def update
     elsif $current_mode == :objects
       # オブジェクトモード時の操作
       # スナップ座標の計算
-      if $grid_snap > 1
-        snap_x = (world_x.to_f / $grid_snap).floor * $grid_snap
-        snap_y = (world_y.to_f / $grid_snap).floor * $grid_snap
-      else
-        snap_x = world_x
-        snap_y = world_y
-      end
+      snap_x = snap_floor(world_x, $grid_snap)
+      snap_y = snap_floor(world_y, $grid_snap)
 
       # 1. 左クリック押下時: オブジェクト選択 または 新規配置
       if btnp(:mouse_l)
@@ -961,10 +960,8 @@ def update
       elsif btn(:mouse_l) && $dragging_obj_idx && $dragging_obj_idx < $objects.size
         tx = world_x - $drag_offset_x
         ty = world_y - $drag_offset_y
-        if $grid_snap > 1
-          tx = (tx.to_f / $grid_snap).round * $grid_snap
-          ty = (ty.to_f / $grid_snap).round * $grid_snap
-        end
+        tx = snap_round(tx, $grid_snap)
+        ty = snap_round(ty, $grid_snap)
         tx = [[tx, 0].max, MAP_WIDTH * 16 - 16].min
         ty = [[ty, 0].max, MAP_HEIGHT * 16 - 16].min
         $objects[$dragging_obj_idx][:x] = tx
@@ -1019,19 +1016,19 @@ def draw
 
   # [TERRAIN] / [OBJECTS] モード切替タブ
   is_terr = ($current_mode == :terrain)
-  rectfill(80, 3, 50, 12, is_terr ? 11 : 2)
-  rect(80, 3, 50, 12, is_terr ? 7 : 5)
-  print_text("MAP", 95, 5, is_terr ? 0 : 6)
+  rectfill(76, 3, 52, 12, is_terr ? 11 : 2)
+  rect(76, 3, 52, 12, is_terr ? 7 : 5)
+  print_text("TERRAIN", 81, 5, is_terr ? 0 : 6)
 
-  rectfill(134, 3, 50, 12, !is_terr ? 10 : 2)
-  rect(134, 3, 50, 12, !is_terr ? 7 : 5)
-  print_text("OBJECTS", 138, 5, !is_terr ? 0 : 6)
+  rectfill(132, 3, 52, 12, !is_terr ? 10 : 2)
+  rect(132, 3, 52, 12, !is_terr ? 7 : 5)
+  print_text("OBJECTS", 137, 5, !is_terr ? 0 : 6)
 
   # [SNAP] ボタン
   snap_label = ($grid_snap == 1) ? "FREE" : "#{$grid_snap}PX"
   rectfill(188, 3, 58, 12, ($grid_snap > 1) ? 3 : 2)
   rect(188, 3, 58, 12, ($grid_snap > 1) ? 11 : 5)
-  print_text("S:#{snap_label}", 192, 5, 7)
+  print_text("S:#{snap_label}", 196, 5, 7)
 
   print_text("CAM:(#{$cam_x},#{$cam_y})", 252, 5, 6)
   print_text("TARGET: #{$save_path}", 322, 5, 11)
@@ -1160,13 +1157,8 @@ def draw
       # オブジェクトモード時のスナップ枠
       world_x = ($cam_x * 16 + (mx - VIEW_X) / scale).to_i
       world_y = ($cam_y * 16 + (my - VIEW_Y) / scale).to_i
-      if $grid_snap > 1
-        snap_x = (world_x.to_f / $grid_snap).floor * $grid_snap
-        snap_y = (world_y.to_f / $grid_snap).floor * $grid_snap
-      else
-        snap_x = world_x
-        snap_y = world_y
-      end
+      snap_x = snap_floor(world_x, $grid_snap)
+      snap_y = snap_floor(world_y, $grid_snap)
       shx = VIEW_X + ((snap_x - $cam_x * 16) * scale).to_i
       shy = VIEW_Y + ((snap_y - $cam_y * 16) * scale).to_i
       rect(shx, shy, (16 * scale).to_i, (16 * scale).to_i, 11)

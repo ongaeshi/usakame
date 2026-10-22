@@ -1744,6 +1744,73 @@ fn test_tilemap_editor_object_layer_workflow() {
     assert!(out_str.contains("door 160 32"), "Should contain door pos");
     assert!(out_str.contains("spr=13"), "Should contain door spr");
     assert!(out_str.contains(r#"target="room2""#), "Should contain door target");
+
+    // オブジェクトモードに切り替えてキャンバス上で描画 (NoMethodError: floor for Float が出ないことの確認)
+    runtime.vm.globals.insert("$current_mode".to_string(), Rc::new(RObject::symbol("objects".into())));
+    let obj_cls = runtime.vm.object_class.clone();
+    mrb_define_cmethod(
+        &mut runtime.vm,
+        obj_cls.clone(),
+        "mouse_x",
+        Box::new(|_, _| Ok(Rc::new(RObject::integer(50)))),
+    );
+    mrb_define_cmethod(
+        &mut runtime.vm,
+        obj_cls.clone(),
+        "mouse_y",
+        Box::new(|_, _| Ok(Rc::new(RObject::integer(50)))),
+    );
+    runtime.call_draw_result().expect("Draw in objects mode should succeed without floor error");
+
+    // ヘッダーバー TERRAIN (x: 100, y: 10) クリック判定
+    mrb_define_cmethod(
+        &mut runtime.vm,
+        obj_cls.clone(),
+        "mouse_x",
+        Box::new(|_, _| Ok(Rc::new(RObject::integer(100)))),
+    );
+    mrb_define_cmethod(
+        &mut runtime.vm,
+        obj_cls.clone(),
+        "mouse_y",
+        Box::new(|_, _| Ok(Rc::new(RObject::integer(10)))),
+    );
+    mrb_define_cmethod(
+        &mut runtime.vm,
+        obj_cls.clone(),
+        "btnp",
+        Box::new(|_, _| Ok(Rc::new(RObject::boolean(true)))),
+    );
+    runtime.call_update_result().unwrap();
+    let mode = runtime.vm.globals.get("$current_mode").unwrap();
+    assert_eq!(mode.as_ref(), &RObject::symbol("terrain".into()), "Clicking x:100 y:10 should switch to TERRAIN");
+
+    // ヘッダーバー OBJECTS (x: 150, y: 10) クリック判定
+    mrb_define_cmethod(
+        &mut runtime.vm,
+        obj_cls.clone(),
+        "mouse_x",
+        Box::new(|_, _| Ok(Rc::new(RObject::integer(150)))),
+    );
+    runtime.call_update_result().unwrap();
+    let mode = runtime.vm.globals.get("$current_mode").unwrap();
+    assert_eq!(mode.as_ref(), &RObject::symbol("objects".into()), "Clicking x:150 y:10 should switch to OBJECTS");
+
+    // キャンバス上の空白をクリックして新規オブジェクトを配置 (x: 100, y: 100)
+    mrb_define_cmethod(
+        &mut runtime.vm,
+        obj_cls.clone(),
+        "mouse_x",
+        Box::new(|_, _| Ok(Rc::new(RObject::integer(100)))),
+    );
+    mrb_define_cmethod(
+        &mut runtime.vm,
+        obj_cls.clone(),
+        "mouse_y",
+        Box::new(|_, _| Ok(Rc::new(RObject::integer(100)))),
+    );
+    runtime.call_update_result().expect("Placing object in objects mode should succeed");
+    runtime.call_draw_result().expect("Drawing after placing object should succeed");
 }
 
 #[test]
