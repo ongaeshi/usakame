@@ -4773,7 +4773,7 @@ async fn run_native_with_hot_reload(
     initial_error: Option<ScriptError>,
 ) {
     let mut current_error: Option<ScriptError> = initial_error;
-    let mut runtime_opt: Option<GameRuntime> = None;
+    let mut runtime_opt: Option<Box<GameRuntime>> = None;
     let mut cur_virt_w = SCREEN_WIDTH as u32;
     let mut cur_virt_h = SCREEN_HEIGHT as u32;
 
@@ -4789,7 +4789,7 @@ async fn run_native_with_hot_reload(
                 }
                 cur_virt_w = rt.config.borrow().screen_width;
                 cur_virt_h = rt.config.borrow().screen_height;
-                runtime_opt = Some(rt);
+                runtime_opt = Some(Box::new(rt));
             }
             Err(e) => {
                 eprintln!("[uk run] Runtime error in `{}`:\n{}", script_path.display(), e.full_message);
@@ -4848,7 +4848,7 @@ async fn run_native_with_hot_reload(
                                         render_target = rt;
                                         virtual_camera = cam;
                                     }
-                                    runtime_opt = Some(new_rt);
+                                    runtime_opt = Some(Box::new(new_rt));
                                 }
                                 Err(e) => {
                                     eprintln!(
