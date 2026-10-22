@@ -423,15 +423,25 @@ pub fn cmd_encode(
 
 /// Ruby スクリプト文字列（`__END__` 区切り対応）をコンパイルし `(tail_data, mrb_bytes)` を返す。
 pub fn compile_ruby_script_str(full_source: &str) -> Result<(String, Vec<u8>), String> {
+    compile_ruby_script_str_with_filename(full_source, None)
+}
+
+pub fn compile_ruby_script_str_with_filename(
+    full_source: &str,
+    filename: Option<&str>,
+) -> Result<(String, Vec<u8>), String> {
     let (ruby_code, tail_data) = crate::bundle::split_ruby_source_and_tail(full_source);
     let tail_data = tail_data.to_string();
     let normalized_code = crate::bundle::normalize_ruby_config_syntax(ruby_code);
 
     let mrb_bytes = unsafe {
         let mut compiler = mruby_compiler2_sys::MRubyCompiler2Context::new();
+        if let Some(fn_str) = filename {
+            compiler.set_filename(fn_str);
+        }
         compiler
             .compile(&normalized_code)
-            .map_err(|e| format!("Ruby compile error: {}", e))?
+            .map_err(|e| format!("{}", e))?
     };
 
     Ok((tail_data, mrb_bytes))
@@ -442,7 +452,9 @@ pub fn compile_ruby_script_str(full_source: &str) -> Result<(String, Vec<u8>), S
 pub fn compile_ruby_script_file(path: &Path) -> Result<(String, String, Vec<u8>), String> {
     let full_source = fs::read_to_string(path)
         .map_err(|e| format!("Failed to read script `{}`: {}", path.display(), e))?;
-    let (embedded_tail, mrb_bytes) = compile_ruby_script_str(&full_source)?;
+    let path_str = path.to_string_lossy();
+    let (embedded_tail, mrb_bytes) =
+        compile_ruby_script_str_with_filename(&full_source, Some(&path_str))?;
     let (merged_tail, _) = crate::bundle::load_merged_tail_data(path, &embedded_tail);
     Ok((full_source, merged_tail, mrb_bytes))
 }

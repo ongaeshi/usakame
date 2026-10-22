@@ -208,3 +208,30 @@ mrc_ccontext_free(mrc_ccontext *c)
   mrc_free(c, c->p);
   mrc_free(c, c);
 }
+
+MRC_API const char*
+mrc_ccontext_error_message(mrc_ccontext *c)
+{
+  if (c && c->diagnostic_list) {
+    return c->diagnostic_list->message;
+  }
+  return NULL;
+}
+
+MRC_API uint32_t
+mrc_ccontext_error_line(mrc_ccontext *c)
+{
+  if (c && c->diagnostic_list) {
+    return c->diagnostic_list->line;
+  }
+  return 0;
+}
+
+MRC_API uint32_t
+mrc_ccontext_error_column(mrc_ccontext *c)
+{
+  if (c && c->diagnostic_list) {
+    return c->diagnostic_list->column;
+  }
+  return 0;
+}

@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 use crate::bundle::{pack_bundle, strip_bundle_from_exe_bytes, unpack_bundle_from_bytes};
 
 #[test]
@@ -96,7 +96,7 @@ def draw
   print_text("VGA", 10, 50, 7, 16)
 end
 "#;
-    let (tail, mrb) = cli::compile_ruby_script_str(script).expect("Compile should succeed");
+    let (tail, mrb) = cli::compile_ruby_script_str_with_filename(script, Some("test.rb")).expect("Compile should succeed");
     let mut runtime = GameRuntime::new(&tail, &mrb, true).expect("Runtime init should succeed");
     assert_eq!(runtime.config.borrow().screen_width, 640);
     assert_eq!(runtime.config.borrow().screen_height, 480);
@@ -119,7 +119,7 @@ fn test_direct_sprite_data_in_ruby_script() {
         spr_data(pixels, 50, 60)
         $ok = true
     "#;
-    let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
+    let (tail, mrb) = cli::compile_ruby_script_str_with_filename(script, Some("test.rb")).unwrap();
     let runtime = GameRuntime::new(&tail, &mrb, true).unwrap();
     assert_eq!(
         runtime.vm.globals.get("$ok").map(|v| v.as_ref().clone()),
@@ -255,7 +255,7 @@ fn test_mouse_and_btn_api_in_ruby_script() {
         $cur_fps = fps
         $ok = true
     "#;
-    let (tail, mrb_bytes) = cli::compile_ruby_script_str(script).unwrap();
+    let (tail, mrb_bytes) = cli::compile_ruby_script_str_with_filename(script, Some("test.rb")).unwrap();
     let runtime = GameRuntime::new(&tail, &mrb_bytes, true).unwrap();
     assert_eq!(
         runtime.vm.globals.get("$ok").map(|v| v.as_ref().clone()),
@@ -707,7 +707,7 @@ def draw
   print_text("🐰うさぎと🐢かめ⚔️❤️⭐", 8, 8, 7)
 end
 "#;
-    let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
+    let (tail, mrb) = cli::compile_ruby_script_str_with_filename(script, Some("test.rb")).unwrap();
     let mut runtime = GameRuntime::new(&tail, &mrb, true).unwrap();
     runtime.call_draw();
 
@@ -763,7 +763,7 @@ __END__
 @SPRITE 0
 1111111111111111
 "#;
-    let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
+    let (tail, mrb) = cli::compile_ruby_script_str_with_filename(script, Some("test.rb")).unwrap();
     let mut runtime = GameRuntime::new(&tail, &mrb, true).unwrap();
     runtime.call_draw();
 }
@@ -861,7 +861,7 @@ def draw
   trifill(140, 180, 160, 180, 150, 165, 11)
 end
 "#;
-    let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
+    let (tail, mrb) = cli::compile_ruby_script_str_with_filename(script, Some("test.rb")).unwrap();
     let mut runtime = GameRuntime::new(&tail, &mrb, true).unwrap();
     runtime.call_draw();
 }
@@ -927,7 +927,7 @@ def draw
   camera(12, -8)
 end
 "#;
-    let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
+    let (tail, mrb) = cli::compile_ruby_script_str_with_filename(script, Some("test.rb")).unwrap();
     let mut runtime = GameRuntime::new(&tail, &mrb, true).unwrap();
 
     runtime.call_update();
@@ -1994,4 +1994,71 @@ __END__
     } else {
         panic!("Expected $all_pixels to be Array");
     }
+}
+
+
+#[test]
+fn test_exception_stacktrace_reporting() {
+    let script = r#"
+def helper_func
+  raise "sample custom error"
+end
+
+def update
+  helper_func
+end
+"#;
+    let (tail, mrb) = cli::compile_ruby_script_str_with_filename(script, Some("my_game.rb")).unwrap();
+    let mut runtime = GameRuntime::new(&tail, &mrb, true).unwrap();
+    let res = runtime.call_update_result();
+    assert!(res.is_err());
+    let err = res.unwrap_err();
+
+    assert_eq!(err.title, "RuntimeError: sample custom error");
+    assert!(err.backtrace.iter().any(|f| f.contains("my_game.rb:3") && f.contains("helper_func")));
+    assert!(err.backtrace.iter().any(|f| f.contains("my_game.rb:7") && f.contains("update")));
+    assert!(err.full_message.contains("[Ruby Exception in `update`] RuntimeError: sample custom error"));
+    assert!(err.full_message.contains("my_game.rb:3:in helper_func"));
+    assert!(err.full_message.contains("my_game.rb:7:in update"));
+}
+
+#[test]
+fn test_syntax_error_message_with_line_and_col() {
+    let script = "def foo
+";
+    let res = cli::compile_ruby_script_str_with_filename(script, Some("broken.rb"));
+    assert!(res.is_err());
+    let err = res.unwrap_err();
+    assert!(err.contains("broken.rb:1:8: syntax error"));
+}
+
+#[test]
+fn test_error_recovery_and_restart() {
+    // 1. 最初は例外が発生するスクリプト
+    let bug_script = r#"
+def update
+  undefined_variable_or_method
+end
+"#;
+    let (tail1, mrb1) = cli::compile_ruby_script_str_with_filename(bug_script, Some("game.rb")).unwrap();
+    let mut runtime = GameRuntime::new(&tail1, &mrb1, true).unwrap();
+    let res1 = runtime.call_update_result();
+    assert!(res1.is_err());
+    let err1 = res1.unwrap_err();
+    assert!(err1.full_message.contains("game.rb"));
+
+    // 2. 修正したスクリプトで再スタート（新規 GameRuntime の初期化）
+    let fixed_script = r#"
+$count = 0
+def update
+  $count += 1
+end
+"#;
+    let (tail2, mrb2) = cli::compile_ruby_script_str_with_filename(fixed_script, Some("game.rb")).unwrap();
+    let mut restarted_runtime = GameRuntime::new(&tail2, &mrb2, true).expect("Restart should succeed");
+    let res2 = restarted_runtime.call_update_result();
+    assert!(res2.is_ok());
+
+    let count_val = restarted_runtime.vm.globals.get("$count").unwrap();
+    assert!(matches!(count_val.value, RValue::Integer(1)));
 }
