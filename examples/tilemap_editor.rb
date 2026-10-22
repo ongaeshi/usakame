@@ -101,28 +101,37 @@ $dragging_obj_idx = nil    # ドラッグ中のオブジェクト
 $drag_offset_x = 0
 $drag_offset_y = 0
 
-$obj_palette_tab = :preset # :preset, :chip, :emoji
+$obj_palette_tab = :chip   # :chip or :emoji (デフォルトは :chip)
 
-# 代表的なプリセットオブジェクト一覧
-PRESET_OBJECTS = [
-  { type: "player", spr: "🐰", label: "PLAYER", hp: 100 },
-  { type: "apple",  spr: "🍎", label: "APPLE",  score: 100 },
-  { type: "chest",  spr: 10,   label: "CHEST",  item: "key" },
-  { type: "door",   spr: 13,   label: "DOOR",   target: "stage2" },
-  { type: "sign",   spr: 14,   label: "SIGN",   text: "HELLO" },
-  { type: "enemy",  spr: "👾", label: "ENEMY",  hp: 30, speed: 1.0 },
-  { type: "warp",   spr: nil,  label: "WARP",   target: "stage2:16,32", w: 16, h: 16 },
-  { type: "zone",   spr: nil,  label: "ZONE",   name: "boss_trigger", w: 32, h: 32 }
-]
-$selected_preset_idx = 0
-
-# 絵文字パレット用
-EMOJI_PALETTE = [
-  "🐰", "🐢", "🍎", "🥕", "🪙", "💎", "🗝️", "📦",
-  "🗡️", "🛡️", "🏹", "💣", "👾", "🦇", "👻", "💀",
-  "🚪", "🚩", "💬", "⚠️", "❤️", "⭐", "🔥", "💧"
-]
-$selected_emoji_idx = 2 # デフォルト "🍎"
+# 絵文字パレット 256選 (4カテゴリ × 64個 = 256個)
+# 注意: mrubyedge のリテラルプール上限 (256) を超えて EXT2 命令が出力されるのを防ぐため、
+# カテゴリ毎の文字列を split して構築します。
+_EMOJI_CAT1 = (
+  "🌲 🌳 🌴 🌵 🌾 🌿 ☘️ 🍀 🍁 🍂 🍃 🍄 🌰 🌸 🌺 🌻 " \
+  "🌱 🪵 🪨 🧱 🏔️ ⛰️ 🌋 🏕️ 🏖️ 🏜️ 🏝️ 🏞️ 🌊 💧 🔥 ✨ " \
+  "🏠 🏡 🏢 🏣 🏥 🏦 🏨 🏪 🏫 🏭 🏯 🏰 💒 🗼 ⛪ ⛩️ " \
+  "☀️ 🌤️ ⛅ ☁️ 🌧️ ⛈️ 🌩️ 🌨️ ❄️ ⛄ ⚡ 🌈 🌌 🌙 ⭐ 🌍"
+)
+_EMOJI_CAT2 = (
+  "🚪 🪟 🪜 🛤️ 🛣️ 🌉 ⛲ 🗿 ⛺ 🎪 💈 🏛️ 🏗️ 🏚️ ⚓ ♨️ " \
+  "🪑 🛏️ 🛋️ 🪞 🧰 🏺 ⚱️ 📦 🎁 📜 📖 📚 🏷️ ✉️ 🧺 🪔 " \
+  "🕯️ 💡 🏮 🔦 🧭 ⌛ ⏳ ⏰ 🔔 🚩 🏁 🎌 🏴 🏳️ 🛑 🚧 " \
+  "💬 💭 🗯️ ⚠️ ⛔ 🚫 ❓ ❗ 💤 💢 💥 🎯 🎲 ♟️ 🏆 🎖️"
+)
+_EMOJI_CAT3 = (
+  "💎 💍 👑 🪙 💰 💴 💵 💶 🗝️ 🔑 🔮 🧿 📿 🥇 🥈 🥉 " \
+  "🗡️ ⚔️ 🏹 🛡️ 🪓 ⛏️ 🔨 🔧 🪚 🪛 💣 🧨 🔫 🧲 🪄 🥊 " \
+  "🧪 🧫 🧬 🩺 💊 🩹 ❤️ 🧡 💛 💚 💙 💜 🖤 🤍 🌟 💫 " \
+  "🍎 🍏 🍐 🍊 🍋 🍌 🍉 🍇 🍓 🍒 🍑 🍍 🥥 🥝 🍅 🥕"
+)
+_EMOJI_CAT4 = (
+  "🐰 🐢 🐱 🐶 🦊 🐻 🐼 🐨 🐯 🦁 🐮 🐷 🐸 🐵 🐔 🐧 " \
+  "🐦 🐤 🦆 🦅 🦉 🦇 🐺 🐗 🐴 🦄 🐝 🐛 🦋 🐌 🐞 🐜 " \
+  "🕷️ 🦂 🐍 🦎 🦖 🦕 🐙 🦑 🦐 🦀 🐡 🐠 🐟 🐬 🐳 🐊 " \
+  "👤 🧝 🧙 🧛 🧟 🧞 🧜 🧚 👼 👾 🤖 👻 💀 👹 👺 🤡"
+)
+EMOJI_PALETTE = (_EMOJI_CAT1 + " " + _EMOJI_CAT2 + " " + _EMOJI_CAT3 + " " + _EMOJI_CAT4).split(" ")
+$selected_emoji_idx = 0 # デフォルト "🌲"
 
 $cam_x = 0           # カメラ原点 (タイル単位)
 $cam_y = 0
@@ -643,7 +652,7 @@ def update
     return
   end
 
-  # --- バンクビュー上でのドラッグ選択 (x: 336..464, y: 98..226) ---
+  # --- バンクビュー / 絵文字ビュー上でのドラッグ選択 (x: 336..464, y: 98..226) ---
   if $current_mode == :terrain || ($current_mode == :objects && $obj_palette_tab == :chip)
     if (btn(:mouse_l) || btn(:mouse_r)) && (mx >= 336 && mx < 464 && my >= 98 && my < 226)
       col = ((mx - 336) / 8).to_i
@@ -653,6 +662,19 @@ def update
         if $selected_tile != tid
           $selected_tile = tid
           sfx(:select)
+        end
+      end
+    end
+  elsif $current_mode == :objects && $obj_palette_tab == :emoji
+    if (btn(:mouse_l) || btn(:mouse_r)) && (mx >= 336 && mx < 464 && my >= 98 && my < 226)
+      col = ((mx - 336) / 8).to_i
+      row = ((my - 98) / 8).to_i
+      if col >= 0 && col < 16 && row >= 0 && row < 16
+        eidx = row * 16 + col
+        if eidx >= 0 && eidx < EMOJI_PALETTE.size && $selected_emoji_idx != eidx
+          $selected_emoji_idx = eidx
+          sfx(:select)
+          notify("EMOJI: #{EMOJI_PALETTE[eidx]}")
         end
       end
     end
@@ -726,42 +748,12 @@ def update
 
     # 2-B. オブジェクトモード時のパレット・プロパティ操作
     if $current_mode == :objects
-      # パレットタブ切替 (y: 86..96)
-      if my >= 86 && my <= 96
-        if mx >= 336 && mx <= 376
-          $obj_palette_tab = :preset; sfx(:click)
-        elsif mx >= 380 && mx <= 420
+      # パレットタブ切替 (y: 84..96)
+      if my >= 84 && my <= 96
+        if mx >= 336 && mx <= 398
           $obj_palette_tab = :chip; sfx(:click)
-        elsif mx >= 424 && mx <= 464
+        elsif mx >= 402 && mx <= 468
           $obj_palette_tab = :emoji; sfx(:click)
-        end
-      end
-
-      # パレット内容の選択 (y: 98..188)
-      if my >= 98 && my <= 188
-        if $obj_palette_tab == :preset
-          # プリセット一覧 (2列 × 4行)
-          # 列0: x: 336..400, 列1: x: 404..468
-          col = (mx >= 404) ? 1 : 0
-          row = ((my - 98) / 22).to_i
-          pidx = row * 2 + col
-          if pidx >= 0 && pidx < PRESET_OBJECTS.size
-            $selected_preset_idx = pidx
-            sfx(:select)
-            notify("PRESET: #{PRESET_OBJECTS[pidx][:label]}")
-          end
-        elsif $obj_palette_tab == :emoji
-          # 絵文字一覧 (6列 × 4行, 各20x20px)
-          ecol = ((mx - 336) / 22).to_i
-          erow = ((my - 98) / 22).to_i
-          if ecol >= 0 && ecol < 6 && erow >= 0 && erow < 4
-            eidx = erow * 6 + ecol
-            if eidx < EMOJI_PALETTE.size
-              $selected_emoji_idx = eidx
-              sfx(:select)
-              notify("EMOJI: #{EMOJI_PALETTE[eidx]}")
-            end
-          end
         end
       end
 
@@ -947,17 +939,11 @@ def update
           # 空白クリックで新規オブジェクト配置
           push_undo
           new_obj = nil
-          if $obj_palette_tab == :preset
-            tmpl = PRESET_OBJECTS[$selected_preset_idx]
-            new_obj = tmpl.dup
-            new_obj.delete(:label)
-            new_obj[:x] = snap_x
-            new_obj[:y] = snap_y
-          elsif $obj_palette_tab == :chip
+          if $obj_palette_tab == :chip
             new_obj = { type: "chip_#{$selected_tile}", x: snap_x, y: snap_y, spr: $selected_tile }
-          elsif $obj_palette_tab == :emoji
+          else
             emoji_ch = EMOJI_PALETTE[$selected_emoji_idx]
-            new_obj = { type: "item", x: snap_x, y: snap_y, spr: emoji_ch }
+            new_obj = { type: "obj", x: snap_x, y: snap_y, spr: emoji_ch }
           end
 
           if new_obj
@@ -1232,25 +1218,15 @@ def draw
       print_text("OBJ", 446, 24, 10)
       print_text("#{sel_o[:type].to_s[0, 5]}", 446, 36, 7)
     else
-      # 配置予定のプリセット/絵文字
-      if $obj_palette_tab == :preset
-        tmpl = PRESET_OBJECTS[$selected_preset_idx]
-        if tmpl[:spr].is_a?(String)
-          spr(tmpl[:spr], 416, 33)
-        elsif tmpl[:spr].is_a?(Integer)
-          draw_tile_at(tmpl[:spr], 408, 25, 2.0)
-        else
-          print_text("NEW", 414, 37, 10)
-        end
-        print_text("NEW", 446, 24, 10)
-        print_text("#{tmpl[:label][0, 5]}", 446, 36, 7)
-      elsif $obj_palette_tab == :emoji
-        spr(EMOJI_PALETTE[$selected_emoji_idx], 416, 33)
-        print_text("EMOJI", 446, 24, 10)
-      else
+      # 配置予定のチップ/絵文字
+      if $obj_palette_tab == :chip
         draw_tile_at($selected_tile, 408, 25, 2.0)
         print_text("CHIP", 446, 24, 10)
         print_text("ID:#{$selected_tile}", 446, 36, 7)
+      else
+        spr(EMOJI_PALETTE[$selected_emoji_idx], 416, 33)
+        print_text("EMOJI", 446, 24, 10)
+        print_text("##{$selected_emoji_idx}", 446, 36, 7)
       end
     end
   end
@@ -1268,7 +1244,7 @@ def draw
   rect(456, 64, 16, 14, 6)
   print_text(">", 461, 67, 7)
 
-  # --- 4. パレット領域 (y: 86..226) ---
+  # --- 4. パレット領域 (y: 84..226) ---
   if $current_mode == :terrain
     # 地形モード: バンク全体表示 (128x128)
     print_text("BANK #{$ref_bank} TILES (16x16)", 336, 88, 6)
@@ -1313,114 +1289,86 @@ def draw
     print_text(($cell_size == 16) ? "16P" : "8PX", 444, 233, 7)
 
   else
-    # オブジェクトモード: パレットタブ & インスペクタ
+    # オブジェクトモード: [CHIP] / [EMOJI] パレット & インスペクタ
     # タブ (y: 84..95)
-    rectfill(336, 84, 40, 12, ($obj_palette_tab == :preset) ? 10 : 1)
-    rect(336, 84, 40, 12, ($obj_palette_tab == :preset) ? 7 : 5)
-    print_text("PRESET", 340, 86, ($obj_palette_tab == :preset) ? 0 : 6)
+    rectfill(336, 84, 62, 12, ($obj_palette_tab == :chip) ? 10 : 1)
+    rect(336, 84, 62, 12, ($obj_palette_tab == :chip) ? 7 : 5)
+    print_text("CHIP (256)", 342, 86, ($obj_palette_tab == :chip) ? 0 : 6)
 
-    rectfill(380, 84, 40, 12, ($obj_palette_tab == :chip) ? 10 : 1)
-    rect(380, 84, 40, 12, ($obj_palette_tab == :chip) ? 7 : 5)
-    print_text("CHIP", 390, 86, ($obj_palette_tab == :chip) ? 0 : 6)
+    rectfill(402, 84, 64, 12, ($obj_palette_tab == :emoji) ? 10 : 1)
+    rect(402, 84, 64, 12, ($obj_palette_tab == :emoji) ? 7 : 5)
+    print_text("EMOJI (256)", 406, 86, ($obj_palette_tab == :emoji) ? 0 : 6)
 
-    rectfill(424, 84, 40, 12, ($obj_palette_tab == :emoji) ? 10 : 1)
-    rect(424, 84, 40, 12, ($obj_palette_tab == :emoji) ? 7 : 5)
-    print_text("EMOJI", 430, 86, ($obj_palette_tab == :emoji) ? 0 : 6)
+    # パレット中央領域 (y: 97..227, 128x128px)
+    rectfill(335, 97, 130, 130, 1)
+    rect(335, 97, 130, 130, 5)
 
-    # パレット中央領域 (y: 98..188, h: 90px)
-    rectfill(335, 97, 130, 92, 1)
-    rect(335, 97, 130, 92, 5)
+    if $obj_palette_tab == :chip
+      blt(336, 98, $ref_bank, 0, 0, 256, 256, 0, 0.5)
 
-    if $obj_palette_tab == :preset
-      PRESET_OBJECTS.each_with_index do |p, i|
-        col = i % 2
-        row = i / 2
-        bx = 338 + col * 64
-        by = 99 + row * 22
-        active = ($selected_preset_idx == i)
-        rectfill(bx, by, 62, 20, active ? 3 : 2)
-        rect(bx, by, 62, 20, active ? 11 : 5)
-        if p[:spr].is_a?(String)
-          spr(p[:spr], bx + 2, by + 2)
-        elsif p[:spr].is_a?(Integer)
-          draw_tile_at(p[:spr], bx + 2, by + 2, 1.0)
-        else
-          rect(bx + 4, by + 4, 12, 12, 10)
-        end
-        print_text(p[:label][0, 6], bx + 20, by + 6, active ? 7 : 6)
-      end
+      rect(336, 98, 8, 8, 8)
+      line(337, 99, 342, 104, 8)
+      line(337, 104, 342, 99, 8)
 
-    elsif $obj_palette_tab == :chip
-      blt(336, 98, $ref_bank, 0, 0, 256, 180, 0, 0.5)
       sel_col = $selected_tile % 16
       sel_row = $selected_tile / 16
-      if sel_row < 11
-        bx = 336 + sel_col * 8
-        by = 98 + sel_row * 8
-        rect(bx - 1, by - 1, 10, 10, 10)
-        rect(bx, by, 8, 8, 7)
+      bx = 336 + sel_col * 8
+      by = 98 + sel_row * 8
+      rect(bx - 1, by - 1, 10, 10, 10)
+      rect(bx, by, 8, 8, 7)
+
+    else
+      # 256個の絵文字 (16列 × 16行 = 256) を 8x8 で一括描画
+      rectfill(336, 98, 128, 128, 0)
+      EMOJI_PALETTE.each_with_index do |em, i|
+        col = i % 16
+        row = i / 16
+        ex = 336 + col * 8
+        ey = 98 + row * 8
+        spr(em, ex, ey, false, false, 0, 0.5)
       end
 
-    elsif $obj_palette_tab == :emoji
-      EMOJI_PALETTE.each_with_index do |em, i|
-        col = i % 6
-        row = i / 6
-        ex = 338 + col * 21
-        ey = 100 + row * 22
-        active = ($selected_emoji_idx == i)
-        rectfill(ex, ey, 20, 20, active ? 3 : 2)
-        rect(ex, ey, 20, 20, active ? 11 : 5)
-        spr(em, ex + 2, ey + 2)
-      end
+      sel_col = $selected_emoji_idx % 16
+      sel_row = $selected_emoji_idx / 16
+      bx = 336 + sel_col * 8
+      by = 98 + sel_row * 8
+      rect(bx - 1, by - 1, 10, 10, 10)
+      rect(bx, by, 8, 8, 7)
     end
 
-    # プロパティパネル (y: 192..244, h: 52px)
-    rectfill(335, 192, 130, 52, 0)
-    rect(335, 192, 130, 52, 5)
-
+    # 行1: 選択中オブジェクトのインスペクタ / クイック操作 (y: 230..244)
     if $selected_obj_idx && $selected_obj_idx < $objects.size
       sel_o = $objects[$selected_obj_idx]
-      # [DEL] ボタン
-      rectfill(442, 194, 21, 10, 8)
-      rect(442, 194, 21, 10, 7)
-      print_text("DEL", 446, 196, 7)
+      # [DEL]
+      rectfill(336, 230, 22, 14, 8)
+      rect(336, 230, 22, 14, 7)
+      print_text("DEL", 339, 233, 7)
 
-      print_text("#{sel_o[:type].to_s.upcase} (#{sel_o[:x]},#{sel_o[:y]})", 338, 196, 10)
+      # [+HP]
+      rectfill(362, 230, 22, 14, 1)
+      rect(362, 230, 22, 14, 5)
+      print_text("+HP", 364, 233, 7)
 
-      # プロパティ表示
-      props_summary = []
-      props_summary << "HP:#{sel_o[:hp]}" if sel_o[:hp]
-      props_summary << "SC:#{sel_o[:score]}" if sel_o[:score]
-      props_summary << "W:#{sel_o[:w]||16}" if sel_o[:w]
-      props_summary << "H:#{sel_o[:h]||16}" if sel_o[:h]
-      props_summary << "T:#{sel_o[:target][0,6]}" if sel_o[:target]
-      props_summary << "M:#{sel_o[:text][0,6]}" if sel_o[:text]
-      print_text(props_summary.join(" ")[0, 21], 338, 208, 6)
+      # [+SC]
+      rectfill(388, 230, 22, 14, 1)
+      rect(388, 230, 22, 14, 5)
+      print_text("+SC", 390, 233, 7)
 
-      # クイックプロパティ調整ボタン (y: 228..240)
-      rectfill(338, 228, 22, 12, 1)
-      rect(338, 228, 22, 12, 5)
-      print_text("+HP", 340, 230, 7)
+      # [+W]
+      rectfill(414, 230, 20, 14, 1)
+      rect(414, 230, 20, 14, 5)
+      print_text("+W", 417, 233, 7)
 
-      rectfill(364, 228, 22, 12, 1)
-      rect(364, 228, 22, 12, 5)
-      print_text("+SC", 366, 230, 7)
-
-      rectfill(390, 228, 20, 12, 1)
-      rect(390, 228, 20, 12, 5)
-      print_text("+W", 393, 230, 7)
-
-      rectfill(414, 228, 20, 12, 1)
-      rect(414, 228, 20, 12, 5)
-      print_text("+H", 417, 230, 7)
-
-      rectfill(438, 228, 24, 12, 3)
-      rect(438, 228, 24, 12, 11)
-      print_text("SET", 442, 230, 7)
+      # [SET]
+      rectfill(438, 230, 26, 14, 3)
+      rect(438, 230, 26, 14, 11)
+      print_text("SET", 443, 233, 7)
     else
-      print_text("CLICK CANVAS", 356, 204, 6)
-      print_text("TO PLACE OBJECT", 348, 216, 6)
-      print_text("RIGHT-CLICK: DEL", 346, 230, 5)
+      if $obj_palette_tab == :chip
+        print_text("STAMP CHIP #{$selected_tile}", 344, 233, 6)
+      else
+        print_text("STAMP #{EMOJI_PALETTE[$selected_emoji_idx]} (##{$selected_emoji_idx})", 344, 233, 6)
+      end
     end
   end
 

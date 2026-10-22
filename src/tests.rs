@@ -2481,3 +2481,38 @@ fn test_png_backed_resource_read_only_in_sprite_editor() {
 }
 
 
+
+#[test]
+fn test_256_palette_emojis_available() {
+    let (_, tail_data, mrb_bytes) =
+        cli::compile_ruby_script_file(std::path::Path::new("examples/tilemap_editor.rb"))
+            .expect("tilemap_editor.rb should compile");
+
+    let runtime =
+        GameRuntime::new_with_args(&tail_data, &mrb_bytes, true, &[])
+            .expect("Tilemap editor should initialize");
+
+    // デフォルトタブが :chip であること
+    let tab = runtime.vm.globals.get("$obj_palette_tab").expect("$obj_palette_tab must exist");
+    assert_eq!(tab.as_ref(), &RObject::symbol("chip".into()));
+
+    // EMOJI_PALETTE 定数が存在し、要素数が256個であること
+    let emoji_palette = runtime.vm.consts.get("EMOJI_PALETTE").expect("EMOJI_PALETTE must exist");
+    if let RValue::Array(ref arr) = emoji_palette.value {
+        let emojis = arr.borrow();
+        assert_eq!(emojis.len(), 256, "EMOJI_PALETTE must have exactly 256 emojis");
+
+        for (i, emoji_obj) in emojis.iter().enumerate() {
+            let s: String = emoji_obj.as_ref().try_into().expect("emoji must be a string");
+            let cp = crate::emoji::resolve_emoji_codepoint(&s);
+            assert!(
+                cp.is_some(),
+                "Emoji at index {} '{}' could not be resolved in EMOJI_ATLAS / EMOJI_CODEPOINTS",
+                i,
+                s
+            );
+        }
+    } else {
+        panic!("EMOJI_PALETTE must be an Array");
+    }
+}
