@@ -4346,6 +4346,9 @@ pub fn render_error_screen(err: &ScriptError) {
     );
 }
 
+/// エラーオーバーレイ（トースト通知）の表示フレーム数（60fps環境で約3秒間）
+pub const ERROR_OVERLAY_DURATION_FRAMES: u32 = 180;
+
 pub fn render_error_overlay(err: &ScriptError) {
     apply_gl_scissor(None);
     set_default_camera();
@@ -4882,6 +4885,7 @@ async fn run_native_with_hot_reload(
     let mut frame_count: u64 = 0;
     let mut reload_banner_frames: u32 = 0;
     let mut reload_banner_text: String = "HOT RELOADED".to_string();
+    let mut error_overlay_frames: u32 = 0;
 
     loop {
         frame_count = frame_count.wrapping_add(1);
@@ -4905,6 +4909,7 @@ async fn run_native_with_hot_reload(
                                     rt.preload_audio().await;
                                     println!("[uk run] Hot-reloaded `{}`", script_path.display());
                                     current_error = None;
+                                    error_overlay_frames = 0;
                                     reload_banner_text = "HOT RELOADED".to_string();
                                     reload_banner_frames = 60;
                                     let (new_w, new_h) = {
@@ -4932,6 +4937,7 @@ async fn run_native_with_hot_reload(
                                             new_rt.preload_audio().await;
                                             println!("[uk run] Restarted `{}`", script_path.display());
                                             current_error = None;
+                                            error_overlay_frames = 0;
                                             reload_banner_text = "RESTARTED".to_string();
                                             reload_banner_frames = 60;
 
@@ -4955,6 +4961,7 @@ async fn run_native_with_hot_reload(
                                                 restart_err.full_message
                                             );
                                             current_error = Some(restart_err);
+                                            error_overlay_frames = ERROR_OVERLAY_DURATION_FRAMES;
                                         }
                                     }
                                 }
@@ -4972,6 +4979,7 @@ async fn run_native_with_hot_reload(
                                     new_rt.preload_audio().await;
                                     println!("[uk run] Restarted `{}`", script_path.display());
                                     current_error = None;
+                                    error_overlay_frames = 0;
                                     reload_banner_text = "RESTARTED".to_string();
                                     reload_banner_frames = 60;
 
@@ -4995,6 +5003,7 @@ async fn run_native_with_hot_reload(
                                         e.full_message
                                     );
                                     current_error = Some(e);
+                                    error_overlay_frames = ERROR_OVERLAY_DURATION_FRAMES;
                                 }
                             }
                         }
@@ -5010,6 +5019,7 @@ async fn run_native_with_hot_reload(
                             backtrace: Vec::new(),
                             full_message: e,
                         });
+                        error_overlay_frames = ERROR_OVERLAY_DURATION_FRAMES;
                     }
                 }
             }
@@ -5030,14 +5040,9 @@ async fn run_native_with_hot_reload(
             if let Err(err) = rt.call_update_result() {
                 if current_error.as_ref() != Some(&err) {
                     eprintln!("{}", err.full_message);
-                    current_error = Some(err);
                 }
-            } else {
-                if let Some(ref cur) = current_error {
-                    if cur.title != "Syntax / Compilation Error" && !cur.title.starts_with("SyntaxError") {
-                        current_error = None;
-                    }
-                }
+                current_error = Some(err);
+                error_overlay_frames = ERROR_OVERLAY_DURATION_FRAMES;
             }
             rt.process_audio().await;
 
@@ -5045,8 +5050,9 @@ async fn run_native_with_hot_reload(
             if let Err(err) = rt.call_draw_result() {
                 if current_error.as_ref() != Some(&err) {
                     eprintln!("{}", err.full_message);
-                    current_error = Some(err);
                 }
+                current_error = Some(err);
+                error_overlay_frames = ERROR_OVERLAY_DURATION_FRAMES;
             }
 
             let show_fps = rt.config.borrow().show_fps;
@@ -5060,8 +5066,14 @@ async fn run_native_with_hot_reload(
             );
             reload_banner_frames = reload_banner_frames.saturating_sub(1);
 
-            if let Some(ref err) = current_error {
-                render_error_overlay(err);
+            if error_overlay_frames > 0 {
+                if let Some(ref err) = current_error {
+                    render_error_overlay(err);
+                }
+                error_overlay_frames = error_overlay_frames.saturating_sub(1);
+                if error_overlay_frames == 0 {
+                    current_error = None;
+                }
             }
         }
 
@@ -5262,6 +5274,7 @@ async fn main() {
     }
     let mut reload_banner_frames: u32 = 0;
     let mut reload_banner_text: String = "HOT RELOADED".to_string();
+    let mut error_overlay_frames: u32 = 0;
 
     loop {
         if WASM_RELOAD_REQUESTED.swap(false, std::sync::atomic::Ordering::SeqCst) {
@@ -5274,6 +5287,7 @@ async fn main() {
                         Ok(()) => {
                             rt.preload_audio().await;
                             current_error = None;
+                            error_overlay_frames = 0;
                             reload_banner_text = "HOT RELOADED".to_string();
                             reload_banner_frames = 60;
                             let (new_w, new_h) = {
@@ -5293,6 +5307,7 @@ async fn main() {
                                 Ok(mut new_rt) => {
                                     new_rt.preload_audio().await;
                                     current_error = None;
+                                    error_overlay_frames = 0;
                                     reload_banner_text = "RESTARTED".to_string();
                                     reload_banner_frames = 60;
                                     let (new_w, new_h) = {
@@ -5311,6 +5326,7 @@ async fn main() {
                                 Err(restart_err) => {
                                     eprintln!("Hot-reload and restart error in browser: {}", restart_err.full_message);
                                     current_error = Some(restart_err);
+                                    error_overlay_frames = ERROR_OVERLAY_DURATION_FRAMES;
                                 }
                             }
                         }
@@ -5320,6 +5336,7 @@ async fn main() {
                         Ok(mut new_rt) => {
                             new_rt.preload_audio().await;
                             current_error = None;
+                            error_overlay_frames = 0;
                             reload_banner_text = "RESTARTED".to_string();
                             reload_banner_frames = 60;
                             let (new_w, new_h) = {
@@ -5338,6 +5355,7 @@ async fn main() {
                         Err(e) => {
                             eprintln!("Restart error in browser: {}", e.full_message);
                             current_error = Some(e);
+                            error_overlay_frames = ERROR_OVERLAY_DURATION_FRAMES;
                         }
                     }
                 }
@@ -5352,14 +5370,9 @@ async fn main() {
             if let Err(err) = rt.call_update_result() {
                 if current_error.as_ref() != Some(&err) {
                     eprintln!("{}", err.full_message);
-                    current_error = Some(err);
                 }
-            } else {
-                if let Some(ref cur) = current_error {
-                    if cur.title != "Syntax / Compilation Error" && !cur.title.starts_with("SyntaxError") {
-                        current_error = None;
-                    }
-                }
+                current_error = Some(err);
+                error_overlay_frames = ERROR_OVERLAY_DURATION_FRAMES;
             }
             rt.process_audio().await;
 
@@ -5367,8 +5380,9 @@ async fn main() {
             if let Err(err) = rt.call_draw_result() {
                 if current_error.as_ref() != Some(&err) {
                     eprintln!("{}", err.full_message);
-                    current_error = Some(err);
                 }
+                current_error = Some(err);
+                error_overlay_frames = ERROR_OVERLAY_DURATION_FRAMES;
             }
 
             let show_fps = rt.config.borrow().show_fps;
@@ -5382,8 +5396,14 @@ async fn main() {
             );
             reload_banner_frames = reload_banner_frames.saturating_sub(1);
 
-            if let Some(ref err) = current_error {
-                render_error_overlay(err);
+            if error_overlay_frames > 0 {
+                if let Some(ref err) = current_error {
+                    render_error_overlay(err);
+                }
+                error_overlay_frames = error_overlay_frames.saturating_sub(1);
+                if error_overlay_frames == 0 {
+                    current_error = None;
+                }
             }
         }
 
