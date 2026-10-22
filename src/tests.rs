@@ -2184,3 +2184,49 @@ end
     runtime2.call_update();
     assert!(runtime2.is_restart_requested());
 }
+
+#[test]
+fn test_tiny_dungeon_example_script() {
+    let script = std::path::Path::new("examples/tiny_dungeon.rb");
+    assert!(script.exists());
+
+    let (_full_src, tail_data, mrb_bytes) =
+        cli::compile_ruby_script_file(script).expect("tiny_dungeon.rb should compile");
+
+    let mut runtime =
+        GameRuntime::new(&tail_data, &mrb_bytes, true).expect("tiny_dungeon.rb should initialize");
+
+    // @SHEET から 0〜131 の全132タイルがロードされていること
+    assert!(
+        runtime.sprites.borrow().len() >= 132,
+        "Should load at least 132 sprites from @SHEET"
+    );
+    for id in 0..132 {
+        assert!(
+            runtime.sprites.borrow().contains_key(&id),
+            "Sprite {} should be loaded",
+            id
+        );
+    }
+
+    // 複数フレーム実行 (update と draw)
+    for _ in 0..15 {
+        runtime
+            .call_update_result()
+            .expect("tiny_dungeon update should succeed");
+        runtime
+            .call_draw_result()
+            .expect("tiny_dungeon draw should succeed");
+    }
+
+    // can_walk? の呼び出しテスト (移動判定が正常に動作し、例外が出ないこと)
+    let can_walk = mrb_funcall(
+        &mut runtime.vm,
+        None,
+        "can_walk?",
+        &[Rc::new(RObject::integer(64)), Rc::new(RObject::integer(64))],
+    )
+    .expect("can_walk? should succeed");
+    assert_eq!(can_walk.as_ref(), &RObject::boolean(true));
+}
+

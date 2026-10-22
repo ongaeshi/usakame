@@ -800,10 +800,44 @@ pub fn parse_tail_resources_full(
             if let Some(id_str) = parts.next()
                 && let Ok(start_id) = id_str.parse::<i32>()
             {
-                let (tile_w, tile_h) = parts
-                    .next()
-                    .and_then(parse_tile_dims)
-                    .unwrap_or((SPRITE_SIZE as u16, SPRITE_SIZE as u16));
+                let mut tile_w = SPRITE_SIZE as u16;
+                let mut tile_h = SPRITE_SIZE as u16;
+                let mut file_path = None;
+                for tok in parts {
+                    if let Some(dims) = parse_tile_dims(tok) {
+                        tile_w = dims.0;
+                        tile_h = dims.1;
+                    } else if file_path.is_none() {
+                        file_path = Some(tok.to_string());
+                    }
+                }
+
+                if let Some(path_str) = file_path {
+                    let path_candidate = if let Some(dir) = base_dir {
+                        dir.join(&path_str)
+                    } else {
+                        PathBuf::from(&path_str)
+                    };
+                    if path_candidate.is_file() {
+                        if let Ok(bytes) = std::fs::read(&path_candidate) {
+                            let b64 = encode_base64(&bytes);
+                            if let Err(e) = decode_png_sheet_into_sprites(&b64, start_id, tile_w, tile_h, &mut sprites) {
+                                eprintln!("Warning: Failed to decode @SHEET file {}: {}", path_candidate.display(), e);
+                            } else {
+                                let bank0 = banks.entry(0).or_insert_with(|| BankData::new(0));
+                                for (id, sp) in sprites.iter() {
+                                    if (0..=255).contains(id) && *id >= start_id {
+                                        bank0.write_16x16(*id as usize, &sp.rgba);
+                                    }
+                                }
+                            }
+                            continue;
+                        } else {
+                            eprintln!("Warning: Failed to read @SHEET file: {}", path_candidate.display());
+                        }
+                    }
+                }
+
                 current_kind = Some(ResourceBlockKind::PngSheet {
                     start_id,
                     tile_w,

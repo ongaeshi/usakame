@@ -286,6 +286,7 @@ uk encode se.wav --id 10
 - **`examples/resolution.rb`**: 640x480 VGA / PC-98 風高解像度デモ（東雲ゴシック 16x16 フォント、16px Twemoji、`sprite_scale: 2` による 32x32 タイル・スプライト、8px 美咲フォントとの混在表示、会話ウィンドウ）
 - **`examples/tilemap.rb`**: タイルマップ描画と破壊・暗視パレット置換デモ
 - **`examples/split_game.rb`**: **コード・リソース完全分離サンプル**（`split_game.spr`, `split_game.map`, `split_game.sfx` の3つの外部ファイルと連携し、別ウィンドウのエディタで保存した瞬間リアルタイムに画面・音が変わるホットリロードの実験用ミニゲーム）
+- **`examples/tiny_dungeon.rb`**: **Kenney「Tiny Dungeon」(CC0) を活用したダンジョン探索 & 全132タイルリファレンスデモ**（勇者の四方向歩行・壁衝突・宝箱オープン＆SE演出・モンスター巡回・Zキーによる「ゲーム」と「16x16全タイルID一覧ビューア」の相互切り替え機能付き）
 - **`examples/camera_clip.rb`**: カメラ追従と分割画面クリッピングデモ
 
 ---

@@ -456,7 +456,9 @@ pub fn compile_ruby_script_file(path: &Path) -> Result<(String, String, Vec<u8>)
     let (embedded_tail, mrb_bytes) =
         compile_ruby_script_str_with_filename(&full_source, Some(&path_str))?;
     let (merged_tail, _) = crate::bundle::load_merged_tail_data(path, &embedded_tail);
-    Ok((full_source, merged_tail, mrb_bytes))
+    let parent_dir = path.parent().unwrap_or_else(|| Path::new(""));
+    let final_tail = crate::bundle::inline_bank_file_paths_in_tail(&merged_tail, parent_dir);
+    Ok((full_source, final_tail, mrb_bytes))
 }
 
 /// `uk pack <script.rb> [-o <output>]` の実装:

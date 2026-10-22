@@ -388,6 +388,37 @@ pub fn inline_bank_file_paths_in_tail(tail_data: &str, base_dir: &Path) -> Strin
 
     for line in tail_data.lines() {
         let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("@SHEET") {
+            let mut parts = rest.split_whitespace();
+            if let Some(id_str) = parts.next()
+                && let Ok(id) = id_str.parse::<i32>()
+            {
+                let mut dims = None;
+                let mut file_path = None;
+                for tok in parts {
+                    if tok.contains('x') || tok.contains('X') {
+                        dims = Some(tok);
+                    } else if file_path.is_none() {
+                        file_path = Some(tok);
+                    }
+                }
+                if let Some(path_str) = file_path {
+                    let path_candidate = base_dir.join(path_str);
+                    if path_candidate.is_file() {
+                        if let Ok(bytes) = std::fs::read(&path_candidate) {
+                            let b64 = encode_base64(&bytes);
+                            let dims_str = dims.unwrap_or("16x16");
+                            out_lines.push(format!("@SHEET {} {}", id, dims_str));
+                            out_lines.push(b64);
+                            continue;
+                        }
+                    }
+                }
+            }
+            out_lines.push(line.to_string());
+            continue;
+        }
+
         if let Some(rest) = trimmed.strip_prefix("@BANK") {
             in_bank_block = true;
             let mut parts = rest.split_whitespace();

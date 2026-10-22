@@ -1,0 +1,5 @@
+# ==============================================================================
+# Kenney Tiny Dungeon (192x176, 16x16 タイル x 132種)
+# License: CC0 1.0 Universal (Public Domain) - https://kenney.nl/assets/tiny-dungeon
+# ==============================================================================
+@SHEET 0 16x16 tiny_dungeon.png
