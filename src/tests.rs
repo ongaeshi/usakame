@@ -2062,3 +2062,42 @@ end
     let count_val = restarted_runtime.vm.globals.get("$count").unwrap();
     assert!(matches!(count_val.value, RValue::Integer(1)));
 }
+
+#[test]
+fn test_script_error_overlay_non_blocking_behavior() {
+    // 実行時に例外が発生しても GameRuntime がパニックせず、エラー情報を保持して後続フレームを実行できる
+    let script = r#"
+$frame = 0
+
+def update
+  $frame += 1
+  undefined_variable_or_method
+end
+"#;
+    let (tail, mrb) = cli::compile_ruby_script_str_with_filename(script, Some("nomethod.rb")).unwrap();
+    let mut runtime = GameRuntime::new(&tail, &mrb, true).unwrap();
+
+    // 1フレーム目: NoMethodError でエラーが返る
+    let err1 = runtime.call_update_result().unwrap_err();
+    assert!(err1.full_message.contains("nomethod.rb") || err1.title.contains("undefined"));
+
+    // ゲームは強制終了せず、ランタイムは生きておりグローバル変数も更新されている
+    let f1 = runtime.vm.globals.get("$frame").unwrap();
+    assert!(matches!(f1.value, RValue::Integer(1)));
+
+    // 2. ホットリロードでバグを修正したスクリプトを適用
+    let fixed_script = r#"
+def update
+  $frame += 1
+end
+"#;
+    let (tail_v2, mrb_v2) = cli::compile_ruby_script_str_with_filename(fixed_script, Some("nomethod.rb")).unwrap();
+    runtime.hot_reload(&tail_v2, &mrb_v2).expect("Hot reload should succeed");
+
+    // 2フレーム目: 状態（$frame = 1）を維持したまま正常に復旧して完了
+    let res2 = runtime.call_update_result();
+    assert!(res2.is_ok());
+
+    let f2 = runtime.vm.globals.get("$frame").unwrap();
+    assert!(matches!(f2.value, RValue::Integer(2)));
+}

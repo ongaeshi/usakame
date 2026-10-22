@@ -1,4 +1,4 @@
-﻿pub mod bundle;
+pub mod bundle;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cli;
 pub mod emoji;
@@ -4346,6 +4346,81 @@ pub fn render_error_screen(err: &ScriptError) {
     );
 }
 
+pub fn render_error_overlay(err: &ScriptError) {
+    apply_gl_scissor(None);
+    set_default_camera();
+
+    let win_w = screen_width();
+    let font_size = 15.0;
+    let line_h = 20.0;
+    let pad_x = 12.0;
+    let pad_y = 8.0;
+
+    let max_chars = ((win_w - pad_x * 2.0) / 9.0).max(20.0) as usize;
+    let mut lines: Vec<(String, Color)> = Vec::new();
+
+    // 1. エラータイトル
+    let header = format!("[SCRIPT ERROR] {}", err.title);
+    for line in wrap_text_lines(&header, max_chars) {
+        lines.push((line, Color::new(1.0, 0.35, 0.35, 1.0)));
+        if lines.len() >= 2 {
+            break;
+        }
+    }
+
+    // 2. 発生箇所 (バックトレース先頭、または full_message 内の行)
+    if lines.len() < 4 {
+        if let Some(frame) = err.backtrace.iter().find(|f| !f.ends_with(":in raise")) {
+            let trace_text = format!("  at {}", frame);
+            for line in wrap_text_lines(&trace_text, max_chars) {
+                lines.push((line, Color::new(0.9, 0.7, 0.7, 1.0)));
+                if lines.len() >= 3 {
+                    break;
+                }
+            }
+        } else if !err.full_message.is_empty() {
+            for orig_line in err.full_message.lines().skip(1) {
+                let trimmed = orig_line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                for line in wrap_text_lines(trimmed, max_chars) {
+                    lines.push((line, Color::new(0.9, 0.7, 0.7, 1.0)));
+                    if lines.len() >= 3 {
+                        break;
+                    }
+                }
+                if lines.len() >= 3 {
+                    break;
+                }
+            }
+        }
+    }
+
+    let footer_h = 16.0;
+    let box_h = pad_y * 2.0 + (lines.len() as f32) * line_h + footer_h;
+
+    // 半透明背景ボックス
+    draw_rectangle(0.0, 0.0, win_w, box_h, Color::new(0.12, 0.02, 0.02, 0.90));
+    // 下端の境界線
+    draw_rectangle(0.0, box_h - 2.0, win_w, 2.0, Color::new(0.85, 0.22, 0.22, 0.95));
+
+    let mut y = pad_y + line_h * 0.75;
+    for (text, col) in &lines {
+        draw_text(text, pad_x, y, font_size, *col);
+        y += line_h;
+    }
+
+    // ヒント案内
+    draw_text(
+        "Edit and save script to fix / hot-reload",
+        pad_x,
+        box_h - 6.0,
+        12.0,
+        Color::new(0.75, 0.75, 0.75, 0.85),
+    );
+}
+
 pub struct GameRuntime {
     pub vm: VM,
     pub sprites: Rc<RefCell<HashMap<i32, SpriteData>>>,
@@ -4819,10 +4894,73 @@ async fn run_native_with_hot_reload(
                 match cli::compile_ruby_script_file(&script_path) {
                     Ok((new_source, new_tail, new_mrb)) => {
                         let new_parsed_config = parse_config_from_source(&new_source);
-                        let is_recovering = current_error.is_some() || runtime_opt.is_none();
+                        if let Some(ref mut rt) = runtime_opt {
+                            // 既存ランタイムがある場合はホットリロード（コード更新＆状態保持）を試みる
+                            if new_parsed_config != AppConfig::default() {
+                                let mut cfg = rt.config.borrow_mut();
+                                *cfg = new_parsed_config.clone();
+                            }
+                            match rt.hot_reload(&new_tail, &new_mrb) {
+                                Ok(()) => {
+                                    rt.preload_audio().await;
+                                    println!("[uk run] Hot-reloaded `{}`", script_path.display());
+                                    current_error = None;
+                                    reload_banner_text = "HOT RELOADED".to_string();
+                                    reload_banner_frames = 60;
+                                    let (new_w, new_h) = {
+                                        let cfg = rt.config.borrow();
+                                        (cfg.screen_width, cfg.screen_height)
+                                    };
+                                    if new_w != cur_virt_w || new_h != cur_virt_h {
+                                        cur_virt_w = new_w;
+                                        cur_virt_h = new_h;
+                                        let (rt_screen, cam) = create_virtual_screen(cur_virt_w, cur_virt_h);
+                                        render_target = rt_screen;
+                                        virtual_camera = cam;
+                                    }
+                                }
+                                Err(_e) => {
+                                    // hot_reload に失敗した場合はインスタンス再生成での復帰を試みる
+                                    match GameRuntime::new_with_args(&new_tail, &new_mrb, false, &script_args) {
+                                        Ok(mut new_rt) => {
+                                            if new_parsed_config != AppConfig::default() {
+                                                let mut cfg = new_rt.config.borrow_mut();
+                                                *cfg = new_parsed_config;
+                                                new_rt.draw_state.borrow_mut().screen_w = cfg.screen_width as i32;
+                                                new_rt.draw_state.borrow_mut().screen_h = cfg.screen_height as i32;
+                                            }
+                                            new_rt.preload_audio().await;
+                                            println!("[uk run] Restarted `{}`", script_path.display());
+                                            current_error = None;
+                                            reload_banner_text = "RESTARTED".to_string();
+                                            reload_banner_frames = 60;
 
-                        if is_recovering {
-                            // エラー状態からの復帰時は新規インスタンスを生成してクリーンに再スタート
+                                            let (new_w, new_h) = {
+                                                let cfg = new_rt.config.borrow();
+                                                (cfg.screen_width, cfg.screen_height)
+                                            };
+                                            if new_w != cur_virt_w || new_h != cur_virt_h {
+                                                cur_virt_w = new_w;
+                                                cur_virt_h = new_h;
+                                                let (rt_screen, cam) = create_virtual_screen(cur_virt_w, cur_virt_h);
+                                                render_target = rt_screen;
+                                                virtual_camera = cam;
+                                            }
+                                            runtime_opt = Some(Box::new(new_rt));
+                                        }
+                                        Err(restart_err) => {
+                                            eprintln!(
+                                                "[uk run] Hot-reload and restart error in `{}`:\n{}",
+                                                script_path.display(),
+                                                restart_err.full_message
+                                            );
+                                            current_error = Some(restart_err);
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            // ランタイムが未初期化だった場合（初回エラー等）は新規生成
                             match GameRuntime::new_with_args(&new_tail, &new_mrb, false, &script_args) {
                                 Ok(mut new_rt) => {
                                     if new_parsed_config != AppConfig::default() {
@@ -4844,8 +4982,8 @@ async fn run_native_with_hot_reload(
                                     if new_w != cur_virt_w || new_h != cur_virt_h {
                                         cur_virt_w = new_w;
                                         cur_virt_h = new_h;
-                                        let (rt, cam) = create_virtual_screen(cur_virt_w, cur_virt_h);
-                                        render_target = rt;
+                                        let (rt_screen, cam) = create_virtual_screen(cur_virt_w, cur_virt_h);
+                                        render_target = rt_screen;
                                         virtual_camera = cam;
                                     }
                                     runtime_opt = Some(Box::new(new_rt));
@@ -4853,39 +4991,6 @@ async fn run_native_with_hot_reload(
                                 Err(e) => {
                                     eprintln!(
                                         "[uk run] Restart runtime error in `{}`:\n{}",
-                                        script_path.display(),
-                                        e.full_message
-                                    );
-                                    current_error = Some(e);
-                                }
-                            }
-                        } else if let Some(ref mut rt) = runtime_opt {
-                            // 通常動作中のホットリロード
-                            if new_parsed_config != AppConfig::default() {
-                                let mut cfg = rt.config.borrow_mut();
-                                *cfg = new_parsed_config;
-                            }
-                            match rt.hot_reload(&new_tail, &new_mrb) {
-                                Ok(()) => {
-                                    rt.preload_audio().await;
-                                    println!("[uk run] Hot-reloaded `{}`", script_path.display());
-                                    reload_banner_text = "HOT RELOADED".to_string();
-                                    reload_banner_frames = 60;
-                                    let (new_w, new_h) = {
-                                        let cfg = rt.config.borrow();
-                                        (cfg.screen_width, cfg.screen_height)
-                                    };
-                                    if new_w != cur_virt_w || new_h != cur_virt_h {
-                                        cur_virt_w = new_w;
-                                        cur_virt_h = new_h;
-                                        let (rt, cam) = create_virtual_screen(cur_virt_w, cur_virt_h);
-                                        render_target = rt;
-                                        virtual_camera = cam;
-                                    }
-                                }
-                                Err(e) => {
-                                    eprintln!(
-                                        "[uk run] Hot-reload runtime error in `{}`:\n{}",
                                         script_path.display(),
                                         e.full_message
                                     );
@@ -4917,31 +5022,46 @@ async fn run_native_with_hot_reload(
             }
         }
 
-        if let Some(ref err) = current_error {
-            render_error_screen(err);
+        if runtime_opt.is_none() {
+            if let Some(ref err) = current_error {
+                render_error_screen(err);
+            }
         } else if let Some(ref mut rt) = runtime_opt {
             if let Err(err) = rt.call_update_result() {
-                eprintln!("{}", err.full_message);
-                current_error = Some(err);
-            } else {
-                rt.process_audio().await;
-
-                set_camera(&virtual_camera);
-                if let Err(err) = rt.call_draw_result() {
+                if current_error.as_ref() != Some(&err) {
                     eprintln!("{}", err.full_message);
                     current_error = Some(err);
-                } else {
-                    let show_fps = rt.config.borrow().show_fps;
-                    present_virtual_screen(
-                        &render_target,
-                        cur_virt_w,
-                        cur_virt_h,
-                        reload_banner_frames,
-                        &reload_banner_text,
-                        show_fps,
-                    );
-                    reload_banner_frames = reload_banner_frames.saturating_sub(1);
                 }
+            } else {
+                if let Some(ref cur) = current_error {
+                    if cur.title != "Syntax / Compilation Error" && !cur.title.starts_with("SyntaxError") {
+                        current_error = None;
+                    }
+                }
+            }
+            rt.process_audio().await;
+
+            set_camera(&virtual_camera);
+            if let Err(err) = rt.call_draw_result() {
+                if current_error.as_ref() != Some(&err) {
+                    eprintln!("{}", err.full_message);
+                    current_error = Some(err);
+                }
+            }
+
+            let show_fps = rt.config.borrow().show_fps;
+            present_virtual_screen(
+                &render_target,
+                cur_virt_w,
+                cur_virt_h,
+                reload_banner_frames,
+                &reload_banner_text,
+                show_fps,
+            );
+            reload_banner_frames = reload_banner_frames.saturating_sub(1);
+
+            if let Some(ref err) = current_error {
+                render_error_overlay(err);
             }
         }
 
@@ -5149,8 +5269,53 @@ async fn main() {
             if let Ok(bytes) = macroquad::file::load_file(&url).await
                 && let Some((new_tail, new_mrb)) = bundle::unpack_bundle_from_bytes(&bytes)
             {
-                let is_recovering = current_error.is_some() || runtime_opt.is_none();
-                if is_recovering {
+                if let Some(ref mut rt) = runtime_opt {
+                    match rt.hot_reload(&new_tail, &new_mrb) {
+                        Ok(()) => {
+                            rt.preload_audio().await;
+                            current_error = None;
+                            reload_banner_text = "HOT RELOADED".to_string();
+                            reload_banner_frames = 60;
+                            let (new_w, new_h) = {
+                                let cfg = rt.config.borrow();
+                                (cfg.screen_width, cfg.screen_height)
+                            };
+                            if new_w != cur_virt_w || new_h != cur_virt_h {
+                                cur_virt_w = new_w;
+                                cur_virt_h = new_h;
+                                let (rt_screen, cam) = create_virtual_screen(cur_virt_w, cur_virt_h);
+                                render_target = rt_screen;
+                                virtual_camera = cam;
+                            }
+                        }
+                        Err(_e) => {
+                            match GameRuntime::new(&new_tail, &new_mrb, false) {
+                                Ok(mut new_rt) => {
+                                    new_rt.preload_audio().await;
+                                    current_error = None;
+                                    reload_banner_text = "RESTARTED".to_string();
+                                    reload_banner_frames = 60;
+                                    let (new_w, new_h) = {
+                                        let cfg = new_rt.config.borrow();
+                                        (cfg.screen_width, cfg.screen_height)
+                                    };
+                                    if new_w != cur_virt_w || new_h != cur_virt_h {
+                                        cur_virt_w = new_w;
+                                        cur_virt_h = new_h;
+                                        let (rt_screen, cam) = create_virtual_screen(cur_virt_w, cur_virt_h);
+                                        render_target = rt_screen;
+                                        virtual_camera = cam;
+                                    }
+                                    runtime_opt = Some(new_rt);
+                                }
+                                Err(restart_err) => {
+                                    eprintln!("Hot-reload and restart error in browser: {}", restart_err.full_message);
+                                    current_error = Some(restart_err);
+                                }
+                            }
+                        }
+                    }
+                } else {
                     match GameRuntime::new(&new_tail, &new_mrb, false) {
                         Ok(mut new_rt) => {
                             new_rt.preload_audio().await;
@@ -5164,8 +5329,8 @@ async fn main() {
                             if new_w != cur_virt_w || new_h != cur_virt_h {
                                 cur_virt_w = new_w;
                                 cur_virt_h = new_h;
-                                let (rt, cam) = create_virtual_screen(cur_virt_w, cur_virt_h);
-                                render_target = rt;
+                                let (rt_screen, cam) = create_virtual_screen(cur_virt_w, cur_virt_h);
+                                render_target = rt_screen;
                                 virtual_camera = cam;
                             }
                             runtime_opt = Some(new_rt);
@@ -5175,58 +5340,50 @@ async fn main() {
                             current_error = Some(e);
                         }
                     }
-                } else if let Some(ref mut rt) = runtime_opt {
-                    match rt.hot_reload(&new_tail, &new_mrb) {
-                        Ok(()) => {
-                            rt.preload_audio().await;
-                            reload_banner_text = "HOT RELOADED".to_string();
-                            reload_banner_frames = 60;
-                            let (new_w, new_h) = {
-                                let cfg = rt.config.borrow();
-                                (cfg.screen_width, cfg.screen_height)
-                            };
-                            if new_w != cur_virt_w || new_h != cur_virt_h {
-                                cur_virt_w = new_w;
-                                cur_virt_h = new_h;
-                                let (rt, cam) = create_virtual_screen(cur_virt_w, cur_virt_h);
-                                render_target = rt;
-                                virtual_camera = cam;
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("Hot-reload error in browser: {}", e.full_message);
-                            current_error = Some(e);
-                        }
-                    }
                 }
             }
         }
 
-        if let Some(ref err) = current_error {
-            render_error_screen(err);
+        if runtime_opt.is_none() {
+            if let Some(ref err) = current_error {
+                render_error_screen(err);
+            }
         } else if let Some(ref mut rt) = runtime_opt {
             if let Err(err) = rt.call_update_result() {
-                eprintln!("{}", err.full_message);
-                current_error = Some(err);
-            } else {
-                rt.process_audio().await;
-
-                set_camera(&virtual_camera);
-                if let Err(err) = rt.call_draw_result() {
+                if current_error.as_ref() != Some(&err) {
                     eprintln!("{}", err.full_message);
                     current_error = Some(err);
-                } else {
-                    let show_fps = rt.config.borrow().show_fps;
-                    present_virtual_screen(
-                        &render_target,
-                        cur_virt_w,
-                        cur_virt_h,
-                        reload_banner_frames,
-                        &reload_banner_text,
-                        show_fps,
-                    );
-                    reload_banner_frames = reload_banner_frames.saturating_sub(1);
                 }
+            } else {
+                if let Some(ref cur) = current_error {
+                    if cur.title != "Syntax / Compilation Error" && !cur.title.starts_with("SyntaxError") {
+                        current_error = None;
+                    }
+                }
+            }
+            rt.process_audio().await;
+
+            set_camera(&virtual_camera);
+            if let Err(err) = rt.call_draw_result() {
+                if current_error.as_ref() != Some(&err) {
+                    eprintln!("{}", err.full_message);
+                    current_error = Some(err);
+                }
+            }
+
+            let show_fps = rt.config.borrow().show_fps;
+            present_virtual_screen(
+                &render_target,
+                cur_virt_w,
+                cur_virt_h,
+                reload_banner_frames,
+                &reload_banner_text,
+                show_fps,
+            );
+            reload_banner_frames = reload_banner_frames.saturating_sub(1);
+
+            if let Some(ref err) = current_error {
+                render_error_overlay(err);
             }
         }
 
