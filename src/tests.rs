@@ -1535,6 +1535,218 @@ fn test_tilemap_editor_example_script() {
 }
 
 #[test]
+fn test_parse_tail_objects_and_ruby_api() {
+    let sample = r#"
+@MAP 0 0
+1111
+1001
+
+@OBJECTS
+# type x y [properties]
+player 48 48 spr="🐰" hp=100
+apple 144 32 spr="🍎" score=100 sound="coin"
+door 160 80 spr=13 target="stage2:16,32" key_id="gold"
+enemy 208 48 spr="🦇" hp=30 speed=1.5 patrol="lr"
+sign 112 112 spr=14 text="Hello world! Danger ahead."
+zone 64 64 w=48 h=32 name="boss_trigger" once=true active
+"#;
+
+    let objs = parse_tail_objects(sample);
+    assert_eq!(objs.len(), 6);
+
+    // 1. player
+    let p = &objs[0];
+    assert_eq!(p.obj_type, "player");
+    assert_eq!(p.x, 48);
+    assert_eq!(p.y, 48);
+    assert_eq!(p.props.get("spr"), Some(&MapPropValue::String("🐰".to_string())));
+    assert_eq!(p.props.get("hp"), Some(&MapPropValue::Integer(100)));
+
+    // 2. apple
+    let a = &objs[1];
+    assert_eq!(a.obj_type, "apple");
+    assert_eq!(a.x, 144);
+    assert_eq!(a.y, 32);
+    assert_eq!(a.props.get("score"), Some(&MapPropValue::Integer(100)));
+    assert_eq!(a.props.get("sound"), Some(&MapPropValue::String("coin".to_string())));
+
+    // 3. door (spr as int)
+    let d = &objs[2];
+    assert_eq!(d.obj_type, "door");
+    assert_eq!(d.props.get("spr"), Some(&MapPropValue::Integer(13)));
+    assert_eq!(d.props.get("target"), Some(&MapPropValue::String("stage2:16,32".to_string())));
+
+    // 4. enemy (float speed)
+    let e = &objs[3];
+    assert_eq!(e.obj_type, "enemy");
+    assert_eq!(e.props.get("speed"), Some(&MapPropValue::Float(1.5)));
+
+    // 5. sign (quoted space string)
+    let s = &objs[4];
+    assert_eq!(s.obj_type, "sign");
+    assert_eq!(s.props.get("text"), Some(&MapPropValue::String("Hello world! Danger ahead.".to_string())));
+
+    // 6. zone (flag boolean)
+    let z = &objs[5];
+    assert_eq!(z.obj_type, "zone");
+    assert_eq!(z.props.get("w"), Some(&MapPropValue::Integer(48)));
+    assert_eq!(z.props.get("h"), Some(&MapPropValue::Integer(32)));
+    assert_eq!(z.props.get("once"), Some(&MapPropValue::Bool(true)));
+    assert_eq!(z.props.get("active"), Some(&MapPropValue::Bool(true)));
+
+    // Ruby API execution test
+    let script = format!(r#"
+$found_player = nil
+$found_apples = []
+objects.each do |obj|
+  if obj[:type] == "player"
+    $found_player = obj
+  end
+end
+
+objects(:apple).each do |a|
+  $found_apples << a
+end
+
+$obj_count = objects.size
+
+def update
+end
+def draw
+end
+__END__
+{}
+"#, sample);
+
+    let (tail, mrb) = cli::compile_ruby_script_str(&script).unwrap();
+    let mut runtime = GameRuntime::new(&tail, &mrb, true).unwrap();
+    println!("GLOBALS: {:?}", runtime.vm.globals.keys().collect::<Vec<_>>());
+    runtime.call_update_result().unwrap();
+
+    // Verify globals
+    let found_p = runtime.vm.globals.get("$found_player").expect("found player");
+    assert!(!found_p.is_nil());
+    let apples = runtime.vm.globals.get("$found_apples").expect("found apples");
+    if let RValue::Array(ref arr) = apples.value {
+        assert_eq!(arr.borrow().len(), 1);
+    } else {
+        panic!("$found_apples must be array");
+    }
+    let count_val = runtime.vm.globals.get("$obj_count").expect("obj count");
+    if let RValue::Integer(cnt) = count_val.value {
+        assert_eq!(cnt, 6);
+    } else {
+        panic!("$obj_count must be 6");
+    }
+
+    // load_resource_objects test
+    let test_map_path = "target/test_objects.map";
+    std::fs::write(test_map_path, sample).unwrap();
+
+    let load_script = format!(r#"
+$loaded_all = load_resource_objects("{}")
+$loaded_apples = load_resource_objects("{}", :apple)
+"#, test_map_path, test_map_path);
+
+    let (_, load_mrb) = cli::compile_ruby_script_str(&load_script).unwrap();
+    let mut load_rt = GameRuntime::new("", &load_mrb, true).unwrap();
+    let _ = load_rt.call_update_result();
+
+    let loaded_all = load_rt.vm.globals.get("$loaded_all").unwrap();
+    if let RValue::Array(ref arr) = loaded_all.value {
+        assert_eq!(arr.borrow().len(), 6);
+    } else {
+        panic!("$loaded_all must be array of 6");
+    }
+
+    let loaded_apples = load_rt.vm.globals.get("$loaded_apples").unwrap();
+    if let RValue::Array(ref arr) = loaded_apples.value {
+        assert_eq!(arr.borrow().len(), 1);
+    } else {
+        panic!("$loaded_apples must be array of 1");
+    }
+
+    let _ = std::fs::remove_file(test_map_path);
+}
+
+#[test]
+fn test_tilemap_editor_object_layer_workflow() {
+    let (_, tail_data, mrb_bytes) =
+        cli::compile_ruby_script_file(std::path::Path::new("examples/tilemap_editor.rb"))
+            .expect("tilemap_editor.rb should compile");
+
+    let mut runtime =
+        GameRuntime::new_with_args(&tail_data, &mrb_bytes, true, &[])
+            .expect("Tilemap editor should initialize");
+
+    // 1フレーム実行
+    runtime.call_update_result().unwrap();
+    runtime.call_draw_result().unwrap();
+
+    // generate_map_text を呼び出して初期状態のマップテキストを確認
+    let res = mrb_funcall(&mut runtime.vm, None, "generate_map_text", &[]).unwrap();
+    let text: String = res.as_ref().try_into().unwrap();
+    assert!(text.contains("@MAP 0 0"));
+
+    // $objects にオブジェクトを追加して generate_map_text をテスト
+    let obj1 = MapObject {
+        obj_type: "player".to_string(),
+        x: 48,
+        y: 64,
+        props: [
+            ("spr".to_string(), MapPropValue::String("🐰".to_string())),
+            ("hp".to_string(), MapPropValue::Integer(100)),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let obj2 = MapObject {
+        obj_type: "apple".to_string(),
+        x: 112,
+        y: 80,
+        props: [
+            ("spr".to_string(), MapPropValue::String("🍎".to_string())),
+            ("score".to_string(), MapPropValue::Integer(50)),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let obj3 = MapObject {
+        obj_type: "door".to_string(),
+        x: 160,
+        y: 32,
+        props: [
+            ("spr".to_string(), MapPropValue::Integer(13)),
+            ("target".to_string(), MapPropValue::String("room2".to_string())),
+        ]
+        .into_iter()
+        .collect(),
+    };
+
+    let objs_ruby = Rc::new(RObject::array(vec![
+        obj1.to_ruby_hash(),
+        obj2.to_ruby_hash(),
+        obj3.to_ruby_hash(),
+    ]));
+    runtime.vm.globals.insert("$objects".to_string(), objs_ruby);
+
+    let res_with_objs = mrb_funcall(&mut runtime.vm, None, "generate_map_text", &[]).unwrap();
+    let out_str: String = res_with_objs.as_ref().try_into().unwrap();
+
+    assert!(out_str.contains("@MAP 0 0"), "Should contain @MAP");
+    assert!(out_str.contains("@OBJECTS"), "Should contain @OBJECTS section");
+    assert!(out_str.contains("player 48 64"), "Should contain player pos");
+    assert!(out_str.contains(r#"spr="🐰""#), "Should contain player spr");
+    assert!(out_str.contains("hp=100"), "Should contain player hp");
+    assert!(out_str.contains("apple 112 80"), "Should contain apple pos");
+    assert!(out_str.contains(r#"spr="🍎""#), "Should contain apple spr");
+    assert!(out_str.contains("score=50"), "Should contain apple score");
+    assert!(out_str.contains("door 160 32"), "Should contain door pos");
+    assert!(out_str.contains("spr=13"), "Should contain door spr");
+    assert!(out_str.contains(r#"target="room2""#), "Should contain door target");
+}
+
+#[test]
 fn test_usakame_survivors_full_simulation() {
     let (full_src, tail_data, mrb_bytes) =
         cli::compile_ruby_script_file(std::path::Path::new("game.rb"))

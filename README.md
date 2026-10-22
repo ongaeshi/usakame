@@ -153,6 +153,8 @@ ch2 wave=noise  vol=2 T140 L8 O2 c r >>> c r <<<
 - `draw_sprite_data(pixels, x, y, scale = 1.0, flip_x = false, flip_y = false)` : メモリ上のピクセル配列（256要素）から高速ダイレクトスプライト描画
 - `map(cel_x, cel_y, sx, sy, cel_w, cel_h)` : タイルマップ一括描画
 - `mget(cel_x, cel_y)` / `mset(cel_x, cel_y, tile_id)` : タイルマップ取得・書換
+- `objects(filter_type = nil)` : マップ上に配置されたオブジェクト一覧を取得（`objects(:apple)` で特定種別のみ抽出も可能）
+- `load_resource_objects(path, filter_type = nil)` : 外部ファイルやスクリプトからオブジェクト定義（`@OBJECTS`）を読込
 - `print_text(str, x, y, col = 7)` : 日本語（美咲ゴシック）＋英数フォント＋インライン絵文字テキスト描画
 - `camera(x = 0, y = 0)` : 仮想スクリーンのカメラ原点設定
 - `clip(x, y, w, h)` : クリッピング領域設定（引数なしでリセット）

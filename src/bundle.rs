@@ -496,7 +496,7 @@ pub fn unpack_tail_data_to_sections(
             || trimmed.starts_with("@B64")
         {
             Some(Category::Sprite)
-        } else if trimmed.starts_with("@MAP") {
+        } else if trimmed.starts_with("@MAP") || trimmed.starts_with("@OBJECTS") {
             Some(Category::Map)
         } else if trimmed.starts_with("@SFX")
             || trimmed.starts_with("@MUSIC")

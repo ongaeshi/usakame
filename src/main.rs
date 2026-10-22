@@ -959,6 +959,151 @@ impl Tilemap {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum MapPropValue {
+    Integer(i64),
+    Float(f64),
+    String(String),
+    Bool(bool),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MapObject {
+    pub obj_type: String,
+    pub x: i32,
+    pub y: i32,
+    pub props: HashMap<String, MapPropValue>,
+}
+
+pub fn tokenize_object_line(line: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    let mut in_quote = false;
+
+    for ch in line.chars() {
+        if ch == '"' {
+            in_quote = !in_quote;
+            cur.push(ch);
+        } else if ch.is_whitespace() && !in_quote {
+            if !cur.is_empty() {
+                tokens.push(cur.clone());
+                cur.clear();
+            }
+        } else {
+            cur.push(ch);
+        }
+    }
+    if !cur.is_empty() {
+        tokens.push(cur);
+    }
+    tokens
+}
+
+pub fn parse_prop_value(val_str: &str) -> MapPropValue {
+    let s = val_str.trim();
+    if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+        return MapPropValue::String(s[1..s.len() - 1].to_string());
+    }
+    if s == "true" {
+        return MapPropValue::Bool(true);
+    }
+    if s == "false" {
+        return MapPropValue::Bool(false);
+    }
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        if let Ok(v) = i64::from_str_radix(hex, 16) {
+            return MapPropValue::Integer(v);
+        }
+    }
+    if let Ok(i) = s.parse::<i64>() {
+        return MapPropValue::Integer(i);
+    }
+    if let Ok(f) = s.parse::<f64>() {
+        return MapPropValue::Float(f);
+    }
+    MapPropValue::String(s.to_string())
+}
+
+/// `__END__` や `.map` の `@OBJECTS` セクションをパースして `Vec<MapObject>` を生成する
+pub fn parse_tail_objects(data_section: &str) -> Vec<MapObject> {
+    let mut objects = Vec::new();
+    let mut in_objects = false;
+
+    for raw_line in data_section.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        if let Some(rest) = line.strip_prefix("@OBJECTS")
+            && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+        {
+            in_objects = true;
+            continue;
+        } else if line.starts_with('@') {
+            in_objects = false;
+        } else if in_objects {
+            let tokens = tokenize_object_line(line);
+            if tokens.len() < 3 {
+                continue;
+            }
+            let obj_type = tokens[0].clone();
+            let x = tokens[1].parse::<i32>().unwrap_or(0);
+            let y = tokens[2].parse::<i32>().unwrap_or(0);
+            let mut props = HashMap::new();
+
+            for tok in &tokens[3..] {
+                let mut parts = tok.splitn(2, '=');
+                let key = parts.next().unwrap_or("").trim();
+                if key.is_empty() {
+                    continue;
+                }
+                if let Some(val) = parts.next() {
+                    props.insert(key.to_string(), parse_prop_value(val));
+                } else {
+                    props.insert(key.to_string(), MapPropValue::Bool(true));
+                }
+            }
+
+            objects.push(MapObject {
+                obj_type,
+                x,
+                y,
+                props,
+            });
+        }
+    }
+
+    objects
+}
+
+impl MapObject {
+    pub fn to_ruby_hash(&self) -> Rc<RObject> {
+        let mut pairs: Vec<(String, Rc<RObject>)> = Vec::new();
+        pairs.push(("type".to_string(), Rc::new(RObject::string(self.obj_type.clone()))));
+        pairs.push(("x".to_string(), Rc::new(RObject::integer(self.x as i64))));
+        pairs.push(("y".to_string(), Rc::new(RObject::integer(self.y as i64))));
+        for (k, v) in &self.props {
+            let robj = match v {
+                MapPropValue::Integer(n) => Rc::new(RObject::integer(*n)),
+                MapPropValue::Float(f) => Rc::new(RObject::float(*f)),
+                MapPropValue::String(s) => Rc::new(RObject::string(s.clone())),
+                MapPropValue::Bool(b) => Rc::new(RObject::boolean(*b)),
+            };
+            pairs.push((k.clone(), robj));
+        }
+
+        let mut hash = mrubyedge::yamrb::value::RHash::default();
+        for (k, v) in pairs {
+            let sym_obj = Rc::new(RObject::symbol(mrubyedge::yamrb::value::RSym::new(k)));
+            if let Ok(hkey) = sym_obj.as_hash_key() {
+                hash.insert(hkey, (sym_obj, v));
+            }
+        }
+        Rc::new(RObject::hash(hash))
+    }
+}
+
 /// `__END__` 以降の `@MAP [offset_x] [offset_y]` セクションをパースして `Tilemap` を生成する
 pub fn parse_tail_map(data_section: &str) -> Tilemap {
     let mut tilemap = Tilemap::new();
@@ -2159,6 +2304,7 @@ fn register_engine_api(
     active_spr_bank: Rc<RefCell<i32>>,
     active_map_bank: Rc<RefCell<i32>>,
     tilemap: Rc<RefCell<Tilemap>>,
+    objects: Rc<RefCell<Vec<MapObject>>>,
     emoji_atlas: Rc<RefCell<emoji::EmojiAtlas>>,
     bitmap_font: Rc<BitmapFont>,
     draw_state: Rc<RefCell<DrawState>>,
@@ -2752,6 +2898,86 @@ fn register_engine_api(
             }
 
             Ok(Rc::new(RObject::array(tiles)))
+        }),
+    );
+
+    // load_resource_objects(path, filter_type = nil): 指定スクリプトまたは外部マップファイルから
+    // オブジェクト一覧を読み込んで配列で返す。@OBJECTS がない場合は空配列を返す。
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "load_resource_objects",
+        Box::new(|_vm, args| {
+            let path_str = args
+                .first()
+                .and_then(|v| String::try_from(v.as_ref()).ok())
+                .unwrap_or_default();
+            if path_str.is_empty() {
+                return Ok(Rc::new(RObject::array(Vec::new())));
+            }
+
+            let filter_opt: Option<String> = args.get(1).and_then(|arg| {
+                match &arg.value {
+                    RValue::Symbol(sym) => Some(sym.name.clone()),
+                    RValue::String(s, _) => String::from_utf8(s.borrow().clone()).ok(),
+                    _ => None,
+                }
+            });
+
+            let p = std::path::Path::new(&path_str);
+            let tail = if p.extension().and_then(|s| s.to_str()) == Some("rb") {
+                cli::compile_ruby_script_file(p)
+                    .map(|(_, t, _)| t)
+                    .unwrap_or_default()
+            } else if p.is_file() {
+                std::fs::read_to_string(p).unwrap_or_default()
+            } else {
+                String::new()
+            };
+
+            let objs = parse_tail_objects(&tail);
+            let mut result = Vec::new();
+            for obj in objs.iter() {
+                if let Some(ref filter) = filter_opt {
+                    if &obj.obj_type != filter {
+                        continue;
+                    }
+                }
+                result.push(obj.to_ruby_hash());
+            }
+
+            Ok(Rc::new(RObject::array(result)))
+        }),
+    );
+
+    // objects(filter_type = nil): 現在のマップに配置されたオブジェクト一覧を取得する。
+    // filter_type が指定された場合はその type に一致するもののみを返す。
+    let objects_for_api = objects.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "objects",
+        Box::new(move |_vm, args| {
+            let filter_opt: Option<String> = args.first().and_then(|arg| {
+                match &arg.value {
+                    RValue::Symbol(sym) => Some(sym.name.clone()),
+                    RValue::String(s, _) => String::from_utf8(s.borrow().clone()).ok(),
+                    _ => None,
+                }
+            });
+
+            let list = objects_for_api.borrow();
+            let mut result = Vec::new();
+            for obj in list.iter() {
+                if let Some(ref filter) = filter_opt {
+                    if &obj.obj_type != filter {
+                        continue;
+                    }
+                }
+                result.push(obj.to_ruby_hash());
+            }
+
+            Ok(Rc::new(RObject::array(result)))
         }),
     );
 
@@ -4228,6 +4454,10 @@ fn register_engine_api(
             Ok(Rc::new(RObject::nil()))
         }),
     );
+
+    let initial_objs_array: Vec<Rc<RObject>> =
+        objects.borrow().iter().map(|o| o.to_ruby_hash()).collect();
+    vm.globals.insert("$OBJECTS".to_string(), Rc::new(RObject::array(initial_objs_array)));
 }
 
 // ==========================================
@@ -4578,6 +4808,7 @@ pub struct GameRuntime {
     pub active_spr_bank: Rc<RefCell<i32>>,
     pub active_map_bank: Rc<RefCell<i32>>,
     pub tilemap: Rc<RefCell<Tilemap>>,
+    pub objects: Rc<RefCell<Vec<MapObject>>>,
     pub emoji_atlas: Rc<RefCell<emoji::EmojiAtlas>>,
     pub bitmap_font: Rc<BitmapFont>,
     pub draw_state: Rc<RefCell<DrawState>>,
@@ -4603,6 +4834,7 @@ impl GameRuntime {
     ) -> Result<Self, ScriptError> {
         let (mut sprites_map, mut banks_map) = parse_tail_resources_full(tail_data, None);
         let tail_map = parse_tail_map(tail_data);
+        let tail_objects = parse_tail_objects(tail_data);
         let (mut sfx_map, mut music_map) = sound::parse_tail_sounds(tail_data);
 
         let mut rite =
@@ -4632,6 +4864,7 @@ impl GameRuntime {
         let active_spr_bank = Rc::new(RefCell::new(0));
         let active_map_bank = Rc::new(RefCell::new(0));
         let tilemap = Rc::new(RefCell::new(tail_map.clone()));
+        let objects = Rc::new(RefCell::new(tail_objects));
         let emoji_atlas = Rc::new(RefCell::new(emoji::EmojiAtlas::new()));
         let bitmap_font = Rc::new(BitmapFont::new(!headless));
         let draw_state = Rc::new(RefCell::new(DrawState::default()));
@@ -4649,6 +4882,7 @@ impl GameRuntime {
             active_spr_bank.clone(),
             active_map_bank.clone(),
             tilemap.clone(),
+            objects.clone(),
             emoji_atlas.clone(),
             bitmap_font.clone(),
             draw_state.clone(),
@@ -4693,6 +4927,7 @@ impl GameRuntime {
             active_spr_bank,
             active_map_bank,
             tilemap,
+            objects,
             emoji_atlas,
             bitmap_font,
             draw_state,
@@ -4737,7 +4972,10 @@ impl GameRuntime {
     pub fn hot_reload(&mut self, new_tail_data: &str, new_mrb_bytes: &[u8]) -> Result<(), ScriptError> {
         let (mut new_sprites_map, mut new_banks_map) = parse_tail_resources_full(new_tail_data, None);
         let new_tail_map = parse_tail_map(new_tail_data);
+        let new_tail_objects = parse_tail_objects(new_tail_data);
         let (mut new_sfx_map, mut new_music_map) = sound::parse_tail_sounds(new_tail_data);
+
+        *self.objects.borrow_mut() = new_tail_objects;
 
         let mut new_rite = rite::load(new_mrb_bytes)
             .map_err(|e| format!("Failed to load RITE(.mrb) on reload: {:?}", e))?;
@@ -4775,6 +5013,7 @@ impl GameRuntime {
             self.active_spr_bank.clone(),
             self.active_map_bank.clone(),
             temp_tilemap.clone(),
+            self.objects.clone(),
             self.emoji_atlas.clone(),
             self.bitmap_font.clone(),
             self.draw_state.clone(),
@@ -4835,6 +5074,7 @@ impl GameRuntime {
             self.active_spr_bank.clone(),
             self.active_map_bank.clone(),
             self.tilemap.clone(),
+            self.objects.clone(),
             self.emoji_atlas.clone(),
             self.bitmap_font.clone(),
             self.draw_state.clone(),
@@ -4847,7 +5087,7 @@ impl GameRuntime {
 
         // 以前のVMから現在のグローバル変数を引き継ぐ
         for (name, live_val) in &self.vm.globals {
-            if matches!(name.as_str(), "$SPRITES" | "$MAP" | "$SFX" | "$MUSIC") {
+            if matches!(name.as_str(), "$SPRITES" | "$MAP" | "$SFX" | "$MUSIC" | "$OBJECTS") {
                 continue;
             }
             let init_changed = match (
