@@ -5,6 +5,7 @@ fn main() {
     let out_dir = std::env::var("OUT_DIR").unwrap();
 
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=vendor");
     println!("cargo:rustc-link-search={}", out_dir);
 
     let mut build = cc::Build::new();
