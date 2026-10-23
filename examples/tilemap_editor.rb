@@ -908,6 +908,11 @@ def update
       end
 
     elsif $current_mode == :objects
+      # マウスボタン解放時: ドラッグ終了
+      if !btn(:mouse_l) && $dragging_obj_idx
+        $dragging_obj_idx = nil
+      end
+
       # オブジェクトモード時の操作
       # スナップ座標の計算
       snap_x = snap_floor(world_x, $grid_snap)
@@ -916,7 +921,8 @@ def update
       # 1. 左クリック押下時: オブジェクト選択 または 新規配置
       if btnp(:mouse_l)
         hit_idx = nil
-        ($objects.size - 1).downto(0) do |i|
+        i = $objects.size - 1
+        while i >= 0
           o = $objects[i]
           ow = o[:w] || 16
           oh = o[:h] || 16
@@ -924,6 +930,7 @@ def update
             hit_idx = i
             break
           end
+          i -= 1
         end
 
         if hit_idx
@@ -967,14 +974,11 @@ def update
         $objects[$dragging_obj_idx][:x] = tx
         $objects[$dragging_obj_idx][:y] = ty
 
-      # 3. マウスボタン解放時: ドラッグ終了
-      elsif !btn(:mouse_l) && $dragging_obj_idx
-        $dragging_obj_idx = nil
-
-      # 4. 右クリック押下時: オブジェクト削除
+      # 3. 右クリック押下時: オブジェクト削除
       elsif btnp(:mouse_r)
         hit_idx = nil
-        ($objects.size - 1).downto(0) do |i|
+        i = $objects.size - 1
+        while i >= 0
           o = $objects[i]
           ow = o[:w] || 16
           oh = o[:h] || 16
@@ -982,6 +986,7 @@ def update
             hit_idx = i
             break
           end
+          i -= 1
         end
         if hit_idx
           push_undo

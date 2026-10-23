@@ -1779,7 +1779,14 @@ fn test_tilemap_editor_object_layer_workflow() {
         &mut runtime.vm,
         obj_cls.clone(),
         "btnp",
-        Box::new(|_, _| Ok(Rc::new(RObject::boolean(true)))),
+        Box::new(|_, args| {
+            if let Some(arg) = args.first() {
+                if let RValue::Symbol(s) = &arg.value {
+                    return Ok(Rc::new(RObject::boolean(s == &"mouse_l".into())));
+                }
+            }
+            Ok(Rc::new(RObject::boolean(false)))
+        }),
     );
     runtime.call_update_result().unwrap();
     let mode = runtime.vm.globals.get("$current_mode").unwrap();
@@ -1797,6 +1804,10 @@ fn test_tilemap_editor_object_layer_workflow() {
     assert_eq!(mode.as_ref(), &RObject::symbol("objects".into()), "Clicking x:150 y:10 should switch to OBJECTS");
 
     // キャンバス上の空白をクリックして新規オブジェクトを配置 (x: 100, y: 100)
+    let init_objs_len = match &runtime.vm.globals.get("$objects").unwrap().value {
+        RValue::Array(a) => a.borrow().len(),
+        _ => 0,
+    };
     mrb_define_cmethod(
         &mut runtime.vm,
         obj_cls.clone(),
@@ -1811,6 +1822,33 @@ fn test_tilemap_editor_object_layer_workflow() {
     );
     runtime.call_update_result().expect("Placing object in objects mode should succeed");
     runtime.call_draw_result().expect("Drawing after placing object should succeed");
+
+    let new_objs_len = match &runtime.vm.globals.get("$objects").unwrap().value {
+        RValue::Array(a) => a.borrow().len(),
+        _ => 0,
+    };
+    assert_eq!(new_objs_len, init_objs_len + 1, "Placing object should add one object to $objects");
+
+    // 右クリックでオブジェクトを削除 (x: 100, y: 100)
+    mrb_define_cmethod(
+        &mut runtime.vm,
+        obj_cls.clone(),
+        "btnp",
+        Box::new(|_, args| {
+            if let Some(arg) = args.first() {
+                if let RValue::Symbol(s) = &arg.value {
+                    return Ok(Rc::new(RObject::boolean(s == &"mouse_r".into())));
+                }
+            }
+            Ok(Rc::new(RObject::boolean(false)))
+        }),
+    );
+    runtime.call_update_result().expect("Deleting object with right-click should succeed");
+    let after_del_len = match &runtime.vm.globals.get("$objects").unwrap().value {
+        RValue::Array(a) => a.borrow().len(),
+        _ => 0,
+    };
+    assert_eq!(after_del_len, init_objs_len, "Right-click delete should remove the object");
 }
 
 #[test]
