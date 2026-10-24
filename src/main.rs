@@ -5891,6 +5891,17 @@ async fn run_native_with_hot_reload(
                 error_overlay_frames = ERROR_OVERLAY_DURATION_FRAMES;
             }
 
+            let show_fps = rt.config.borrow().show_fps;
+            present_virtual_screen(
+                &render_target,
+                cur_virt_w,
+                cur_virt_h,
+                reload_banner_frames,
+                &reload_banner_text,
+                show_fps,
+            );
+            reload_banner_frames = reload_banner_frames.saturating_sub(1);
+
             if is_key_pressed(KeyCode::F12) {
                 match save_screenshot_from_render_target(&render_target) {
                     Ok(path) => {
@@ -5903,17 +5914,6 @@ async fn run_native_with_hot_reload(
                     }
                 }
             }
-
-            let show_fps = rt.config.borrow().show_fps;
-            present_virtual_screen(
-                &render_target,
-                cur_virt_w,
-                cur_virt_h,
-                reload_banner_frames,
-                &reload_banner_text,
-                show_fps,
-            );
-            reload_banner_frames = reload_banner_frames.saturating_sub(1);
 
             if error_overlay_frames > 0 {
                 if let Some(ref err) = current_error {
@@ -5986,6 +5986,17 @@ async fn run_embedded_game(tail_data: String, mrb_bytes: Vec<u8>) {
         set_camera(&virtual_camera);
         runtime.call_draw();
 
+        let show_fps = runtime.config.borrow().show_fps;
+        present_virtual_screen(
+            &render_target,
+            virt_w,
+            virt_h,
+            reload_banner_frames,
+            &reload_banner_text,
+            show_fps,
+        );
+        reload_banner_frames = reload_banner_frames.saturating_sub(1);
+
         if is_key_pressed(KeyCode::F12) {
             match save_screenshot_from_render_target(&render_target) {
                 Ok(path) => {
@@ -5998,17 +6009,6 @@ async fn run_embedded_game(tail_data: String, mrb_bytes: Vec<u8>) {
                 }
             }
         }
-
-        let show_fps = runtime.config.borrow().show_fps;
-        present_virtual_screen(
-            &render_target,
-            virt_w,
-            virt_h,
-            reload_banner_frames,
-            &reload_banner_text,
-            show_fps,
-        );
-        reload_banner_frames = reload_banner_frames.saturating_sub(1);
 
         next_frame().await;
     }
@@ -6318,6 +6318,17 @@ async fn main() {
                 error_overlay_frames = ERROR_OVERLAY_DURATION_FRAMES;
             }
 
+            let show_fps = rt.config.borrow().show_fps;
+            present_virtual_screen(
+                &render_target,
+                cur_virt_w,
+                cur_virt_h,
+                reload_banner_frames,
+                &reload_banner_text,
+                show_fps,
+            );
+            reload_banner_frames = reload_banner_frames.saturating_sub(1);
+
             if is_key_pressed(KeyCode::F12) {
                 match save_screenshot_from_render_target(&render_target) {
                     Ok(path) => {
@@ -6330,17 +6341,6 @@ async fn main() {
                     }
                 }
             }
-
-            let show_fps = rt.config.borrow().show_fps;
-            present_virtual_screen(
-                &render_target,
-                cur_virt_w,
-                cur_virt_h,
-                reload_banner_frames,
-                &reload_banner_text,
-                show_fps,
-            );
-            reload_banner_frames = reload_banner_frames.saturating_sub(1);
 
             if error_overlay_frames > 0 {
                 if let Some(ref err) = current_error {
