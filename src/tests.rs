@@ -2726,3 +2726,59 @@ fn test_256_palette_emojis_available() {
         panic!("EMOJI_PALETTE must be an Array");
     }
 }
+
+#[test]
+fn test_sheet_dimensions_auto_detect_and_bank_size() {
+    let script = std::path::Path::new("examples/tiny_dungeon.rb");
+    assert!(script.exists());
+
+    let (_full_src, tail_data, mrb_bytes) =
+        cli::compile_ruby_script_file(script).expect("tiny_dungeon.rb should compile");
+
+    let runtime =
+        GameRuntime::new(&tail_data, &mrb_bytes, true).expect("tiny_dungeon.rb should initialize");
+
+    let banks = runtime.banks.borrow();
+    let bank0 = banks.get(&0).expect("Bank 0 should be present");
+    // tiny_dungeon.png は 192x176 (12列 x 11行)
+    assert_eq!(bank0.sheet_width, 192, "Auto-detected sheet width should be 192");
+    assert_eq!(bank0.sheet_height, 176, "Auto-detected sheet height should be 176");
+}
+
+#[test]
+fn test_tilemap_editor_hires_and_unshrunk_palette() {
+    let (_, tail_data, mrb_bytes) =
+        cli::compile_ruby_script_file(std::path::Path::new("examples/tilemap_editor.rb"))
+            .expect("tilemap_editor.rb should compile");
+
+    let mut runtime =
+        GameRuntime::new_with_args(&tail_data, &mrb_bytes, true, &["examples/tiny_dungeon.map".to_string()])
+            .expect("Tilemap editor should initialize with tiny_dungeon.map");
+
+    // 画面解像度が 640x360 であること
+    assert_eq!(runtime.config.borrow().screen_width, 640);
+    assert_eq!(runtime.config.borrow().screen_height, 360);
+
+    // バンク寸法が 192x176 (12列 x 11行) であること
+    let sheet_w: i64 = runtime.vm.globals.get("$sheet_w").unwrap().as_ref().try_into().unwrap();
+    let sheet_h: i64 = runtime.vm.globals.get("$sheet_h").unwrap().as_ref().try_into().unwrap();
+    let sheet_cols: i64 = runtime.vm.globals.get("$sheet_cols").unwrap().as_ref().try_into().unwrap();
+    let sheet_rows: i64 = runtime.vm.globals.get("$sheet_rows").unwrap().as_ref().try_into().unwrap();
+    let num_tiles: i64 = runtime.vm.globals.get("$num_tiles").unwrap().as_ref().try_into().unwrap();
+
+    assert_eq!(sheet_w, 192);
+    assert_eq!(sheet_h, 176);
+    assert_eq!(sheet_cols, 12);
+    assert_eq!(sheet_rows, 11);
+    assert_eq!(num_tiles, 132);
+
+    // パレットスクロール初期値が 0 であること
+    let pal_scroll: i64 = runtime.vm.globals.get("$pal_scroll_y").unwrap().as_ref().try_into().unwrap();
+    assert_eq!(pal_scroll, 0);
+
+    // update と draw が問題なく複数フレーム動作すること
+    for _ in 0..5 {
+        runtime.call_update_result().expect("call_update should succeed");
+        runtime.call_draw_result().expect("call_draw should succeed");
+    }
+}

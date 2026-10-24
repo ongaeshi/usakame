@@ -23,9 +23,9 @@
 # ==============================================================================
 
 config(
-  width: 480,
-  height: 270,
-  window_scale: 2.0,
+  width: 640,
+  height: 360,
+  scale: 2.0,
   text_size: 8,
   title: "Usakame Tilemap Editor"
 )
@@ -38,14 +38,19 @@ show_mouse(true)
 # ------------------------------------------------------------------------------
 MAP_WIDTH  = 32
 MAP_HEIGHT = 32
-NUM_TILES  = 256
 MINIMAP_BANK = 127 # ミニマップ高速描画用バンク
 
-# キャンバス表示領域 (320 x 240 px)
+# キャンバス表示領域 (352 x 320 px = 22 x 20 タイル)
 VIEW_X = 8
 VIEW_Y = 22
-VIEW_W = 320
-VIEW_H = 240
+VIEW_W = 352
+VIEW_H = 320
+
+# パレット表示領域の最大寸法 (等倍 16x16 px)
+PAL_X = 368
+PAL_Y = 96
+PAL_MAX_W = 256
+PAL_MAX_H = 192
 
 # タイル情報定義 [ID, 名前, 代表色] (デフォルト16種)
 TILE_INFO = [
@@ -139,6 +144,13 @@ _EMOJI_CAT4 = (
 EMOJI_PALETTE = (_EMOJI_CAT1 + " " + _EMOJI_CAT2 + " " + _EMOJI_CAT3 + " " + _EMOJI_CAT4).split(" ")
 $selected_emoji_idx = 0 # デフォルト "🌲"
 
+$sheet_w = 256
+$sheet_h = 256
+$sheet_cols = 16
+$sheet_rows = 16
+$num_tiles = 256
+$pal_scroll_y = 0     # パレットの縦スクロールオフセット (px)
+
 $cam_x = 0           # カメラ原点 (タイル単位)
 $cam_y = 0
 $selected_tile = 1       # 地形モード選択中タイルID (0..255)
@@ -154,6 +166,21 @@ $notify_timer = 0
 
 $show_code_modal = false
 $modal_scroll = 0
+
+def update_bank_dimensions
+  sz = bank_size($ref_bank)
+  if sz && sz.size >= 2
+    $sheet_w = sz[0].to_i
+    $sheet_h = sz[1].to_i
+  else
+    $sheet_w = 256
+    $sheet_h = 256
+  end
+  $sheet_cols = [($sheet_w / 16).to_i, 1].max
+  $sheet_rows = [($sheet_h / 16).to_i, 1].max
+  $num_tiles = $sheet_cols * $sheet_rows
+  $pal_scroll_y = 0
+end
 
 # ------------------------------------------------------------------------------
 # ターゲットファイル検出 & 初期ロード
@@ -321,6 +348,7 @@ def reload_custom_sprites
   if load_bank($ref_bank, src)
     notify("SYNCED BANK #{$ref_bank} FROM #{src}")
   end
+  update_bank_dimensions
   $minimap_dirty = true
 end
 
@@ -536,8 +564,9 @@ end
 # ------------------------------------------------------------------------------
 def draw_tile_at(tid, px, py, scale = 1.0)
   return if tid <= 0
-  u = (tid % 16) * 16
-  v = (tid / 16) * 16
+  cols = ($sheet_cols && $sheet_cols > 0) ? $sheet_cols : 16
+  u = (tid % cols) * 16
+  v = (tid / cols) * 16
   blt(px, py, $ref_bank, u, v, 16, 16, 0, scale)
 end
 
@@ -624,22 +653,40 @@ def update
   $cam_x = [[$cam_x, 0].max, MAP_WIDTH - max_tiles_x].min
   $cam_y = [[$cam_y, 0].max, MAP_HEIGHT - max_tiles_y].min
 
-  # マウスホイールでタイル/チップ切り替え (0..255)
+  cur_sheet_w = ($current_mode == :objects && $obj_palette_tab == :emoji) ? 256 : $sheet_w
+  cur_sheet_h = ($current_mode == :objects && $obj_palette_tab == :emoji) ? 256 : $sheet_h
+  cur_cols = ($current_mode == :objects && $obj_palette_tab == :emoji) ? 16 : $sheet_cols
+  cur_rows = ($current_mode == :objects && $obj_palette_tab == :emoji) ? 16 : $sheet_rows
+  pal_w = [cur_sheet_w, PAL_MAX_W].min
+  pal_h = [cur_sheet_h, PAL_MAX_H].min
+  max_pal_scroll = [cur_sheet_h - pal_h, 0].max
+
+  in_palette = (mx >= PAL_X && mx < PAL_X + pal_w && my >= PAL_Y && my < PAL_Y + pal_h)
+
+  # マウスホイール: パレット上ならパレット縦スクロール、それ以外はタイル/チップ切り替え
   wheel = mouse_wheel
-  if wheel > 0.2
+  if in_palette && max_pal_scroll > 0
+    if wheel > 0.2
+      $pal_scroll_y = [$pal_scroll_y - 16, 0].max
+      sfx(:cursor)
+    elsif wheel < -0.2
+      $pal_scroll_y = [$pal_scroll_y + 16, max_pal_scroll].min
+      sfx(:cursor)
+    end
+  elsif wheel > 0.2
     if $current_mode == :terrain
-      $selected_tile = ($selected_tile - 1) % NUM_TILES
+      $selected_tile = ($selected_tile - 1) % $num_tiles
     elsif $obj_palette_tab == :chip
-      $selected_obj_chip = ($selected_obj_chip - 1) % NUM_TILES
+      $selected_obj_chip = ($selected_obj_chip - 1) % $num_tiles
     else
       $selected_emoji_idx = ($selected_emoji_idx - 1) % EMOJI_PALETTE.size
     end
     sfx(:cursor)
   elsif wheel < -0.2
     if $current_mode == :terrain
-      $selected_tile = ($selected_tile + 1) % NUM_TILES
+      $selected_tile = ($selected_tile + 1) % $num_tiles
     elsif $obj_palette_tab == :chip
-      $selected_obj_chip = ($selected_obj_chip + 1) % NUM_TILES
+      $selected_obj_chip = ($selected_obj_chip + 1) % $num_tiles
     else
       $selected_emoji_idx = ($selected_emoji_idx + 1) % EMOJI_PALETTE.size
     end
@@ -649,18 +696,18 @@ def update
   # --- コードモーダル表示中の操作 ---
   if $show_code_modal
     if btnp(:mouse_l)
-      # 閉じるボタン (x: 430..460, y: 16..30)
-      if mx >= 430 && mx <= 460 && my >= 16 && my <= 30
+      # 閉じるボタン (x: 580..610, y: 16..30)
+      if mx >= 580 && mx <= 610 && my >= 16 && my <= 30
         $show_code_modal = false
         sfx(:click)
-      # [EXPORT TO CONSOLE] (x: 32..160, y: 236..252)
-      elsif mx >= 32 && mx <= 160 && my >= 236 && my <= 252
+      # [EXPORT TO CONSOLE] (x: 32..160, y: 310..328)
+      elsif mx >= 32 && mx <= 160 && my >= 310 && my <= 328
         export_map_only
-      # [SAVE] (x: 168..240, y: 236..252)
-      elsif mx >= 168 && mx <= 240 && my >= 236 && my <= 252
+      # [SAVE] (x: 168..240, y: 310..328)
+      elsif mx >= 168 && mx <= 240 && my >= 310 && my <= 328
         save_map_file
       # モーダル外クリックで閉じる
-      elsif mx < 20 || mx > 460 || my < 12 || my > 256
+      elsif mx < 20 || mx > 620 || my < 12 || my > 346
         $show_code_modal = false
       end
     end
@@ -673,37 +720,25 @@ def update
     return
   end
 
-  # --- バンクビュー / 絵文字ビュー上でのドラッグ選択 (x: 336..464, y: 98..226) ---
-  if $current_mode == :terrain
-    if (btn(:mouse_l) || btn(:mouse_r)) && (mx >= 336 && mx < 464 && my >= 98 && my < 226)
-      col = ((mx - 336) / 8).to_i
-      row = ((my - 98) / 8).to_i
-      if col >= 0 && col < 16 && row >= 0 && row < 16
-        tid = row * 16 + col
-        if $selected_tile != tid
+  # --- パレット上でのドラッグ・クリック選択 (等倍 16x16 px) ---
+  if in_palette && (btn(:mouse_l) || btn(:mouse_r))
+    col = ((mx - PAL_X) / 16).to_i
+    row = ((my - PAL_Y + $pal_scroll_y) / 16).to_i
+    if col >= 0 && col < cur_cols && row >= 0 && row < cur_rows
+      if $current_mode == :terrain
+        tid = row * cur_cols + col
+        if tid < $num_tiles && $selected_tile != tid
           $selected_tile = tid
           sfx(:select)
         end
-      end
-    end
-  elsif $current_mode == :objects && $obj_palette_tab == :chip
-    if (btn(:mouse_l) || btn(:mouse_r)) && (mx >= 336 && mx < 464 && my >= 98 && my < 226)
-      col = ((mx - 336) / 8).to_i
-      row = ((my - 98) / 8).to_i
-      if col >= 0 && col < 16 && row >= 0 && row < 16
-        tid = row * 16 + col
-        if $selected_obj_chip != tid || !$selected_obj_idx.nil?
+      elsif $current_mode == :objects && $obj_palette_tab == :chip
+        tid = row * cur_cols + col
+        if tid < $num_tiles && ($selected_obj_chip != tid || !$selected_obj_idx.nil?)
           $selected_obj_chip = tid
           $selected_obj_idx = nil
           sfx(:select)
         end
-      end
-    end
-  elsif $current_mode == :objects && $obj_palette_tab == :emoji
-    if (btn(:mouse_l) || btn(:mouse_r)) && (mx >= 336 && mx < 464 && my >= 98 && my < 226)
-      col = ((mx - 336) / 8).to_i
-      row = ((my - 98) / 8).to_i
-      if col >= 0 && col < 16 && row >= 0 && row < 16
+      elsif $current_mode == :objects && $obj_palette_tab == :emoji
         eidx = row * 16 + col
         if eidx >= 0 && eidx < EMOJI_PALETTE.size && ($selected_emoji_idx != eidx || !$selected_obj_idx.nil?)
           $selected_emoji_idx = eidx
@@ -715,43 +750,52 @@ def update
     end
   end
 
+  # パレットスクロールバーのクリック/ドラッグ判定
+  if max_pal_scroll > 0 && btn(:mouse_l)
+    sb_x = PAL_X + pal_w + 3
+    if mx >= sb_x && mx <= sb_x + 8 && my >= PAL_Y && my <= PAL_Y + pal_h
+      ratio = (my - PAL_Y).to_f / pal_h.to_f
+      $pal_scroll_y = (ratio * max_pal_scroll).to_i.clamp(0, max_pal_scroll)
+    end
+  end
+
   # --- UI クリック判定 ---
   if btnp(:mouse_l)
     # ヘッダーバーでのモード切替 & スナップ切替 (y: 2..16)
     if my >= 2 && my <= 16
-      # [TERRAIN] (x: 76..128)
-      if mx >= 76 && mx <= 128
+      # [TERRAIN] (x: 80..136)
+      if mx >= 80 && mx <= 136
         $current_mode = :terrain
         sfx(:click)
         notify("MODE: TERRAIN")
-      # [OBJECTS] (x: 132..184)
-      elsif mx >= 132 && mx <= 184
+      # [OBJECTS] (x: 142..198)
+      elsif mx >= 142 && mx <= 198
         $current_mode = :objects
         sfx(:click)
         notify("MODE: OBJECTS")
-      # [SNAP] (x: 188..246)
-      elsif mx >= 188 && mx <= 246
+      # [SNAP] (x: 204..264)
+      elsif mx >= 204 && mx <= 264
         $grid_snap = ($grid_snap == 16) ? 8 : (($grid_snap == 8) ? 1 : 16)
         sfx(:click)
         notify("SNAP: #{$grid_snap == 1 ? 'FREE' : "#{$grid_snap}PX"}")
       end
     end
 
-    # 0. バンク切替ボタン (x: 406..472, y: 64..78)
+    # 0. バンク切替ボタン (x: 442..500, y: 64..78)
     if my >= 64 && my <= 78
-      if mx >= 406 && mx <= 422
+      if mx >= 442 && mx <= 458
         switch_ref_bank([$ref_bank - 1, 0].max)
         sfx(:click)
-      elsif mx >= 456 && mx <= 472
+      elsif mx >= 484 && mx <= 500
         switch_ref_bank($ref_bank + 1)
         sfx(:click)
       end
     end
 
-    # 1. ミニマップクリック (x: 336..400, y: 24..88) -> カメラジャンプ
-    if mx >= 336 && mx < 400 && my >= 24 && my < 88
-      jump_tx = ((mx - 336) / 2).to_i
-      jump_ty = ((my - 24) / 2).to_i
+    # 1. ミニマップクリック (x: 368..434, y: 22..88) -> カメラジャンプ
+    if mx >= 368 && mx < 434 && my >= 22 && my < 88
+      jump_tx = ((mx - 368) / 2).to_i
+      jump_ty = ((my - 22) / 2).to_i
       $cam_x = jump_tx - (max_tiles_x / 2)
       $cam_y = jump_ty - (max_tiles_y / 2)
       $cam_x = [[$cam_x, 0].max, MAP_WIDTH - max_tiles_x].min
@@ -759,22 +803,22 @@ def update
       sfx(:cursor)
     end
 
-    # 2. 地形モード時: ツールボタン 行1 (y: 230..244)
-    if $current_mode == :terrain && my >= 230 && my <= 244
-      # [PEN] (x: 336..358)
-      if mx >= 336 && mx <= 358
+    # 2. 地形モード時: ツールボタン 行1 (y: 300..314)
+    if $current_mode == :terrain && my >= 300 && my <= 314
+      # [PEN] (x: 368..390)
+      if mx >= 368 && mx <= 390
         $current_tool = :pen; sfx(:click)
-      # [RECT] (x: 362..384)
-      elsif mx >= 362 && mx <= 384
+      # [RECT] (x: 394..416)
+      elsif mx >= 394 && mx <= 416
         $current_tool = :rect; sfx(:click)
-      # [FILL] (x: 388..410)
-      elsif mx >= 388 && mx <= 410
+      # [FILL] (x: 420..442)
+      elsif mx >= 420 && mx <= 442
         $current_tool = :fill; sfx(:click)
-      # [PICK] (x: 414..436)
-      elsif mx >= 414 && mx <= 436
+      # [PICK] (x: 446..468)
+      elsif mx >= 446 && mx <= 468
         $current_tool = :picker; sfx(:click)
-      # [ZOOM] (x: 440..468)
-      elsif mx >= 440 && mx <= 468
+      # [ZOOM] (x: 472..500)
+      elsif mx >= 472 && mx <= 500
         $cell_size = ($cell_size == 16) ? 8 : 16
         sfx(:click)
         notify("ZOOM: #{$cell_size}px")
@@ -783,18 +827,18 @@ def update
 
     # 2-B. オブジェクトモード時のパレット・インスペクタ操作
     if $current_mode == :objects
-      # パレットタブ切替 (y: 84..96)
-      if my >= 84 && my <= 96
-        if mx >= 336 && mx <= 398
+      # パレットタブ切替 (y: 80..92)
+      if my >= 80 && my <= 92
+        if mx >= 368 && mx <= 430
           $obj_palette_tab = :chip; sfx(:click)
-        elsif mx >= 402 && mx <= 468
+        elsif mx >= 434 && mx <= 500
           $obj_palette_tab = :emoji; sfx(:click)
         end
       end
 
-      # インスペクタ行の [DEL] ボタン操作 (y: 230..244)
+      # インスペクタ行の [DEL] ボタン操作 (y: 300..314)
       if $selected_obj_idx && $selected_obj_idx < $objects.size
-        if my >= 230 && my <= 244 && mx >= 336 && mx <= 358
+        if my >= 300 && my <= 314 && mx >= 368 && mx <= 390
           push_undo
           $objects.delete_at($selected_obj_idx)
           $selected_obj_idx = nil
@@ -805,16 +849,16 @@ def update
       end
     end
 
-    # 3. アクションボタン 行2 (y: 248..262)
-    if my >= 248 && my <= 262
-      # [SAVE] (x: 336..358)
-      if mx >= 336 && mx <= 358
+    # 3. アクションボタン 行2 (y: 320..334)
+    if my >= 320 && my <= 334
+      # [SAVE] (x: 368..390)
+      if mx >= 368 && mx <= 390
         save_map_file
-      # [UNDO] (x: 362..386)
-      elsif mx >= 362 && mx <= 386
+      # [UNDO] (x: 394..418)
+      elsif mx >= 394 && mx <= 418
         perform_undo
-      # [GRID] (x: 390..412)
-      elsif mx >= 390 && mx <= 412
+      # [GRID] (x: 422..444)
+      elsif mx >= 422 && mx <= 444
         if $current_mode == :objects
           $grid_snap = ($grid_snap == 16) ? 8 : (($grid_snap == 8) ? 1 : 16)
           sfx(:click)
@@ -824,13 +868,13 @@ def update
           sfx(:click)
           notify("GRID: #{$show_grid ? 'ON' : 'OFF'}")
         end
-      # [CODE] (x: 416..438)
-      elsif mx >= 416 && mx <= 438
+      # [CODE] (x: 448..470)
+      elsif mx >= 448 && mx <= 470
         $show_code_modal = true
         $modal_scroll = 0
         sfx(:click)
-      # [CLR] (x: 442..468)
-      elsif mx >= 442 && mx <= 468
+      # [CLR] (x: 474..500)
+      elsif mx >= 474 && mx <= 500
         if $current_mode == :objects
           if !$objects.empty?
             push_undo
@@ -1024,32 +1068,32 @@ end
 def draw
   cls(0)
 
-  # --- 1. ヘッダーバー (y: 0..18) ---
-  rectfill(0, 0, 480, 18, 1)
-  line(0, 18, 480, 18, 5)
+  # --- 1. ヘッダーバー (y: 0..18, 幅 640) ---
+  rectfill(0, 0, 640, 18, 1)
+  line(0, 18, 640, 18, 5)
   print_text("🗺️ USAKAME", 8, 5, 10)
 
   # [TERRAIN] / [OBJECTS] モード切替タブ
   is_terr = ($current_mode == :terrain)
-  rectfill(76, 3, 52, 12, is_terr ? 11 : 2)
-  rect(76, 3, 52, 12, is_terr ? 7 : 5)
-  print_text("TERRAIN", 81, 5, is_terr ? 0 : 6)
+  rectfill(80, 3, 56, 12, is_terr ? 11 : 2)
+  rect(80, 3, 56, 12, is_terr ? 7 : 5)
+  print_text("TERRAIN", 86, 5, is_terr ? 0 : 6)
 
-  rectfill(132, 3, 52, 12, !is_terr ? 10 : 2)
-  rect(132, 3, 52, 12, !is_terr ? 7 : 5)
-  print_text("OBJECTS", 137, 5, !is_terr ? 0 : 6)
+  rectfill(142, 3, 56, 12, !is_terr ? 10 : 2)
+  rect(142, 3, 56, 12, !is_terr ? 7 : 5)
+  print_text("OBJECTS", 148, 5, !is_terr ? 0 : 6)
 
   # [SNAP] ボタン
   snap_label = ($grid_snap == 1) ? "FREE" : "#{$grid_snap}PX"
-  rectfill(188, 3, 58, 12, ($grid_snap > 1) ? 3 : 2)
-  rect(188, 3, 58, 12, ($grid_snap > 1) ? 11 : 5)
-  print_text("S:#{snap_label}", 196, 5, 7)
+  rectfill(204, 3, 60, 12, ($grid_snap > 1) ? 3 : 2)
+  rect(204, 3, 60, 12, ($grid_snap > 1) ? 11 : 5)
+  print_text("S:#{snap_label}", 212, 5, 7)
 
-  print_text("CAM:(#{$cam_x},#{$cam_y})", 252, 5, 6)
-  print_text("TARGET: #{$save_path}", 322, 5, 11)
-  print_text("FPS:#{fps}", 434, 5, 10)
+  print_text("CAM:(#{$cam_x},#{$cam_y})", 274, 5, 6)
+  print_text("TARGET: #{$save_path}", 360, 5, 11)
+  print_text("FPS:#{fps}", 580, 5, 10)
 
-  # --- 2. メインタイルマップキャンバス (320x240) ---
+  # --- 2. メインタイルマップキャンバス (352x320) ---
   rectfill(VIEW_X - 1, VIEW_Y - 1, VIEW_W + 2, VIEW_H + 2, 0)
   rect(VIEW_X - 1, VIEW_Y - 1, VIEW_W + 2, VIEW_H + 2, 5)
 
@@ -1062,11 +1106,11 @@ def draw
   # 背景の市松模様を一括描画 (オブジェクトモード時は一段暗くする)
   checker_col = ($current_mode == :objects) ? 0 : 1
   if checker_col > 0
-    8.times do |cy|
+    11.times do |cy|
       by = VIEW_Y + cy * 30
-      8.times do |cx|
+      12.times do |cx|
         if (cx + cy) % 2 == 1
-          rectfill(VIEW_X + cx * 40, by, 40, 30, checker_col)
+          rectfill(VIEW_X + cx * 32, by, 32, 30, checker_col)
         end
       end
     end
@@ -1136,18 +1180,13 @@ def draw
         rect(ox, oy, ow, oh, 9)
         rectfill(ox, oy, 3, 3, 10)
       else
-        # TERRAINモード中もオブジェクトと地形を区別できるよう四隅に目印枠を表示
         c_len = [ow / 4, 3].max
-        # 左上
         line(ox, oy, ox + c_len, oy, 9)
         line(ox, oy, ox, oy + c_len, 9)
-        # 右上
         line(ox + ow - 1 - c_len, oy, ox + ow - 1, oy, 9)
         line(ox + ow - 1, oy, ox + ow - 1, oy + c_len, 9)
-        # 左下
         line(ox, oy + oh - 1 - c_len, ox, oy + oh - 1, 9)
         line(ox, oy + oh - 1, ox + c_len, oy + oh - 1, 9)
-        # 右下
         line(ox + ow - 1 - c_len, oy + oh - 1, ox + ow - 1, oy + oh - 1, 9)
         line(ox + ow - 1, oy + oh - 1 - c_len, ox + ow - 1, oy + oh - 1, 9)
       end
@@ -1158,10 +1197,10 @@ def draw
   if $current_mode == :terrain && $rect_drag
     stx = $rect_drag[0]
     sty = $rect_drag[1]
-    mx = mouse_x
-    my = mouse_y
-    cur_tx = $cam_x + ((mx - VIEW_X) / $cell_size).to_i
-    cur_ty = $cam_y + ((my - VIEW_Y) / $cell_size).to_i
+    cur_mx = mouse_x
+    cur_my = mouse_y
+    cur_tx = $cam_x + ((cur_mx - VIEW_X) / $cell_size).to_i
+    cur_ty = $cam_y + ((cur_my - VIEW_Y) / $cell_size).to_i
     cur_tx = [[cur_tx, 0].max, MAP_WIDTH - 1].min
     cur_ty = [[cur_ty, 0].max, MAP_HEIGHT - 1].min
 
@@ -1178,19 +1217,18 @@ def draw
   end
 
   # マウスカーソル枠
-  mx = mouse_x
-  my = mouse_y
-  if mx >= VIEW_X && mx < VIEW_X + VIEW_W && my >= VIEW_Y && my < VIEW_Y + VIEW_H
+  cur_mx = mouse_x
+  cur_my = mouse_y
+  if cur_mx >= VIEW_X && cur_mx < VIEW_X + VIEW_W && cur_my >= VIEW_Y && cur_my < VIEW_Y + VIEW_H
     if $current_mode == :terrain
-      htx = ((mx - VIEW_X) / $cell_size).to_i
-      hty = ((my - VIEW_Y) / $cell_size).to_i
+      htx = ((cur_mx - VIEW_X) / $cell_size).to_i
+      hty = ((cur_my - VIEW_Y) / $cell_size).to_i
       hx = VIEW_X + htx * $cell_size
       hy = VIEW_Y + hty * $cell_size
       rect(hx, hy, $cell_size, $cell_size, 7)
     else
-      # オブジェクトモード時のスナップ枠
-      world_x = ($cam_x * 16 + (mx - VIEW_X) / scale).to_i
-      world_y = ($cam_y * 16 + (my - VIEW_Y) / scale).to_i
+      world_x = ($cam_x * 16 + (cur_mx - VIEW_X) / scale).to_i
+      world_y = ($cam_y * 16 + (cur_my - VIEW_Y) / scale).to_i
       snap_x = snap_floor(world_x, $grid_snap)
       snap_y = snap_floor(world_y, $grid_snap)
       shx = VIEW_X + ((snap_x - $cam_x * 16) * scale).to_i
@@ -1201,103 +1239,159 @@ def draw
 
   clip()
 
-  # --- 3. 右側パネル: ミニマップ & プレビュー ---
-  # ミニマップ (x: 336, y: 24, w: 64, h: 64)
-  rectfill(335, 23, 66, 66, 1)
-  rect(335, 23, 66, 66, 5)
+  # --- 3. 右側パネル: ミニマップ & プレビュー (y: 22..88) ---
+  # ミニマップ (x: 368, y: 22, w: 66, h: 66)
+  rectfill(367, 21, 66, 66, 1)
+  rect(367, 21, 66, 66, 5)
 
   update_minimap_cache
-  blt(336, 24, MINIMAP_BANK, 0, 0, 32, 32, 0, 2.0)
+  blt(368, 22, MINIMAP_BANK, 0, 0, 32, 32, 0, 2.0)
 
-  # ミニマップ上のカメラ表示枠
   cam_vw = (VIEW_W / $cell_size).to_i * 2
   cam_vh = (VIEW_H / $cell_size).to_i * 2
-  rect(336 + $cam_x * 2, 24 + $cam_y * 2, cam_vw, cam_vh, 7)
+  rect(368 + $cam_x * 2, 22 + $cam_y * 2, cam_vw, cam_vh, 7)
 
-  # ミニマップ横: プレビュー (32x32)
-  rectfill(406, 23, 36, 36, 1)
-  rect(406, 23, 36, 36, 5)
+  # プレビュー枠 (32x32)
+  rectfill(442, 21, 36, 36, 1)
+  rect(442, 21, 36, 36, 5)
   if $current_mode == :terrain
     if $selected_tile == 0
-      rectfill(408, 25, 32, 32, 0)
-      line(412, 29, 436, 53, 8)
-      line(412, 53, 436, 29, 8)
+      rectfill(444, 23, 32, 32, 0)
+      line(448, 27, 472, 51, 8)
+      line(448, 51, 472, 27, 8)
     else
-      draw_tile_at($selected_tile, 408, 25, 2.0)
+      draw_tile_at($selected_tile, 444, 23, 2.0)
     end
-    print_text("ID:#{$selected_tile}", 446, 24, 10)
-    u_pos = ($selected_tile % 16) * 16
-    v_pos = ($selected_tile / 16) * 16
-    print_text("U:#{u_pos}", 446, 36, 6)
-    print_text("V:#{v_pos}", 446, 48, 6)
+    print_text("ID:#{$selected_tile}", 486, 22, 10)
+    u_pos = ($selected_tile % $sheet_cols) * 16
+    v_pos = ($selected_tile / $sheet_cols) * 16
+    print_text("U:#{u_pos} V:#{v_pos}", 486, 34, 6)
+    print_text("SHEET:#{$sheet_w}x#{$sheet_h}", 486, 46, 7)
   else
-    # オブジェクトプレビュー & 座標表示
     if $selected_obj_idx && $selected_obj_idx < $objects.size
       sel_o = $objects[$selected_obj_idx]
       if sel_o[:spr].is_a?(Integer) && sel_o[:spr] > 0
-        draw_tile_at(sel_o[:spr], 408, 25, 2.0)
+        draw_tile_at(sel_o[:spr], 444, 23, 2.0)
       elsif sel_o[:spr].is_a?(String)
-        spr(sel_o[:spr], 416, 33)
+        spr(sel_o[:spr], 452, 31)
       else
-        print_text("BOX", 414, 37, 10)
+        print_text("BOX", 450, 35, 10)
       end
-      print_text("#{sel_o[:type].to_s[0, 5]}", 446, 24, 10)
-      print_text("X:#{sel_o[:x]}", 446, 36, 7)
-      print_text("Y:#{sel_o[:y]}", 446, 48, 7)
+      print_text("#{sel_o[:type].to_s[0, 5]}", 486, 22, 10)
+      print_text("X:#{sel_o[:x]} Y:#{sel_o[:y]}", 486, 34, 7)
+      print_text("SHEET:#{$sheet_w}x#{$sheet_h}", 486, 46, 7)
     else
-      # 配置予定のチップ/絵文字
       if $obj_palette_tab == :chip
-        draw_tile_at($selected_obj_chip, 408, 25, 2.0)
-        print_text("CHIP", 446, 24, 10)
-        print_text("ID:#{$selected_obj_chip}", 446, 36, 7)
+        draw_tile_at($selected_obj_chip, 444, 23, 2.0)
+        print_text("CHIP ID:#{$selected_obj_chip}", 486, 22, 10)
+        print_text("SHEET:#{$sheet_w}x#{$sheet_h}", 486, 34, 7)
       else
-        spr(EMOJI_PALETTE[$selected_emoji_idx], 416, 33)
-        print_text("EMOJI", 446, 24, 10)
-        print_text("##{$selected_emoji_idx}", 446, 36, 7)
+        spr(EMOJI_PALETTE[$selected_emoji_idx], 452, 31)
+        print_text("EMOJI ##{$selected_emoji_idx}", 486, 22, 10)
+        print_text("256 EMOJIS", 486, 34, 7)
       end
     end
   end
 
   # バンク切替ボタン (y: 64..78)
-  rectfill(406, 64, 16, 14, 2)
-  rect(406, 64, 16, 14, 6)
-  print_text("<", 411, 67, 7)
+  rectfill(442, 64, 16, 14, 2)
+  rect(442, 64, 16, 14, 6)
+  print_text("<", 447, 67, 7)
 
-  rectfill(424, 64, 30, 14, 1)
-  rect(424, 64, 30, 14, 5)
-  print_text("B#{$ref_bank}", 429, 67, 10)
+  rectfill(460, 64, 22, 14, 1)
+  rect(460, 64, 22, 14, 5)
+  print_text("B#{$ref_bank}", 463, 67, 10)
 
-  rectfill(456, 64, 16, 14, 2)
-  rect(456, 64, 16, 14, 6)
-  print_text(">", 461, 67, 7)
+  rectfill(484, 64, 16, 14, 2)
+  rect(484, 64, 16, 14, 6)
+  print_text(">", 489, 67, 7)
 
-  # --- 4. パレット領域 (y: 84..226) ---
+  # --- 4. パレット領域 (等倍 16x16 px、枠寸法はシートサイズに追従) ---
+  cur_sheet_w = ($current_mode == :objects && $obj_palette_tab == :emoji) ? 256 : $sheet_w
+  cur_sheet_h = ($current_mode == :objects && $obj_palette_tab == :emoji) ? 256 : $sheet_h
+  cur_cols = ($current_mode == :objects && $obj_palette_tab == :emoji) ? 16 : $sheet_cols
+  cur_rows = ($current_mode == :objects && $obj_palette_tab == :emoji) ? 16 : $sheet_rows
+  pal_w = [cur_sheet_w, PAL_MAX_W].min
+  pal_h = [cur_sheet_h, PAL_MAX_H].min
+  max_pal_scroll = [cur_sheet_h - pal_h, 0].max
+
   if $current_mode == :terrain
-    # 地形モード: バンク全体表示 (128x128)
-    print_text("BANK #{$ref_bank} TILES (16x16)", 336, 88, 6)
+    print_text("BANK #{$ref_bank} TILES (#{$sheet_w}x#{$sheet_h}, 16x16)", PAL_X, 82, 6)
+  else
+    # タブ (y: 80..92)
+    rectfill(PAL_X, 80, 62, 12, ($obj_palette_tab == :chip) ? 10 : 1)
+    rect(PAL_X, 80, 62, 12, ($obj_palette_tab == :chip) ? 7 : 5)
+    print_text("CHIP", PAL_X + 16, 82, ($obj_palette_tab == :chip) ? 0 : 6)
 
-    rectfill(335, 97, 130, 130, 1)
-    rect(335, 97, 130, 130, 5)
+    rectfill(PAL_X + 66, 80, 64, 12, ($obj_palette_tab == :emoji) ? 10 : 1)
+    rect(PAL_X + 66, 80, 64, 12, ($obj_palette_tab == :emoji) ? 7 : 5)
+    print_text("EMOJI", PAL_X + 80, 82, ($obj_palette_tab == :emoji) ? 0 : 6)
+  end
 
-    blt(336, 98, $ref_bank, 0, 0, 256, 256, 0, 0.5)
+  # パレット外枠
+  rectfill(PAL_X - 1, PAL_Y - 1, pal_w + 2, pal_h + 2, 1)
+  rect(PAL_X - 1, PAL_Y - 1, pal_w + 2, pal_h + 2, 5)
 
-    rect(336, 98, 8, 8, 8)
-    line(337, 99, 342, 104, 8)
-    line(337, 104, 342, 99, 8)
+  clip(PAL_X, PAL_Y, pal_w, pal_h)
 
-    sel_col = $selected_tile % 16
-    sel_row = $selected_tile / 16
-    bx = 336 + sel_col * 8
-    by = 98 + sel_row * 8
-    rect(bx - 1, by - 1, 10, 10, 10)
-    rect(bx, by, 8, 8, 7)
+  if $current_mode == :terrain || $obj_palette_tab == :chip
+    # 等倍 (scale = 1.0) でバンク画像を描画
+    blt(PAL_X, PAL_Y - $pal_scroll_y, $ref_bank, 0, 0, cur_sheet_w, cur_sheet_h, 0, 1.0)
 
-    # ツールボタン 行1 (y: 230..244)
+    # 選択タイル枠
+    cur_sel_tid = ($current_mode == :terrain) ? $selected_tile : $selected_obj_chip
+    if cur_sel_tid < $num_tiles
+      sel_col = cur_sel_tid % cur_cols
+      sel_row = cur_sel_tid / cur_cols
+      bx = PAL_X + sel_col * 16
+      by = PAL_Y + sel_row * 16 - $pal_scroll_y
+      rect(bx - 1, by - 1, 18, 18, 10)
+      rect(bx, by, 16, 16, 7)
+    end
+  else
+    # オブジェクトモード: 絵文字パレット (等倍 16x16 で一括描画)
+    rectfill(PAL_X, PAL_Y, 256, 256, 0)
+    EMOJI_PALETTE.each_with_index do |em, i|
+      col = i % 16
+      row = i / 16
+      ex = PAL_X + col * 16
+      ey = PAL_Y + row * 16 - $pal_scroll_y
+      next if ey + 16 < PAL_Y || ey > PAL_Y + pal_h
+      spr(em, ex, ey)
+    end
+
+    sel_col = $selected_emoji_idx % 16
+    sel_row = $selected_emoji_idx / 16
+    bx = PAL_X + sel_col * 16
+    by = PAL_Y + sel_row * 16 - $pal_scroll_y
+    rect(bx - 1, by - 1, 18, 18, 10)
+    rect(bx, by, 16, 16, 7)
+  end
+
+  clip()
+
+  # パレット縦スクロールバー表示
+  if max_pal_scroll > 0
+    sb_x = PAL_X + pal_w + 3
+    sb_y = PAL_Y
+    sb_w = 6
+    sb_h = pal_h
+    rectfill(sb_x, sb_y, sb_w, sb_h, 1)
+    rect(sb_x, sb_y, sb_w, sb_h, 5)
+
+    thumb_h = [(pal_h * pal_h / cur_sheet_h).to_i, 16].max
+    thumb_y = sb_y + ($pal_scroll_y * (sb_h - thumb_h) / max_pal_scroll).to_i
+    rectfill(sb_x + 1, thumb_y, sb_w - 2, thumb_h, 6)
+  end
+
+  # --- 5. ツールボタン & アクションボタン (y: 300..336) ---
+  if $current_mode == :terrain
+    # ツールボタン 行1 (y: 300..314)
     tool_buttons = [
-      [:pen,    "PEN",  336, 22],
-      [:rect,   "RCT",  362, 22],
-      [:fill,   "FIL",  388, 22],
-      [:picker, "PCK",  414, 22]
+      [:pen,    "PEN",  368, 22],
+      [:rect,   "RCT",  394, 22],
+      [:fill,   "FIL",  420, 22],
+      [:picker, "PCK",  446, 22]
     ]
     tool_buttons.each do |tb|
       t_id = tb[0]
@@ -1305,130 +1399,75 @@ def draw
       t_x = tb[2]
       t_w = tb[3]
       active = ($current_tool == t_id)
-      rectfill(t_x, 230, t_w, 14, active ? 8 : 1)
-      rect(t_x, 230, t_w, 14, active ? 7 : 5)
-      print_text(t_name, t_x + 3, 233, active ? 7 : 6)
+      rectfill(t_x, 300, t_w, 14, active ? 8 : 1)
+      rect(t_x, 300, t_w, 14, active ? 7 : 5)
+      print_text(t_name, t_x + 3, 303, active ? 7 : 6)
     end
 
     # [ZOOM]
-    rectfill(440, 230, 28, 14, ($cell_size == 8) ? 9 : 1)
-    rect(440, 230, 28, 14, ($cell_size == 8) ? 10 : 5)
-    print_text(($cell_size == 16) ? "16P" : "8PX", 444, 233, 7)
-
+    rectfill(472, 300, 28, 14, ($cell_size == 8) ? 9 : 1)
+    rect(472, 300, 28, 14, ($cell_size == 8) ? 10 : 5)
+    print_text(($cell_size == 16) ? "16P" : "8PX", 476, 303, 7)
   else
-    # オブジェクトモード: [CHIP] / [EMOJI] パレット & インスペクタ
-    # タブ (y: 84..95)
-    rectfill(336, 84, 62, 12, ($obj_palette_tab == :chip) ? 10 : 1)
-    rect(336, 84, 62, 12, ($obj_palette_tab == :chip) ? 7 : 5)
-    print_text("CHIP (256)", 342, 86, ($obj_palette_tab == :chip) ? 0 : 6)
-
-    rectfill(402, 84, 64, 12, ($obj_palette_tab == :emoji) ? 10 : 1)
-    rect(402, 84, 64, 12, ($obj_palette_tab == :emoji) ? 7 : 5)
-    print_text("EMOJI (256)", 406, 86, ($obj_palette_tab == :emoji) ? 0 : 6)
-
-    # パレット中央領域 (y: 97..227, 128x128px)
-    rectfill(335, 97, 130, 130, 1)
-    rect(335, 97, 130, 130, 5)
-
-    if $obj_palette_tab == :chip
-      blt(336, 98, $ref_bank, 0, 0, 256, 256, 0, 0.5)
-
-      rect(336, 98, 8, 8, 8)
-      line(337, 99, 342, 104, 8)
-      line(337, 104, 342, 99, 8)
-
-      sel_col = $selected_obj_chip % 16
-      sel_row = $selected_obj_chip / 16
-      bx = 336 + sel_col * 8
-      by = 98 + sel_row * 8
-      rect(bx - 1, by - 1, 10, 10, 10)
-      rect(bx, by, 8, 8, 7)
-
-    else
-      # 256個の絵文字 (16列 × 16行 = 256) を 8x8 で一括描画
-      rectfill(336, 98, 128, 128, 0)
-      EMOJI_PALETTE.each_with_index do |em, i|
-        col = i % 16
-        row = i / 16
-        ex = 336 + col * 8
-        ey = 98 + row * 8
-        spr(em, ex, ey, false, false, 0, 0.5)
-      end
-
-      sel_col = $selected_emoji_idx % 16
-      sel_row = $selected_emoji_idx / 16
-      bx = 336 + sel_col * 8
-      by = 98 + sel_row * 8
-      rect(bx - 1, by - 1, 10, 10, 10)
-      rect(bx, by, 8, 8, 7)
-    end
-
-    # 行1: 選択中オブジェクトのインスペクタ表示 (Read-Only) + [DEL] (y: 230..244)
+    # オブジェクトモード: インスペクタ / DEL
     if $selected_obj_idx && $selected_obj_idx < $objects.size
       sel_o = $objects[$selected_obj_idx]
-      # [DEL]
-      rectfill(336, 230, 22, 14, 8)
-      rect(336, 230, 22, 14, 7)
-      print_text("DEL", 339, 233, 7)
+      rectfill(368, 300, 22, 14, 8)
+      rect(368, 300, 22, 14, 7)
+      print_text("DEL", 371, 303, 7)
 
-      # プロパティ表示ボックス (x: 361..468)
-      rectfill(361, 230, 107, 14, 0)
-      rect(361, 230, 107, 14, 5)
+      rectfill(393, 300, 137, 14, 0)
+      rect(393, 300, 137, 14, 5)
       extra_props = format_obj_props(sel_o, false)
       insp_text = extra_props.empty? ? format_obj_props(sel_o, true) : extra_props
       insp_text = "NO PROPS" if insp_text.empty?
-      clip(363, 231, 103, 12)
-      print_text(insp_text, 364, 233, 10)
+      clip(395, 301, 133, 12)
+      print_text(insp_text, 396, 303, 10)
       clip()
     else
-      rectfill(336, 230, 132, 14, 0)
-      rect(336, 230, 132, 14, 5)
+      rectfill(368, 300, 162, 14, 0)
+      rect(368, 300, 162, 14, 5)
       if $obj_palette_tab == :chip
-        print_text("STAMP CHIP #{$selected_obj_chip}", 342, 233, 6)
+        print_text("STAMP CHIP #{$selected_obj_chip}", 374, 303, 6)
       else
-        print_text("STAMP #{EMOJI_PALETTE[$selected_emoji_idx]} (##{$selected_emoji_idx})", 342, 233, 6)
+        print_text("STAMP #{EMOJI_PALETTE[$selected_emoji_idx]}", 374, 303, 6)
       end
     end
   end
 
-  # --- 5. アクションボタン 行2 (y: 248..262) ---
-  # [SAVE]
-  rectfill(336, 248, 22, 14, 11)
-  rect(336, 248, 22, 14, 7)
-  print_text("SV", 341, 251, 0)
+  # アクションボタン 行2 (y: 320..334)
+  rectfill(368, 320, 22, 14, 11)
+  rect(368, 320, 22, 14, 7)
+  print_text("SV", 373, 323, 0)
 
-  # [UNDO]
-  rectfill(362, 248, 24, 14, 1)
-  rect(362, 248, 24, 14, 5)
-  print_text("UND", 365, 251, 7)
+  rectfill(394, 320, 24, 14, 1)
+  rect(394, 320, 24, 14, 5)
+  print_text("UND", 397, 323, 7)
 
-  # [SNAP] / [GRID]
   if $current_mode == :objects
     snap_btn = ($grid_snap == 1) ? "FR" : "#{$grid_snap}"
-    rectfill(390, 248, 22, 14, 3)
-    rect(390, 248, 22, 14, 11)
-    print_text(snap_btn, 394, 251, 7)
+    rectfill(422, 320, 22, 14, 3)
+    rect(422, 320, 22, 14, 11)
+    print_text(snap_btn, 426, 323, 7)
   else
-    rectfill(390, 248, 22, 14, $show_grid ? 3 : 1)
-    rect(390, 248, 22, 14, $show_grid ? 11 : 5)
-    print_text("GR", 394, 251, 7)
+    rectfill(422, 320, 22, 14, $show_grid ? 3 : 1)
+    rect(422, 320, 22, 14, $show_grid ? 11 : 5)
+    print_text("GR", 426, 323, 7)
   end
 
-  # [CODE]
-  rectfill(416, 248, 22, 14, 1)
-  rect(416, 248, 22, 14, 5)
-  print_text("CD", 420, 251, 7)
+  rectfill(448, 320, 22, 14, 1)
+  rect(448, 320, 22, 14, 5)
+  print_text("CD", 452, 323, 7)
 
-  # [CLR]
-  rectfill(442, 248, 26, 14, 1)
-  rect(442, 248, 26, 14, 8)
-  print_text("CLR", 447, 251, 8)
+  rectfill(474, 320, 26, 14, 1)
+  rect(474, 320, 26, 14, 8)
+  print_text("CLR", 479, 323, 8)
 
   # --- 6. 通知メッセージ または 選択中オブジェクト詳細バー ---
   if $notify_timer > 0
     nw = $notify_msg.size * 6 + 12
     nx = 8
-    ny = 246
+    ny = 344
     rectfill(nx, ny, nw, 14, 0)
     rect(nx, ny, nw, 14, 10)
     print_text($notify_msg, nx + 6, ny + 3, 10)
@@ -1443,27 +1482,27 @@ def draw
     clip()
   end
 
-  # --- 7. コードプレビューモーダル ---
+  # --- 7. コードプレビューモーダル (640x360 画面用) ---
   if $show_code_modal
-    rectfill(20, 10, 440, 250, 0)
-    rect(20, 10, 440, 250, 7)
-    rect(22, 12, 436, 246, 1)
+    rectfill(20, 10, 600, 336, 0)
+    rect(20, 10, 600, 336, 7)
+    rect(22, 12, 596, 332, 1)
 
     print_text("📋 CODE PREVIEW - @MAP DATA", 32, 18, 10)
 
     # 閉じるボタン
-    rectfill(430, 16, 22, 12, 8)
-    rect(430, 16, 22, 12, 7)
-    print_text("X", 438, 18, 7)
+    rectfill(580, 16, 22, 12, 8)
+    rect(580, 16, 22, 12, 7)
+    print_text("X", 588, 18, 7)
 
     # コード表示ボックス
-    rectfill(30, 34, 420, 196, 0)
-    rect(30, 34, 420, 196, 5)
+    rectfill(30, 34, 580, 268, 0)
+    rect(30, 34, 580, 268, 5)
 
-    clip(32, 36, 416, 192)
+    clip(32, 36, 576, 264)
     export_lines = generate_map_text.split("\n")
     start_line = $modal_scroll
-    visible_count = 19
+    visible_count = 26
     visible_count.times do |i|
       idx = start_line + i
       if idx < export_lines.size
@@ -1473,13 +1512,13 @@ def draw
     clip()
 
     # モーダル下部ボタン
-    rectfill(32, 236, 120, 16, 1)
-    rect(32, 236, 120, 16, 7)
-    print_text("EXPORT CONSOLE", 38, 240, 7)
+    rectfill(32, 310, 120, 16, 1)
+    rect(32, 310, 120, 16, 7)
+    print_text("EXPORT CONSOLE", 38, 314, 7)
 
-    rectfill(160, 236, 80, 16, 11)
-    rect(160, 236, 80, 16, 7)
-    print_text("SAVE MAP", 172, 240, 0)
+    rectfill(160, 310, 80, 16, 11)
+    rect(160, 310, 80, 16, 7)
+    print_text("SAVE MAP", 172, 314, 0)
   end
 end
 

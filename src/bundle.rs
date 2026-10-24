@@ -393,11 +393,11 @@ pub fn inline_bank_file_paths_in_tail(tail_data: &str, base_dir: &Path) -> Strin
             if let Some(id_str) = parts.next()
                 && let Ok(id) = id_str.parse::<i32>()
             {
-                let mut dims = None;
+                let mut dims_tokens = Vec::new();
                 let mut file_path = None;
                 for tok in parts {
                     if tok.contains('x') || tok.contains('X') {
-                        dims = Some(tok);
+                        dims_tokens.push(tok);
                     } else if file_path.is_none() {
                         file_path = Some(tok);
                     }
@@ -407,7 +407,11 @@ pub fn inline_bank_file_paths_in_tail(tail_data: &str, base_dir: &Path) -> Strin
                     if path_candidate.is_file() {
                         if let Ok(bytes) = std::fs::read(&path_candidate) {
                             let b64 = encode_base64(&bytes);
-                            let dims_str = dims.unwrap_or("16x16");
+                            let dims_str = if dims_tokens.is_empty() {
+                                "16x16".to_string()
+                            } else {
+                                dims_tokens.join(" ")
+                            };
                             out_lines.push(format!("@SHEET {} {}", id, dims_str));
                             out_lines.push(b64);
                             continue;

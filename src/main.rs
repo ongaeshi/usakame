@@ -265,6 +265,9 @@ pub struct BankData {
     pub id: i32,
     pub width: u16,
     pub height: u16,
+    /// シートの有効サイズ（ピクセル単位、デフォルト 256x256、@SHEET 192x176 等では 192x176）
+    pub sheet_width: u16,
+    pub sheet_height: u16,
     /// RGBA ピクセルデータ (256 * 256 * 4 bytes)
     pub rgba: Vec<u8>,
     /// パレットインデックスデータ (256 * 256 elements, 0..15 or None)
@@ -287,6 +290,8 @@ impl BankData {
             id,
             width: BANK_WIDTH as u16,
             height: BANK_HEIGHT as u16,
+            sheet_width: BANK_WIDTH as u16,
+            sheet_height: BANK_HEIGHT as u16,
             rgba: vec![0u8; BANK_RGBA_BYTES],
             indexed: vec![None; BANK_PIXELS],
             texture: RefCell::new(None),
@@ -299,6 +304,8 @@ impl BankData {
         let mut bank = Self::new(id);
         let copy_w = (img.width as usize).min(BANK_WIDTH);
         let copy_h = (img.height as usize).min(BANK_HEIGHT);
+        bank.sheet_width = copy_w as u16;
+        bank.sheet_height = copy_h as u16;
         for y in 0..copy_h {
             let src_start = (y * img.width as usize) * 4;
             let src_end = src_start + copy_w * 4;
@@ -345,9 +352,14 @@ impl BankData {
     }
 
     pub fn write_16x16(&mut self, slot_id: usize, src_rgba: &[u8]) {
-        let slot_x = (slot_id % 16) * 16;
-        let slot_y = (slot_id / 16) * 16;
-        if slot_y + 16 > BANK_HEIGHT {
+        self.write_tile(slot_id, (self.sheet_width / 16).max(1) as usize, src_rgba);
+    }
+
+    pub fn write_tile(&mut self, slot_id: usize, cols: usize, src_rgba: &[u8]) {
+        let cols = cols.max(1);
+        let slot_x = (slot_id % cols) * 16;
+        let slot_y = (slot_id / cols) * 16;
+        if slot_y + 16 > BANK_HEIGHT || slot_x + 16 > BANK_WIDTH {
             return;
         }
         for y in 0..16 {
@@ -595,13 +607,14 @@ impl BankData {
 }
 
 /// PNG スプライトシート (Base64) を指定タイルサイズ (デフォルト 16x16) で分割して `sprites` に登録する
+/// 戻り値: (登録タイル数, シート幅, シート高さ)
 pub fn decode_png_sheet_into_sprites(
     b64_text: &str,
     start_id: i32,
     tile_w: u16,
     tile_h: u16,
     sprites: &mut HashMap<i32, SpriteData>,
-) -> Result<usize, String> {
+) -> Result<(usize, u16, u16), String> {
     let bytes = decode_base64(b64_text)?;
     let img = Image::from_file_with_format(&bytes, Some(ImageFormat::Png))
         .map_err(|e| format!("Failed to decode @SHEET PNG: {:?}", e))?;
@@ -632,7 +645,7 @@ pub fn decode_png_sheet_into_sprites(
         }
     }
 
-    Ok(count)
+    Ok((count, img.width, img.height))
 }
 
 #[derive(Clone, Copy)]
@@ -643,6 +656,8 @@ enum ResourceBlockKind {
         start_id: i32,
         tile_w: u16,
         tile_h: u16,
+        sheet_w: Option<u16>,
+        sheet_h: Option<u16>,
     },
     Bank(i32),
 }
@@ -699,20 +714,28 @@ fn flush_resource_block(
             start_id,
             tile_w,
             tile_h,
+            sheet_w,
+            sheet_h,
         } => {
             let joined = lines.join("");
-            if let Err(e) =
-                decode_png_sheet_into_sprites(&joined, start_id, tile_w, tile_h, sprites)
-            {
-                eprintln!(
-                    "Warning: Failed to decode @SHEET starting at {}: {}",
-                    start_id, e
-                );
-            } else {
-                let bank0 = banks.entry(0).or_insert_with(|| BankData::new(0));
-                for (id, sp) in sprites.iter() {
-                    if (0..=255).contains(id) && *id >= start_id {
-                        bank0.write_16x16(*id as usize, &sp.rgba);
+            match decode_png_sheet_into_sprites(&joined, start_id, tile_w, tile_h, sprites) {
+                Err(e) => {
+                    eprintln!(
+                        "Warning: Failed to decode @SHEET starting at {}: {}",
+                        start_id, e
+                    );
+                }
+                Ok((_count, img_w, img_h)) => {
+                    let final_w = sheet_w.unwrap_or(img_w);
+                    let final_h = sheet_h.unwrap_or(img_h);
+                    let cols = (final_w / tile_w.max(1)).max(1) as usize;
+                    let bank0 = banks.entry(0).or_insert_with(|| BankData::new(0));
+                    bank0.sheet_width = final_w;
+                    bank0.sheet_height = final_h;
+                    for (id, sp) in sprites.iter() {
+                        if (0..=255).contains(id) && *id >= start_id {
+                            bank0.write_tile((*id - start_id) as usize, cols, &sp.rgba);
+                        }
                     }
                 }
             }
@@ -802,13 +825,31 @@ pub fn parse_tail_resources_full(
             {
                 let mut tile_w = SPRITE_SIZE as u16;
                 let mut tile_h = SPRITE_SIZE as u16;
+                let mut sheet_w = None;
+                let mut sheet_h = None;
                 let mut file_path = None;
+                let mut dims_tokens = Vec::new();
                 for tok in parts {
                     if let Some(dims) = parse_tile_dims(tok) {
-                        tile_w = dims.0;
-                        tile_h = dims.1;
+                        dims_tokens.push(dims);
                     } else if file_path.is_none() {
                         file_path = Some(tok.to_string());
+                    }
+                }
+
+                if dims_tokens.len() >= 2 {
+                    tile_w = dims_tokens[0].0;
+                    tile_h = dims_tokens[0].1;
+                    sheet_w = Some(dims_tokens[1].0);
+                    sheet_h = Some(dims_tokens[1].1);
+                } else if dims_tokens.len() == 1 {
+                    let d = dims_tokens[0];
+                    if d.0 > 32 || d.1 > 32 {
+                        sheet_w = Some(d.0);
+                        sheet_h = Some(d.1);
+                    } else {
+                        tile_w = d.0;
+                        tile_h = d.1;
                     }
                 }
 
@@ -821,13 +862,21 @@ pub fn parse_tail_resources_full(
                     if path_candidate.is_file() {
                         if let Ok(bytes) = std::fs::read(&path_candidate) {
                             let b64 = encode_base64(&bytes);
-                            if let Err(e) = decode_png_sheet_into_sprites(&b64, start_id, tile_w, tile_h, &mut sprites) {
-                                eprintln!("Warning: Failed to decode @SHEET file {}: {}", path_candidate.display(), e);
-                            } else {
-                                let bank0 = banks.entry(0).or_insert_with(|| BankData::new(0));
-                                for (id, sp) in sprites.iter() {
-                                    if (0..=255).contains(id) && *id >= start_id {
-                                        bank0.write_16x16(*id as usize, &sp.rgba);
+                            match decode_png_sheet_into_sprites(&b64, start_id, tile_w, tile_h, &mut sprites) {
+                                Err(e) => {
+                                    eprintln!("Warning: Failed to decode @SHEET file {}: {}", path_candidate.display(), e);
+                                }
+                                Ok((_count, img_w, img_h)) => {
+                                    let final_w = sheet_w.unwrap_or(img_w);
+                                    let final_h = sheet_h.unwrap_or(img_h);
+                                    let cols = (final_w / tile_w.max(1)).max(1) as usize;
+                                    let bank0 = banks.entry(0).or_insert_with(|| BankData::new(0));
+                                    bank0.sheet_width = final_w;
+                                    bank0.sheet_height = final_h;
+                                    for (id, sp) in sprites.iter() {
+                                        if (0..=255).contains(id) && *id >= start_id {
+                                            bank0.write_tile((*id - start_id) as usize, cols, &sp.rgba);
+                                        }
                                     }
                                 }
                             }
@@ -842,6 +891,8 @@ pub fn parse_tail_resources_full(
                     start_id,
                     tile_w,
                     tile_h,
+                    sheet_w,
+                    sheet_h,
                 });
             }
         } else if let Some(rest) = line.strip_prefix("@SPRITE") {
@@ -2923,6 +2974,27 @@ fn register_engine_api(
         }),
     );
 
+    // bank_size(bank_id = 0): バンクのシートサイズ [sheet_width, sheet_height] を返す
+    let banks_for_bank_size = banks.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "bank_size",
+        Box::new(move |_vm, args| {
+            let bank_id = arg_i32(args, 0, 0);
+            let banks_ref = banks_for_bank_size.borrow();
+            let (w, h) = if let Some(bank) = banks_ref.get(&bank_id) {
+                (bank.sheet_width as i64, bank.sheet_height as i64)
+            } else {
+                (BANK_WIDTH as i64, BANK_HEIGHT as i64)
+            };
+            Ok(Rc::new(RObject::array(vec![
+                Rc::new(RObject::integer(w)),
+                Rc::new(RObject::integer(h)),
+            ])))
+        }),
+    );
+
     // bank_to_b64_png(pixels): 65536要素のカラーインデックス配列から Base64 PNG を生成
     mrb_define_cmethod(
         vm,
@@ -3746,6 +3818,25 @@ fn register_engine_api(
             "fps",
             Box::new(|_vm, _args| Ok(Rc::new(RObject::integer(60)))),
         );
+        let banks_for_headless_bank_size = banks.clone();
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            "bank_size",
+            Box::new(move |_vm, args| {
+                let bank_id = arg_i32(args, 0, 0);
+                let banks_ref = banks_for_headless_bank_size.borrow();
+                let (w, h) = if let Some(bank) = banks_ref.get(&bank_id) {
+                    (bank.sheet_width as i64, bank.sheet_height as i64)
+                } else {
+                    (BANK_WIDTH as i64, BANK_HEIGHT as i64)
+                };
+                Ok(Rc::new(RObject::array(vec![
+                    Rc::new(RObject::integer(w)),
+                    Rc::new(RObject::integer(h)),
+                ])))
+            }),
+        );
         mrb_define_cmethod(
             vm,
             obj_class.clone(),
@@ -4271,8 +4362,9 @@ fn register_engine_api(
             let cur_bank_id = *act_spr_for_spr.borrow();
             let banks_ref = banks_for_spr.borrow();
             if let Some(bank) = banks_ref.get(&cur_bank_id) {
-                let u = ((id % 16) * 16) as f32;
-                let v = ((id / 16) * 16) as f32;
+                let cols = (bank.sheet_width / 16).max(1) as i32;
+                let u = ((id % cols) * 16) as f32;
+                let v = ((id / cols) * 16) as f32;
                 let w = (tile_w * 16) as f32;
                 let h = (tile_h * 16) as f32;
                 draw_bank_rect(
@@ -4412,8 +4504,9 @@ fn register_engine_api(
                         continue;
                     }
                     if let Some(bank) = bank_opt {
-                        let u = ((tile_id % 16) * 16) as f32;
-                        let v = ((tile_id / 16) * 16) as f32;
+                        let cols = (bank.sheet_width / 16).max(1) as i32;
+                        let u = ((tile_id % cols) * 16) as f32;
+                        let v = ((tile_id / cols) * 16) as f32;
                         draw_bank_rect(
                             bank,
                             &state,
