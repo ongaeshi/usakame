@@ -2254,6 +2254,26 @@ fn test_rabbit_knight_example_script() {
     )
     .expect("can_move_to? should succeed");
     assert_eq!(can_move.as_ref(), &RObject::boolean(true));
+
+    // @OBJECTS から初期位置 ($px, $py) とリンゴ ($apples) が初期化されていること
+    let px = runtime.vm.globals.get("$px").expect("$px should exist");
+    assert!(matches!(px.value, RValue::Integer(32)));
+    let py = runtime.vm.globals.get("$py").expect("$py should exist");
+    assert!(matches!(py.value, RValue::Integer(32)));
+
+    let apples = runtime.vm.globals.get("$apples").expect("$apples should exist");
+    if let RValue::Array(ref arr) = apples.value {
+        assert_eq!(arr.borrow().len(), 5, "apples should have 5 items selected from candidate objects");
+    } else {
+        panic!("$apples must be an array");
+    }
+
+    // タイルマップエディタのロード互換性: load_resource_objects で 15 個のオブジェクトが読み取れること
+    let tail_objs = parse_tail_objects(&tail_data);
+    assert_eq!(tail_objs.len(), 15, "rabbit_knight.rb should have 1 player + 14 apples");
+    assert_eq!(tail_objs[0].obj_type, "player");
+    assert_eq!(tail_objs[0].x, 32);
+    assert_eq!(tail_objs[0].y, 32);
 }
 
 #[test]

@@ -19,8 +19,10 @@ config(
 )
 
 # --- プレイヤーの初期状態 ---
-$px = 32
-$py = 32
+# @OBJECTS からウサギの初期位置を取得（未定義時のフォールバックあり）
+p_obj = objects(:player).first
+$px = p_obj ? p_obj[:x] : 32
+$py = p_obj ? p_obj[:y] : 32
 $pdir = :down       # :down, :up, :right, :left
 $moving = false
 $anim_timer = 0
@@ -31,25 +33,36 @@ $bump_cooldown = 0  # 壁衝突音クールダウン
 $score = 0
 $particles = []     # キラキラ & 衝突埃パーティクル
 
-# リンゴ配置 (x, y, 収集済みフラグ)
-$initial_apples = [
-  [48,  48],
-  [144, 32],
-  [208, 48],
-  [32,  112],
-  [112, 112],
-  [208, 128],
-  [48-32,  192],
-  [112, 208],
-  [192+16, 192+32]
-]
+# 1回に出現するリンゴの数 (候補点からランダムに選定)
+APPLES_PER_SPAWN = 5
 
 def init_apples
+  # @OBJECTS からリンゴ候補点一覧を取得
+  candidates = objects(:apple)
+  if candidates.empty?
+    # @OBJECTS が未定義の場合のフォールバック
+    candidates = [
+      { x: 48, y: 48 }, { x: 144, y: 32 }, { x: 208, y: 48 },
+      { x: 32, y: 112 }, { x: 112, y: 112 }, { x: 208, y: 128 },
+      { x: 16, y: 192 }, { x: 112, y: 208 }, { x: 208, y: 224 }
+    ]
+  end
+
+  # 候補点をシャッフルして先頭 APPLES_PER_SPAWN 個を選定
+  shuffled = candidates.dup
+  n = shuffled.size
+  while n > 1
+    k = rand(n)
+    n -= 1
+    shuffled[n], shuffled[k] = shuffled[k], shuffled[n]
+  end
+
+  num = [APPLES_PER_SPAWN, shuffled.size].min
   $apples = []
   i = 0
-  while i < $initial_apples.size
-    pos = $initial_apples[i]
-    $apples << { x: pos[0], y: pos[1], collected: false, offset_y: 0 }
+  while i < num
+    pos = shuffled[i]
+    $apples << { x: pos[:x], y: pos[:y], collected: false, offset_y: 0 }
     i += 1
   end
 end
@@ -469,25 +482,10 @@ DDDDDDDDDDDDDDDD
 DDDDDDDDDDDDDDDD
 
 # ==============================================================================
-# タイルマップ定義 (16x16 セル = 256x256 ピクセル)
+# タイルマップ & オブジェクト定義 (@MAP / @OBJECTS)
 # ==============================================================================
-@MAP 0 0
-6666666666666666
-6777776777777776
-6787776778777876
-6777776777777776
-6776666776666776
-6777777777776776
-6787766667776776
-6777767767777776
-6777767767787776
-6776667766667776
-6777777777777776
-6776666776666776
-6776777777776776
-6786778778776876
-6776777777776776
-6666666666666666
+# マップおよびオブジェクトは外部マップファイル `examples/rabbit_knight.map` で管理されています。
+# （タイルマップエディタで編集・保存できます: uk run examples/tilemap_editor.rb -- examples/rabbit_knight.rb）
 
 # ==============================================================================
 # サウンド定義 (@SFX / @MUSIC)
