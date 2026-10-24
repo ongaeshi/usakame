@@ -19,7 +19,7 @@
 # - スプライトエディタとの相互同期:
 #     スプライトエディタで保存すると、タイルマップエディタが自動検知して
 #     タイルスプライトをリアルタイム更新！
-# - [SAVE] (Ctrl+S / S): ターゲットファイルに即座に書き込み
+# - [SAVE] (Ctrl+S): ターゲットファイルに即座に書き込み
 # ==============================================================================
 
 config(
@@ -589,32 +589,14 @@ def update
   end
 
   # --- キーボードショートカット ---
-  # 保存: Ctrl+S または S (モーダル外)
-  if (btn(:ctrl) && btnp(:s)) || (!btn(:ctrl) && btnp(:s) && !$show_code_modal)
+  # 保存: Ctrl+S (モーダル外)
+  if btn(:ctrl) && btnp(:s) && !$show_code_modal
     save_map_file
   end
 
-  # FキーでFPS通知
-  if btnp(:f)
-    puts "[TilemapEditor] FPS: #{fps}"
-    notify("FPS: #{fps}")
-  end
-
-  perform_undo if btnp(:z)
-  export_map_only if btnp(:e)
-  clear_map if btnp(:c)
-
-  # G: グリッドトグル (地形) または スナップ切替 (オブジェクト)
-  if btnp(:g)
-    if $current_mode == :objects
-      $grid_snap = ($grid_snap == 16) ? 8 : (($grid_snap == 8) ? 1 : 16)
-      sfx(:click)
-      notify("SNAP: #{$grid_snap == 1 ? 'FREE' : "#{$grid_snap}PX"}")
-    else
-      $show_grid = !$show_grid
-      sfx(:click)
-      notify("GRID: #{$show_grid ? 'ON' : 'OFF'}")
-    end
+  # アンドゥ: Ctrl+Z (モーダル外)
+  if btn(:ctrl) && btnp(:z) && !$show_code_modal
+    perform_undo
   end
 
   # Tab: モード切替 (TERRAIN ⇔ OBJECTS)
@@ -774,11 +756,17 @@ def update
         $current_mode = :objects
         sfx(:click)
         notify("MODE: OBJECTS")
-      # [SNAP] (x: 204..264)
+      # [GRID] (地形) または [SNAP] (オブジェクト) (x: 204..264)
       elsif mx >= 204 && mx <= 264
-        $grid_snap = ($grid_snap == 16) ? 8 : (($grid_snap == 8) ? 1 : 16)
-        sfx(:click)
-        notify("SNAP: #{$grid_snap == 1 ? 'FREE' : "#{$grid_snap}PX"}")
+        if $current_mode == :terrain
+          $show_grid = !$show_grid
+          sfx(:click)
+          notify("GRID: #{$show_grid ? 'ON' : 'OFF'}")
+        else
+          $grid_snap = ($grid_snap == 16) ? 8 : (($grid_snap == 8) ? 1 : 16)
+          sfx(:click)
+          notify("SNAP: #{$grid_snap == 1 ? 'FREE' : "#{$grid_snap}PX"}")
+        end
       end
     end
 
@@ -1086,11 +1074,18 @@ def draw
   rect(142, 3, 56, 12, !is_terr ? 7 : 5)
   print_text("OBJECTS", 148, 5, !is_terr ? 0 : 6)
 
-  # [SNAP] ボタン
-  snap_label = ($grid_snap == 1) ? "FREE" : "#{$grid_snap}PX"
-  rectfill(204, 3, 60, 12, ($grid_snap > 1) ? 3 : 2)
-  rect(204, 3, 60, 12, ($grid_snap > 1) ? 11 : 5)
-  print_text("S:#{snap_label}", 212, 5, 7)
+  # [GRID] (地形) または [SNAP] (オブジェクト) ボタン
+  if is_terr
+    grid_label = $show_grid ? "GRID:ON" : "GRID:OFF"
+    rectfill(204, 3, 60, 12, $show_grid ? 3 : 1)
+    rect(204, 3, 60, 12, $show_grid ? 11 : 5)
+    print_text(grid_label, 212, 5, $show_grid ? 7 : 6)
+  else
+    snap_label = ($grid_snap == 1) ? "FREE" : "#{$grid_snap}PX"
+    rectfill(204, 3, 60, 12, ($grid_snap > 1) ? 3 : 2)
+    rect(204, 3, 60, 12, ($grid_snap > 1) ? 11 : 5)
+    print_text("S:#{snap_label}", 212, 5, 7)
+  end
 
   print_text("CAM:(#{$cam_x},#{$cam_y})", 274, 5, 6)
   print_text("TARGET: #{$save_path}", 360, 5, 11)
