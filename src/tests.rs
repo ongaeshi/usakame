@@ -2931,8 +2931,11 @@ fn test_screenshot_png_encoding_and_flip() {
     raw_rgba.extend_from_slice(&[255, 0, 0, 255]);
     raw_rgba.extend_from_slice(&[0, 255, 0, 255]);
 
-    let png_bytes = encode_screenshot_png(&raw_rgba, 2, 2).expect("PNG encode should succeed");
+    let (png_bytes, w, h) =
+        encode_screenshot_png(&raw_rgba, 2, 2, 1).expect("PNG encode should succeed");
     assert!(!png_bytes.is_empty());
+    assert_eq!(w, 2);
+    assert_eq!(h, 2);
 
     // デコードして上下反転（正立）されているか検証
     let decoder = png::Decoder::new(&png_bytes[..]);
@@ -2948,4 +2951,20 @@ fn test_screenshot_png_encoding_and_flip() {
     // 反転後: 2行目が 青, 白
     assert_eq!(&buf[8..12], &[0, 0, 255, 255], "Bottom-left should be blue");
     assert_eq!(&buf[12..16], &[255, 255, 255, 255], "Bottom-right should be white");
+
+    // 2倍スケーリングのテスト
+    let (scaled_png_bytes, sw, sh) =
+        encode_screenshot_png(&raw_rgba, 2, 2, 2).expect("Scaled PNG encode should succeed");
+    assert_eq!(sw, 4);
+    assert_eq!(sh, 4);
+    let s_decoder = png::Decoder::new(&scaled_png_bytes[..]);
+    let mut s_reader = s_decoder.read_info().expect("PNG read info should succeed");
+    let mut s_buf = vec![0u8; s_reader.output_buffer_size()];
+    let s_info = s_reader.next_frame(&mut s_buf).expect("PNG decode should succeed");
+    assert_eq!(s_info.width, 4);
+    assert_eq!(s_info.height, 4);
+    // 2倍なので (0,0) と (1,1) は赤、(2,0) と (3,1) は緑
+    assert_eq!(&s_buf[0..4], &[255, 0, 0, 255]);
+    assert_eq!(&s_buf[(1 * 4 + 1) * 4..(1 * 4 + 1) * 4 + 4], &[255, 0, 0, 255]);
+    assert_eq!(&s_buf[(0 * 4 + 2) * 4..(0 * 4 + 2) * 4 + 4], &[0, 255, 0, 255]);
 }

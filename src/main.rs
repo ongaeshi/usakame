@@ -5540,7 +5540,45 @@ pub fn present_virtual_screen(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn encode_screenshot_png(rgba: &[u8], width: usize, height: usize) -> Result<Vec<u8>, String> {
+pub fn scale_rgba_nearest(
+    src: &[u8],
+    width: usize,
+    height: usize,
+    scale: usize,
+) -> (Vec<u8>, usize, usize) {
+    if scale <= 1 {
+        return (src.to_vec(), width, height);
+    }
+    let out_w = width * scale;
+    let out_h = height * scale;
+    let mut dst = vec![0u8; out_w * out_h * 4];
+
+    for y in 0..height {
+        let src_row_start = y * width * 4;
+        for sy in 0..scale {
+            let dst_y = y * scale + sy;
+            let dst_row_start = dst_y * out_w * 4;
+            for x in 0..width {
+                let px_start = src_row_start + x * 4;
+                let px = &src[px_start..px_start + 4];
+                for sx in 0..scale {
+                    let dst_x = x * scale + sx;
+                    let target = dst_row_start + dst_x * 4;
+                    dst[target..target + 4].copy_from_slice(px);
+                }
+            }
+        }
+    }
+    (dst, out_w, out_h)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn encode_screenshot_png(
+    rgba: &[u8],
+    width: usize,
+    height: usize,
+    scale: usize,
+) -> Result<(Vec<u8>, usize, usize), String> {
     if rgba.len() != width * height * 4 {
         return Err(format!(
             "Invalid RGBA buffer length: expected {}, got {}",
@@ -5560,9 +5598,11 @@ pub fn encode_screenshot_png(rgba: &[u8], width: usize, height: usize) -> Result
         }
     }
 
+    let (scaled_bytes, out_w, out_h) = scale_rgba_nearest(&bytes, width, height, scale);
+
     let mut out = Vec::new();
     {
-        let mut encoder = png::Encoder::new(&mut out, width as u32, height as u32);
+        let mut encoder = png::Encoder::new(&mut out, out_w as u32, out_h as u32);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
         encoder.set_compression(png::Compression::Fast);
@@ -5570,18 +5610,21 @@ pub fn encode_screenshot_png(rgba: &[u8], width: usize, height: usize) -> Result
             .write_header()
             .map_err(|e| format!("PNG write_header error: {:?}", e))?;
         writer
-            .write_image_data(&bytes)
+            .write_image_data(&scaled_bytes)
             .map_err(|e| format!("PNG write_image_data error: {:?}", e))?;
     }
-    Ok(out)
+    Ok((out, out_w, out_h))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn save_screenshot_from_render_target(render_target: &RenderTarget) -> Result<String, String> {
+pub fn save_screenshot_from_render_target(
+    render_target: &RenderTarget,
+    scale: usize,
+) -> Result<(String, usize, usize), String> {
     let image = render_target.texture.get_texture_data();
     let width = image.width as usize;
     let height = image.height as usize;
-    let png_bytes = encode_screenshot_png(&image.bytes, width, height)?;
+    let (png_bytes, out_w, out_h) = encode_screenshot_png(&image.bytes, width, height, scale)?;
 
     let dir = std::path::Path::new("screenshots");
     if !dir.exists() {
@@ -5609,7 +5652,7 @@ pub fn save_screenshot_from_render_target(render_target: &RenderTarget) -> Resul
     std::fs::write(&filepath, png_bytes)
         .map_err(|e| format!("Failed to write screenshot file: {}", e))?;
 
-    Ok(filepath)
+    Ok((filepath, out_w, out_h))
 }
 
 // ==========================================
@@ -5903,10 +5946,16 @@ async fn run_native_with_hot_reload(
             reload_banner_frames = reload_banner_frames.saturating_sub(1);
 
             if is_key_pressed(KeyCode::F12) {
-                match save_screenshot_from_render_target(&render_target) {
-                    Ok(path) => {
-                        println!("[screenshot] Saved to {}", path);
-                        reload_banner_text = format!("SCREENSHOT: {}", path);
+                let scale = rt
+                    .config
+                    .borrow()
+                    .window_scale
+                    .round()
+                    .max(1.0) as usize;
+                match save_screenshot_from_render_target(&render_target, scale) {
+                    Ok((path, out_w, out_h)) => {
+                        println!("[screenshot] Saved to {} ({}x{}, {}x)", path, out_w, out_h, scale);
+                        reload_banner_text = format!("SCREENSHOT: {} ({}x)", path, scale);
                         reload_banner_frames = 90;
                     }
                     Err(err) => {
@@ -5998,10 +6047,16 @@ async fn run_embedded_game(tail_data: String, mrb_bytes: Vec<u8>) {
         reload_banner_frames = reload_banner_frames.saturating_sub(1);
 
         if is_key_pressed(KeyCode::F12) {
-            match save_screenshot_from_render_target(&render_target) {
-                Ok(path) => {
-                    println!("[screenshot] Saved to {}", path);
-                    reload_banner_text = format!("SCREENSHOT: {}", path);
+            let scale = runtime
+                .config
+                .borrow()
+                .window_scale
+                .round()
+                .max(1.0) as usize;
+            match save_screenshot_from_render_target(&render_target, scale) {
+                Ok((path, out_w, out_h)) => {
+                    println!("[screenshot] Saved to {} ({}x{}, {}x)", path, out_w, out_h, scale);
+                    reload_banner_text = format!("SCREENSHOT: {} ({}x)", path, scale);
                     reload_banner_frames = 90;
                 }
                 Err(err) => {
@@ -6330,10 +6385,16 @@ async fn main() {
             reload_banner_frames = reload_banner_frames.saturating_sub(1);
 
             if is_key_pressed(KeyCode::F12) {
-                match save_screenshot_from_render_target(&render_target) {
-                    Ok(path) => {
-                        println!("[screenshot] Saved to {}", path);
-                        reload_banner_text = format!("SCREENSHOT: {}", path);
+                let scale = rt
+                    .config
+                    .borrow()
+                    .window_scale
+                    .round()
+                    .max(1.0) as usize;
+                match save_screenshot_from_render_target(&render_target, scale) {
+                    Ok((path, out_w, out_h)) => {
+                        println!("[screenshot] Saved to {} ({}x{}, {}x)", path, out_w, out_h, scale);
+                        reload_banner_text = format!("SCREENSHOT: {} ({}x)", path, scale);
                         reload_banner_frames = 90;
                     }
                     Err(err) => {
