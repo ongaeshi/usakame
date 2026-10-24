@@ -215,7 +215,21 @@ fn test_button_parsing_symbols_and_numbers() {
     assert_eq!(parse_button_name("click"), Some(ButtonId::MouseLeft));
     assert_eq!(parse_button_name("mouse_r"), Some(ButtonId::MouseRight));
     assert_eq!(parse_button_name("mouse_m"), Some(ButtonId::MouseMiddle));
-    assert_eq!(parse_button_name("invalid"), None);
+
+    // フルキーボード対応テスト
+    assert_eq!(parse_button_name("tab"), Some(ButtonId::Key(macroquad::input::KeyCode::Tab)));
+    assert_eq!(parse_button_name("ctrl"), Some(ButtonId::Key(macroquad::input::KeyCode::LeftControl)));
+    assert_eq!(parse_button_name("s"), Some(ButtonId::Key(macroquad::input::KeyCode::S)));
+    assert_eq!(parse_button_name("g"), Some(ButtonId::Key(macroquad::input::KeyCode::G)));
+    assert_eq!(parse_button_name("c"), Some(ButtonId::Key(macroquad::input::KeyCode::C)));
+    assert_eq!(parse_button_name("e"), Some(ButtonId::Key(macroquad::input::KeyCode::E)));
+    assert_eq!(parse_button_name("f"), Some(ButtonId::Key(macroquad::input::KeyCode::F)));
+    assert_eq!(parse_button_name("key_1"), Some(ButtonId::Key(macroquad::input::KeyCode::Key1)));
+    assert_eq!(parse_button_name("1"), Some(ButtonId::Key(macroquad::input::KeyCode::Key1)));
+    assert_eq!(parse_button_name("del"), Some(ButtonId::Key(macroquad::input::KeyCode::Delete)));
+    assert_eq!(parse_button_name("backspace"), Some(ButtonId::Key(macroquad::input::KeyCode::Backspace)));
+
+    assert_eq!(parse_button_name("invalid_key_name"), None);
 }
 
 #[test]
@@ -246,6 +260,9 @@ fn test_mouse_and_btn_api_in_ruby_script() {
         $bx = btn(:left)
         $bm = btn(:mouse_l)
         $bpm = btnp(:mouse_l)
+        $btab = btnp(:tab)
+        $bctrl = btn(:ctrl)
+        $bk1 = btnp(:key_1)
         $mx = mouse_x
         $my = mouse_y
         $mw = mouse_wheel
@@ -271,6 +288,18 @@ fn test_mouse_and_btn_api_in_ruby_script() {
     );
     assert_eq!(
         runtime.vm.globals.get("$bm").map(|v| v.as_ref().clone()),
+        Some(RObject::boolean(false))
+    );
+    assert_eq!(
+        runtime.vm.globals.get("$btab").map(|v| v.as_ref().clone()),
+        Some(RObject::boolean(false))
+    );
+    assert_eq!(
+        runtime.vm.globals.get("$bctrl").map(|v| v.as_ref().clone()),
+        Some(RObject::boolean(false))
+    );
+    assert_eq!(
+        runtime.vm.globals.get("$bk1").map(|v| v.as_ref().clone()),
         Some(RObject::boolean(false))
     );
     assert_eq!(

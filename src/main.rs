@@ -1356,19 +1356,110 @@ pub enum ButtonId {
     MouseLeft,
     MouseRight,
     MouseMiddle,
+    Key(KeyCode),
 }
 
 pub fn parse_button_name(name: &str) -> Option<ButtonId> {
-    match name.to_lowercase().as_str() {
+    let lower = name.to_lowercase();
+    match lower.as_str() {
+        // --- 仮想ゲームパッド / マウス (既存互換) ---
         "left" | "l" => Some(ButtonId::Left),
         "right" | "r" => Some(ButtonId::Right),
         "up" | "u" => Some(ButtonId::Up),
         "down" | "d" => Some(ButtonId::Down),
-        "z" | "space" | "a" | "btn_a" => Some(ButtonId::A),
-        "x" | "enter" | "b" | "btn_b" => Some(ButtonId::B),
+        "z" | "space" | "btn_a" => Some(ButtonId::A),
+        "x" | "enter" | "return" | "btn_b" => Some(ButtonId::B),
         "mouse_l" | "mouse_left" | "mouse_1" | "click" | "lclick" => Some(ButtonId::MouseLeft),
         "mouse_r" | "mouse_right" | "mouse_2" | "rclick" => Some(ButtonId::MouseRight),
         "mouse_m" | "mouse_middle" | "mouse_3" | "mclick" => Some(ButtonId::MouseMiddle),
+
+        // --- 特殊キー ---
+        "tab" => Some(ButtonId::Key(KeyCode::Tab)),
+        "ctrl" | "lctrl" | "control" => Some(ButtonId::Key(KeyCode::LeftControl)),
+        "rctrl" => Some(ButtonId::Key(KeyCode::RightControl)),
+        "shift" | "lshift" => Some(ButtonId::Key(KeyCode::LeftShift)),
+        "rshift" => Some(ButtonId::Key(KeyCode::RightShift)),
+        "alt" | "lalt" => Some(ButtonId::Key(KeyCode::LeftAlt)),
+        "ralt" => Some(ButtonId::Key(KeyCode::RightAlt)),
+        "super" | "cmd" | "command" | "gui" => Some(ButtonId::Key(KeyCode::LeftSuper)),
+        "escape" | "esc" => Some(ButtonId::Key(KeyCode::Escape)),
+        "backspace" | "bs" => Some(ButtonId::Key(KeyCode::Backspace)),
+        "delete" | "del" => Some(ButtonId::Key(KeyCode::Delete)),
+        "insert" | "ins" => Some(ButtonId::Key(KeyCode::Insert)),
+        "home" => Some(ButtonId::Key(KeyCode::Home)),
+        "end" => Some(ButtonId::Key(KeyCode::End)),
+        "pageup" | "page_up" => Some(ButtonId::Key(KeyCode::PageUp)),
+        "pagedown" | "page_down" => Some(ButtonId::Key(KeyCode::PageDown)),
+
+        // --- 数字キー ---
+        "0" | "key_0" => Some(ButtonId::Key(KeyCode::Key0)),
+        "1" | "key_1" => Some(ButtonId::Key(KeyCode::Key1)),
+        "2" | "key_2" => Some(ButtonId::Key(KeyCode::Key2)),
+        "3" | "key_3" => Some(ButtonId::Key(KeyCode::Key3)),
+        "4" | "key_4" => Some(ButtonId::Key(KeyCode::Key4)),
+        "5" | "key_5" => Some(ButtonId::Key(KeyCode::Key5)),
+        "6" | "key_6" => Some(ButtonId::Key(KeyCode::Key6)),
+        "7" | "key_7" => Some(ButtonId::Key(KeyCode::Key7)),
+        "8" | "key_8" => Some(ButtonId::Key(KeyCode::Key8)),
+        "9" | "key_9" => Some(ButtonId::Key(KeyCode::Key9)),
+
+        // --- ファンクションキー ---
+        "f1" => Some(ButtonId::Key(KeyCode::F1)),
+        "f2" => Some(ButtonId::Key(KeyCode::F2)),
+        "f3" => Some(ButtonId::Key(KeyCode::F3)),
+        "f4" => Some(ButtonId::Key(KeyCode::F4)),
+        "f5" => Some(ButtonId::Key(KeyCode::F5)),
+        "f6" => Some(ButtonId::Key(KeyCode::F6)),
+        "f7" => Some(ButtonId::Key(KeyCode::F7)),
+        "f8" => Some(ButtonId::Key(KeyCode::F8)),
+        "f9" => Some(ButtonId::Key(KeyCode::F9)),
+        "f10" => Some(ButtonId::Key(KeyCode::F10)),
+        "f11" => Some(ButtonId::Key(KeyCode::F11)),
+        "f12" => Some(ButtonId::Key(KeyCode::F12)),
+
+        // --- アルファベット (個別キー) ---
+        "a" | "key_a" => Some(ButtonId::Key(KeyCode::A)),
+        "b" | "key_b" => Some(ButtonId::Key(KeyCode::B)),
+        "c" | "key_c" => Some(ButtonId::Key(KeyCode::C)),
+        // "d" は ButtonId::Down (KeyCode::Down || KeyCode::S) ではなく KeyCode::D (ButtonId::Right) だった点に注意
+        // 既存の "d" は ButtonId::Down なので互換性を維持しつつ "key_d" は KeyCode::D を提供
+        "key_d" => Some(ButtonId::Key(KeyCode::D)),
+        "e" | "key_e" => Some(ButtonId::Key(KeyCode::E)),
+        "f" | "key_f" => Some(ButtonId::Key(KeyCode::F)),
+        "g" | "key_g" => Some(ButtonId::Key(KeyCode::G)),
+        "h" | "key_h" => Some(ButtonId::Key(KeyCode::H)),
+        "i" | "key_i" => Some(ButtonId::Key(KeyCode::I)),
+        "j" | "key_j" => Some(ButtonId::Key(KeyCode::J)),
+        "k" | "key_k" => Some(ButtonId::Key(KeyCode::K)),
+        "key_l" => Some(ButtonId::Key(KeyCode::L)), // "l" は既存の Left
+        "m" | "key_m" => Some(ButtonId::Key(KeyCode::M)),
+        "n" | "key_n" => Some(ButtonId::Key(KeyCode::N)),
+        "o" | "key_o" => Some(ButtonId::Key(KeyCode::O)),
+        "p" | "key_p" => Some(ButtonId::Key(KeyCode::P)),
+        "q" | "key_q" => Some(ButtonId::Key(KeyCode::Q)),
+        "key_r" => Some(ButtonId::Key(KeyCode::R)), // "r" は既存の Right
+        "s" | "key_s" => Some(ButtonId::Key(KeyCode::S)),
+        "t" | "key_t" => Some(ButtonId::Key(KeyCode::T)),
+        "key_u" => Some(ButtonId::Key(KeyCode::U)), // "u" は既存の Up
+        "v" | "key_v" => Some(ButtonId::Key(KeyCode::V)),
+        "w" | "key_w" => Some(ButtonId::Key(KeyCode::W)),
+        "key_x" => Some(ButtonId::Key(KeyCode::X)),
+        "y" | "key_y" => Some(ButtonId::Key(KeyCode::Y)),
+        "key_z" => Some(ButtonId::Key(KeyCode::Z)),
+
+        // --- 記号キー ---
+        "minus" => Some(ButtonId::Key(KeyCode::Minus)),
+        "equal" => Some(ButtonId::Key(KeyCode::Equal)),
+        "left_bracket" | "lbracket" | "[" => Some(ButtonId::Key(KeyCode::LeftBracket)),
+        "right_bracket" | "rbracket" | "]" => Some(ButtonId::Key(KeyCode::RightBracket)),
+        "semicolon" | ";" => Some(ButtonId::Key(KeyCode::Semicolon)),
+        "apostrophe" | "'" => Some(ButtonId::Key(KeyCode::Apostrophe)),
+        "comma" | "," => Some(ButtonId::Key(KeyCode::Comma)),
+        "period" | "." => Some(ButtonId::Key(KeyCode::Period)),
+        "slash" | "/" => Some(ButtonId::Key(KeyCode::Slash)),
+        "backslash" | "\\" => Some(ButtonId::Key(KeyCode::Backslash)),
+        "grave" | "`" => Some(ButtonId::Key(KeyCode::GraveAccent)),
+
         _ => None,
     }
 }
@@ -1408,6 +1499,7 @@ pub fn is_button_down(btn: ButtonId) -> bool {
         ButtonId::MouseLeft => is_mouse_button_down(MouseButton::Left),
         ButtonId::MouseRight => is_mouse_button_down(MouseButton::Right),
         ButtonId::MouseMiddle => is_mouse_button_down(MouseButton::Middle),
+        ButtonId::Key(k) => is_key_down(k),
     }
 }
 
@@ -1422,6 +1514,7 @@ pub fn is_button_pressed(btn: ButtonId) -> bool {
         ButtonId::MouseLeft => is_mouse_button_pressed(MouseButton::Left),
         ButtonId::MouseRight => is_mouse_button_pressed(MouseButton::Right),
         ButtonId::MouseMiddle => is_mouse_button_pressed(MouseButton::Middle),
+        ButtonId::Key(k) => is_key_pressed(k),
     }
 }
 
