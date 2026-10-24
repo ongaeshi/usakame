@@ -1791,6 +1791,7 @@ fn test_tilemap_editor_object_layer_workflow() {
     runtime.call_update_result().unwrap();
     let mode = runtime.vm.globals.get("$current_mode").unwrap();
     assert_eq!(mode.as_ref(), &RObject::symbol("terrain".into()), "Clicking x:100 y:10 should switch to TERRAIN");
+    runtime.call_draw_result().expect("Draw in terrain mode with objects should succeed");
 
     // ヘッダーバー OBJECTS (x: 150, y: 10) クリック判定
     mrb_define_cmethod(

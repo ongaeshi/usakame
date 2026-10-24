@@ -67,6 +67,9 @@ TILE_INFO = [
   [15, "FLAG",   8]
 ]
 
+# オブジェクトモード時の背景地形減光パレット (16色それぞれの暗色対応テーブル)
+TERRAIN_DIM_PAL = [0, 0, 1, 1, 2, 1, 5, 5, 2, 4, 4, 3, 1, 1, 2, 4]
+
 def tile_name(tid)
   if tid == 0
     "EMPTY"
@@ -1093,17 +1096,21 @@ def draw
   tiles_y = (VIEW_H / $cell_size).to_i + 1
   scale = ($cell_size == 16) ? 1.0 : 0.5
 
-  # 背景の市松模様を一括描画
-  8.times do |cy|
-    by = VIEW_Y + cy * 30
-    8.times do |cx|
-      if (cx + cy) % 2 == 1
-        rectfill(VIEW_X + cx * 40, by, 40, 30, 1)
+  # 背景の市松模様を一括描画 (オブジェクトモード時は一段暗くする)
+  checker_col = ($current_mode == :objects) ? 0 : 1
+  if checker_col > 0
+    8.times do |cy|
+      by = VIEW_Y + cy * 30
+      8.times do |cx|
+        if (cx + cy) % 2 == 1
+          rectfill(VIEW_X + cx * 40, by, 40, 30, checker_col)
+        end
       end
     end
   end
 
-  # タイル描画
+  # タイル描画 (オブジェクトモード時はパレット減光で地形を暗く表示)
+  pal(TERRAIN_DIM_PAL) if $current_mode == :objects
   if $cell_size == 16 && !$has_custom_sprites
     map($cam_x, $cam_y, VIEW_X, VIEW_Y, tiles_x, tiles_y, $ref_bank)
   else
@@ -1122,6 +1129,7 @@ def draw
       end
     end
   end
+  pal() if $current_mode == :objects
 
   # グリッド線の一括描画
   if $show_grid
@@ -1159,12 +1167,28 @@ def draw
         print_text(lbl, ox + 2, oy + 2, 10)
       end
 
-      # 選択ハイライト枠
+      # 選択ハイライト枠 & オブジェクト目印枠
       if is_selected
         rect(ox - 1, oy - 1, ow + 2, oh + 2, 10)
         rect(ox - 2, oy - 2, ow + 4, oh + 4, 7)
       elsif $current_mode == :objects
-        rect(ox, oy, ow, oh, 6)
+        rect(ox, oy, ow, oh, 9)
+        rectfill(ox, oy, 3, 3, 10)
+      else
+        # TERRAINモード中もオブジェクトと地形を区別できるよう四隅に目印枠を表示
+        c_len = [ow / 4, 3].max
+        # 左上
+        line(ox, oy, ox + c_len, oy, 9)
+        line(ox, oy, ox, oy + c_len, 9)
+        # 右上
+        line(ox + ow - 1 - c_len, oy, ox + ow - 1, oy, 9)
+        line(ox + ow - 1, oy, ox + ow - 1, oy + c_len, 9)
+        # 左下
+        line(ox, oy + oh - 1 - c_len, ox, oy + oh - 1, 9)
+        line(ox, oy + oh - 1, ox + c_len, oy + oh - 1, 9)
+        # 右下
+        line(ox + ow - 1 - c_len, oy + oh - 1, ox + ow - 1, oy + oh - 1, 9)
+        line(ox + ow - 1, oy + oh - 1 - c_len, ox + ow - 1, oy + oh - 1, 9)
       end
     end
   end
