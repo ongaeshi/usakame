@@ -1847,6 +1847,10 @@ fn test_tilemap_editor_object_layer_workflow() {
     runtime.call_update_result().expect("Holding mouse on frame 2 should not shift object");
     runtime.call_draw_result().expect("Drawing after placing object should succeed");
 
+    // $notify_timer = 0 にして選択中オブジェクトのインスペクタ詳細バー描画も検証
+    runtime.vm.globals.insert("$notify_timer".to_string(), Rc::new(RObject::integer(0)));
+    runtime.call_draw_result().expect("Drawing object inspector bar should succeed");
+
     let new_objs_len = match &runtime.vm.globals.get("$objects").unwrap().value {
         RValue::Array(a) => a.borrow().len(),
         _ => 0,

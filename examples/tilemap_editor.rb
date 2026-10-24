@@ -219,6 +219,22 @@ def clone_objects_list(list)
   list.map { |o| o.dup }
 end
 
+def format_obj_props(obj, include_spr = true)
+  return "" if obj.nil?
+  parts = []
+  obj.each do |k, v|
+    next if k == :type || k == :x || k == :y
+    next if !include_spr && k == :spr
+    next if v.nil?
+    if v.is_a?(String)
+      parts << "#{k}=\"#{v}\""
+    else
+      parts << "#{k}=#{v}"
+    end
+  end
+  parts.join(" ")
+end
+
 def push_undo
   $undo_stack << {
     map: $map.dup,
@@ -701,8 +717,9 @@ def update
       row = ((my - 98) / 8).to_i
       if col >= 0 && col < 16 && row >= 0 && row < 16
         tid = row * 16 + col
-        if $selected_obj_chip != tid
+        if $selected_obj_chip != tid || !$selected_obj_idx.nil?
           $selected_obj_chip = tid
+          $selected_obj_idx = nil
           sfx(:select)
         end
       end
@@ -713,8 +730,9 @@ def update
       row = ((my - 98) / 8).to_i
       if col >= 0 && col < 16 && row >= 0 && row < 16
         eidx = row * 16 + col
-        if eidx >= 0 && eidx < EMOJI_PALETTE.size && $selected_emoji_idx != eidx
+        if eidx >= 0 && eidx < EMOJI_PALETTE.size && ($selected_emoji_idx != eidx || !$selected_obj_idx.nil?)
           $selected_emoji_idx = eidx
+          $selected_obj_idx = nil
           sfx(:select)
           notify("EMOJI: #{EMOJI_PALETTE[eidx]}")
         end
@@ -788,7 +806,7 @@ def update
       end
     end
 
-    # 2-B. オブジェクトモード時のパレット・プロパティ操作
+    # 2-B. オブジェクトモード時のパレット・インスペクタ操作
     if $current_mode == :objects
       # パレットタブ切替 (y: 84..96)
       if my >= 84 && my <= 96
@@ -799,45 +817,15 @@ def update
         end
       end
 
-      # プロパティパネル操作 (y: 230..244)
+      # インスペクタ行の [DEL] ボタン操作 (y: 230..244)
       if $selected_obj_idx && $selected_obj_idx < $objects.size
-        cur_obj = $objects[$selected_obj_idx]
-        if my >= 230 && my <= 244
-          # [DEL] (x: 336..358)
-          if mx >= 336 && mx <= 358
-            push_undo
-            $objects.delete_at($selected_obj_idx)
-            $selected_obj_idx = nil
-            $dragging_obj_idx = nil
-            sfx(:boom)
-            notify("DELETED OBJECT")
-          # [+HP] (x: 362..384)
-          elsif mx >= 362 && mx <= 384
-            push_undo
-            cur_obj[:hp] = ((cur_obj[:hp] || 0) + 10)
-            sfx(:click)
-            notify("HP: #{cur_obj[:hp]}")
-          # [+SC] (x: 388..410)
-          elsif mx >= 388 && mx <= 410
-            push_undo
-            cur_obj[:score] = ((cur_obj[:score] || 0) + 50)
-            sfx(:click)
-            notify("SCORE: #{cur_obj[:score]}")
-          # [+W] (x: 414..434)
-          elsif mx >= 414 && mx <= 434
-            push_undo
-            cur_obj[:w] = ((cur_obj[:w] || 16) == 16) ? 32 : (((cur_obj[:w] == 32) ? 48 : 16))
-            cur_obj[:h] = cur_obj[:w]
-            sfx(:click)
-            notify("SIZE: #{cur_obj[:w]}x#{cur_obj[:h]}")
-          # [SET] (x: 438..464)
-          elsif mx >= 438 && mx <= 464
-            push_undo
-            new_spr = ($obj_palette_tab == :emoji) ? EMOJI_PALETTE[$selected_emoji_idx] : $selected_obj_chip
-            cur_obj[:spr] = new_spr
-            sfx(:powerup)
-            notify("UPDATED SPR: #{new_spr}")
-          end
+        if my >= 230 && my <= 244 && mx >= 336 && mx <= 358
+          push_undo
+          $objects.delete_at($selected_obj_idx)
+          $selected_obj_idx = nil
+          $dragging_obj_idx = nil
+          sfx(:boom)
+          notify("DELETED OBJECT")
         end
       end
     end
@@ -1270,7 +1258,7 @@ def draw
     print_text("U:#{u_pos}", 446, 36, 6)
     print_text("V:#{v_pos}", 446, 48, 6)
   else
-    # オブジェクトプレビュー
+    # オブジェクトプレビュー & 座標表示
     if $selected_obj_idx && $selected_obj_idx < $objects.size
       sel_o = $objects[$selected_obj_idx]
       if sel_o[:spr].is_a?(Integer) && sel_o[:spr] > 0
@@ -1280,8 +1268,9 @@ def draw
       else
         print_text("BOX", 414, 37, 10)
       end
-      print_text("OBJ", 446, 24, 10)
-      print_text("#{sel_o[:type].to_s[0, 5]}", 446, 36, 7)
+      print_text("#{sel_o[:type].to_s[0, 5]}", 446, 24, 10)
+      print_text("X:#{sel_o[:x]}", 446, 36, 7)
+      print_text("Y:#{sel_o[:y]}", 446, 48, 7)
     else
       # 配置予定のチップ/絵文字
       if $obj_palette_tab == :chip
@@ -1401,7 +1390,7 @@ def draw
       rect(bx, by, 8, 8, 7)
     end
 
-    # 行1: 選択中オブジェクトのインスペクタ / クイック操作 (y: 230..244)
+    # 行1: 選択中オブジェクトのインスペクタ表示 (Read-Only) + [DEL] (y: 230..244)
     if $selected_obj_idx && $selected_obj_idx < $objects.size
       sel_o = $objects[$selected_obj_idx]
       # [DEL]
@@ -1409,30 +1398,22 @@ def draw
       rect(336, 230, 22, 14, 7)
       print_text("DEL", 339, 233, 7)
 
-      # [+HP]
-      rectfill(362, 230, 22, 14, 1)
-      rect(362, 230, 22, 14, 5)
-      print_text("+HP", 364, 233, 7)
-
-      # [+SC]
-      rectfill(388, 230, 22, 14, 1)
-      rect(388, 230, 22, 14, 5)
-      print_text("+SC", 390, 233, 7)
-
-      # [+W]
-      rectfill(414, 230, 20, 14, 1)
-      rect(414, 230, 20, 14, 5)
-      print_text("+W", 417, 233, 7)
-
-      # [SET]
-      rectfill(438, 230, 26, 14, 3)
-      rect(438, 230, 26, 14, 11)
-      print_text("SET", 443, 233, 7)
+      # プロパティ表示ボックス (x: 361..468)
+      rectfill(361, 230, 107, 14, 0)
+      rect(361, 230, 107, 14, 5)
+      extra_props = format_obj_props(sel_o, false)
+      insp_text = extra_props.empty? ? format_obj_props(sel_o, true) : extra_props
+      insp_text = "NO PROPS" if insp_text.empty?
+      clip(363, 231, 103, 12)
+      print_text(insp_text, 364, 233, 10)
+      clip()
     else
+      rectfill(336, 230, 132, 14, 0)
+      rect(336, 230, 132, 14, 5)
       if $obj_palette_tab == :chip
-        print_text("STAMP CHIP #{$selected_obj_chip}", 344, 233, 6)
+        print_text("STAMP CHIP #{$selected_obj_chip}", 342, 233, 6)
       else
-        print_text("STAMP #{EMOJI_PALETTE[$selected_emoji_idx]} (##{$selected_emoji_idx})", 344, 233, 6)
+        print_text("STAMP #{EMOJI_PALETTE[$selected_emoji_idx]} (##{$selected_emoji_idx})", 342, 233, 6)
       end
     end
   end
@@ -1470,7 +1451,7 @@ def draw
   rect(442, 248, 26, 14, 8)
   print_text("CLR", 447, 251, 8)
 
-  # --- 6. 通知メッセージ ---
+  # --- 6. 通知メッセージ または 選択中オブジェクト詳細バー ---
   if $notify_timer > 0
     nw = $notify_msg.size * 6 + 12
     nx = 8
@@ -1478,6 +1459,15 @@ def draw
     rectfill(nx, ny, nw, 14, 0)
     rect(nx, ny, nw, 14, 10)
     print_text($notify_msg, nx + 6, ny + 3, 10)
+  elsif $current_mode == :objects && $selected_obj_idx && $selected_obj_idx < $objects.size
+    sel_o = $objects[$selected_obj_idx]
+    props_str = format_obj_props(sel_o, true)
+    info_line = "##{$selected_obj_idx} #{sel_o[:type]} (#{sel_o[:x]},#{sel_o[:y]}) #{props_str}"
+    rectfill(VIEW_X + 2, VIEW_Y + VIEW_H - 15, VIEW_W - 4, 13, 0)
+    rect(VIEW_X + 2, VIEW_Y + VIEW_H - 15, VIEW_W - 4, 13, 9)
+    clip(VIEW_X + 4, VIEW_Y + VIEW_H - 14, VIEW_W - 8, 11)
+    print_text(info_line, VIEW_X + 6, VIEW_Y + VIEW_H - 12, 7)
+    clip()
   end
 
   # --- 7. コードプレビューモーダル ---
