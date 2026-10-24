@@ -1373,29 +1373,32 @@ fn test_tilemap_parse_and_mget_mset() {
     assert!(sprites.contains_key(&2));
 
     let mut tmap = parse_tail_map(data);
-    // Row 0 (compact hex mode): '1'->1, '.'->0, '2'->2, 'a'->10
+    // Row 0 (compact hex mode): '1'->1, '.'-> -1 (empty), '2'->2, 'a'->10
     assert_eq!(tmap.get(0, 0), 1);
-    assert_eq!(tmap.get(1, 0), 0);
+    assert_eq!(tmap.get(1, 0), -1);
     assert_eq!(tmap.get(2, 0), 2);
     assert_eq!(tmap.get(3, 0), 10);
-    // Row 1 (space-separated mode): 1, 0, 12, 31
+    // Row 1 (space-separated mode): 1, 0 (tile 0), 12, 31
     assert_eq!(tmap.get(0, 1), 1);
     assert_eq!(tmap.get(1, 1), 0);
     assert_eq!(tmap.get(2, 1), 12);
     assert_eq!(tmap.get(3, 1), 31);
-    // Second @MAP block at offset (10, 5): 3, 4, 0, 7
+    // Second @MAP block at offset (10, 5): 3, 4, -1, 7
     assert_eq!(tmap.get(10, 5), 3);
     assert_eq!(tmap.get(11, 5), 4);
-    assert_eq!(tmap.get(12, 5), 0);
+    assert_eq!(tmap.get(12, 5), -1);
     assert_eq!(tmap.get(13, 5), 7);
     assert_eq!(tmap.width, 14);
     assert_eq!(tmap.height, 6);
 
-    // mset で書き換え・0消去確認
+    // mset で書き換え・ID=0有効保持・負数消去確認
     tmap.set(1, 0, 99);
     assert_eq!(tmap.get(1, 0), 99);
-    tmap.set(1, 0, 0);
+    tmap.set(1, 0, 0); // 0 は有効なタイルID
     assert_eq!(tmap.get(1, 0), 0);
+    assert!(tmap.cells.contains_key(&(1, 0)));
+    tmap.set(1, 0, -1); // 負数は空マス化
+    assert_eq!(tmap.get(1, 0), -1);
     assert!(!tmap.cells.contains_key(&(1, 0)));
 }
 
@@ -1405,7 +1408,7 @@ fn test_map_mget_mset_in_ruby_script_and_hot_reload() {
 $tile_at_2_0 = 0
 def update
   $tile_at_2_0 = mget(2, 0)
-  mset(2, 0, 0)
+  mset(2, 0, -1)
   mset(5, 3, 2)
 end
 def draw
@@ -1433,7 +1436,7 @@ __END__
         .try_into()
         .unwrap();
     assert_eq!(read_val, 2);
-    assert_eq!(runtime.tilemap.borrow().get(2, 0), 0);
+    assert_eq!(runtime.tilemap.borrow().get(2, 0), -1);
     assert_eq!(runtime.tilemap.borrow().get(5, 3), 2);
 
     // @MAP を変更せずにコードだけホットリロードした場合、実行時の mset 変更が維持されること
@@ -1454,7 +1457,7 @@ __END__
 "#;
     let (tail_v2, mrb_v2) = cli::compile_ruby_script_str(script_v2).unwrap();
     runtime.hot_reload(&tail_v2, &mrb_v2).unwrap();
-    assert_eq!(runtime.tilemap.borrow().get(2, 0), 0);
+    assert_eq!(runtime.tilemap.borrow().get(2, 0), -1);
     assert_eq!(runtime.tilemap.borrow().get(5, 3), 2);
 
     // @MAP 自体を編集してホットリロードした場合、新しい @MAP が反映されること
@@ -1474,7 +1477,7 @@ __END__
     let (tail_v3, mrb_v3) = cli::compile_ruby_script_str(script_v3).unwrap();
     runtime.hot_reload(&tail_v3, &mrb_v3).unwrap();
     assert_eq!(runtime.tilemap.borrow().get(2, 0), 2);
-    assert_eq!(runtime.tilemap.borrow().get(5, 3), 0);
+    assert_eq!(runtime.tilemap.borrow().get(5, 3), -1);
 }
 
 #[test]
@@ -1530,7 +1533,7 @@ fn test_tilemap_editor_example_script() {
 "#;
     let parsed_map = parse_tail_map(sample_map_output);
     assert_eq!(parsed_map.get(0, 0), 1);
-    assert_eq!(parsed_map.get(1, 1), 0);
+    assert_eq!(parsed_map.get(1, 1), -1);
     assert_eq!(parsed_map.get(4, 2), 4);
 }
 
@@ -1867,8 +1870,8 @@ fn test_tilemap_editor_object_layer_workflow() {
     let terr_tile = runtime.vm.globals.get("$selected_tile").unwrap();
     assert_eq!(
         terr_tile.as_ref(),
-        &RObject::integer(1),
-        "$selected_tile for terrain mode must remain 1 independently of $selected_obj_chip"
+        &RObject::integer(0),
+        "$selected_tile for terrain mode must remain 0 independently of $selected_obj_chip"
     );
 
     // 右クリックでオブジェクトを削除 (x: 45 -> world_x: 37, y: 59 -> world_y: 37, inside 32..47)
@@ -2781,4 +2784,70 @@ fn test_tilemap_editor_hires_and_unshrunk_palette() {
         runtime.call_update_result().expect("call_update should succeed");
         runtime.call_draw_result().expect("call_draw should succeed");
     }
+}
+
+#[test]
+fn test_tile_zero_can_be_placed_and_rendered() {
+    let script = r#"
+mset(0, 0, 0)   # タイルID 0 を配置
+mset(1, 0, -1)  # 空マス
+$t0 = mget(0, 0)
+$t1 = mget(1, 0)
+
+def update
+end
+
+def draw
+  cls(0)
+  map(0, 0, 0, 0, 2, 1)
+end
+__END__
+@SPRITE 0
+8888888888888888
+"#;
+    let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
+    let mut runtime = GameRuntime::new(&tail, &mrb, true).unwrap();
+
+    let t0: i32 = runtime.vm.globals.get("$t0").unwrap().as_ref().try_into().unwrap();
+    let t1: i32 = runtime.vm.globals.get("$t1").unwrap().as_ref().try_into().unwrap();
+    assert_eq!(t0, 0, "Tile ID 0 should be stored and returned as 0");
+    assert_eq!(t1, -1, "Empty cell should return -1");
+
+    // draw で map() が tile_id == 0 を描画してもエラーなく完了すること
+    runtime.call_draw_result().expect("map() should draw tile ID 0 without error");
+
+    // タイルマップエディタで ID=0 を選択して配置・エクスポートできることを検証
+    let (_, editor_tail, editor_mrb) =
+        cli::compile_ruby_script_file(std::path::Path::new("examples/tilemap_editor.rb"))
+            .expect("tilemap_editor.rb should compile");
+    let mut editor_rt =
+        GameRuntime::new_with_args(&editor_tail, &editor_mrb, true, &[])
+            .expect("Editor should init");
+
+    // $selected_tile が 0 であること
+    let sel: i32 = editor_rt.vm.globals.get("$selected_tile").unwrap().as_ref().try_into().unwrap();
+    assert_eq!(sel, 0, "Default selected tile in editor should be 0");
+
+    // set_tile(0, 0, 0) を呼んでタイル0を配置
+    mrb_funcall(
+        &mut editor_rt.vm,
+        None,
+        "set_tile",
+        &[
+            Rc::new(RObject::integer(0)),
+            Rc::new(RObject::integer(0)),
+            Rc::new(RObject::integer(0)),
+        ],
+    )
+    .expect("set_tile(0, 0, 0) should succeed");
+
+    // generate_map_text で 0 行目の先頭が "0" になっていること
+    let res = mrb_funcall(&mut editor_rt.vm, None, "generate_map_text", &[]).unwrap();
+    let map_text: String = res.as_ref().try_into().unwrap();
+    let second_line = map_text.lines().nth(1).expect("Line 2 should exist");
+    assert!(
+        second_line.starts_with('0'),
+        "Generated @MAP row should start with '0', got: {}",
+        second_line
+    );
 }

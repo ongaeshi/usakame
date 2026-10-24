@@ -937,7 +937,7 @@ pub fn parse_tail_resources(data_section: &str) -> HashMap<i32, SpriteData> {
     parse_tail_resources_full(data_section, None).0
 }
 
-/// タイルマップ管理構造体（1セル = 16x16 スプライト番号、`0` は空タイル）
+/// タイルマップ管理構造体（1セル = 16x16 スプライト番号、`-1` は空タイル）
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Tilemap {
     pub cells: HashMap<(i32, i32), i32>,
@@ -947,15 +947,15 @@ pub struct Tilemap {
 
 fn parse_map_tile_token(tok: &str) -> i32 {
     if matches!(tok, "." | ".." | "_" | "-") {
-        return 0;
+        return -1;
     }
     if let Some(hex) = tok.strip_prefix("0x").or_else(|| tok.strip_prefix("0X")) {
-        return i32::from_str_radix(hex, 16).unwrap_or(0);
+        return i32::from_str_radix(hex, 16).unwrap_or(-1);
     }
     if let Ok(v) = tok.parse::<i32>() {
         return v;
     }
-    i32::from_str_radix(tok, 16).unwrap_or(0)
+    i32::from_str_radix(tok, 16).unwrap_or(-1)
 }
 
 impl Tilemap {
@@ -964,11 +964,11 @@ impl Tilemap {
     }
 
     pub fn get(&self, x: i32, y: i32) -> i32 {
-        self.cells.get(&(x, y)).copied().unwrap_or(0)
+        self.cells.get(&(x, y)).copied().unwrap_or(-1)
     }
 
     pub fn set(&mut self, x: i32, y: i32, val: i32) {
-        if val == 0 {
+        if val < 0 {
             self.cells.remove(&(x, y));
         } else {
             self.cells.insert((x, y), val);
@@ -1000,9 +1000,9 @@ impl Tilemap {
         } else {
             for (dx, ch) in trimmed.chars().enumerate() {
                 let val = match ch {
-                    '.' | '_' | '-' => 0,
-                    c if c.is_ascii_hexdigit() => c.to_digit(16).unwrap_or(0) as i32,
-                    _ => 0,
+                    '.' | '_' | '-' => -1,
+                    c if c.is_ascii_hexdigit() => c.to_digit(16).map(|v| v as i32).unwrap_or(-1),
+                    _ => -1,
                 };
                 self.set(start_x + dx as i32, y, val);
             }
@@ -2618,7 +2618,7 @@ fn register_engine_api(
         }),
     );
 
-    // mget(cel_x = 0, cel_y = 0): タイルマップ上のセル (cel_x, cel_y) のタイル番号を取得（未設定は 0）
+    // mget(cel_x = 0, cel_y = 0): タイルマップ上のセル (cel_x, cel_y) のタイル番号を取得（未設定は -1）
     let map_for_mget = tilemap.clone();
     mrb_define_cmethod(
         vm,
@@ -2632,7 +2632,7 @@ fn register_engine_api(
         }),
     );
 
-    // mset(cel_x = 0, cel_y = 0, val = 0): タイルマップ上のセル (cel_x, cel_y) にタイル番号 val を設定
+    // mset(cel_x = 0, cel_y = 0, val = -1): タイルマップ上のセル (cel_x, cel_y) にタイル番号 val を設定（負数で消去）
     let map_for_mset = tilemap.clone();
     mrb_define_cmethod(
         vm,
@@ -2641,7 +2641,7 @@ fn register_engine_api(
         Box::new(move |_vm, args| {
             let cx = arg_i32(args, 0, 0);
             let cy = arg_i32(args, 1, 0);
-            let val = arg_i32(args, 2, 0);
+            let val = arg_i32(args, 2, -1);
             map_for_mset.borrow_mut().set(cx, cy, val);
             Ok(Rc::new(RObject::nil()))
         }),
@@ -3728,7 +3728,7 @@ fn register_engine_api(
                 for dy in 0..cel_h {
                     for dx in 0..cel_w {
                         let tile_id = tmap.get(cel_x + dx, cel_y + dy);
-                        if tile_id <= 0 {
+                        if tile_id < 0 {
                             continue;
                         }
                         let draw_x =
@@ -4490,7 +4490,7 @@ fn register_engine_api(
             for dy in 0..cel_h {
                 for dx in 0..cel_w {
                     let tile_id = tmap.get(cel_x + dx, cel_y + dy);
-                    if tile_id <= 0 {
+                    if tile_id < 0 {
                         continue;
                     }
                     let draw_x = (sx + dx * step - state.cam_x) as f32;

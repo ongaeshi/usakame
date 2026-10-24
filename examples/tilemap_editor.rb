@@ -54,7 +54,7 @@ PAL_MAX_H = 192
 
 # タイル情報定義 [ID, 名前, 代表色] (デフォルト16種)
 TILE_INFO = [
-  [0,  "EMPTY",  0],
+  [0,  "TILE_0", 1],
   [1,  "BRICK",  5],
   [2,  "DIRT",   4],
   [3,  "GRASS",  11],
@@ -76,7 +76,7 @@ TILE_INFO = [
 TERRAIN_DIM_PAL = [0, 0, 1, 1, 2, 1, 5, 5, 2, 4, 4, 3, 1, 1, 2, 4]
 
 def tile_name(tid)
-  if tid == 0
+  if tid < 0
     "EMPTY"
   elsif tid < TILE_INFO.size && TILE_INFO[tid]
     TILE_INFO[tid][1]
@@ -86,7 +86,7 @@ def tile_name(tid)
 end
 
 def tile_color(tid)
-  if tid == 0
+  if tid < 0
     0
   elsif tid < TILE_INFO.size && TILE_INFO[tid]
     TILE_INFO[tid][2]
@@ -98,7 +98,7 @@ end
 # ------------------------------------------------------------------------------
 # グローバル状態
 # ------------------------------------------------------------------------------
-$map = Array.new(MAP_WIDTH * MAP_HEIGHT, 0)
+$map = Array.new(MAP_WIDTH * MAP_HEIGHT, -1)
 $objects = []         # オブジェクト一覧 [{ type: "apple", x: 48, y: 48, spr: "🍎", ... }]
 $minimap_dirty = true # ミニマップ再生成フラグ
 
@@ -153,7 +153,7 @@ $pal_scroll_y = 0     # パレットの縦スクロールオフセット (px)
 
 $cam_x = 0           # カメラ原点 (タイル単位)
 $cam_y = 0
-$selected_tile = 1       # 地形モード選択中タイルID (0..255)
+$selected_tile = 0       # 地形モード選択中タイルID (0..255)
 $selected_obj_chip = 10  # オブジェクトモード選択中チップID (0..255)
 $current_tool = :pen # :pen, :rect, :fill, :picker
 $cell_size = 16      # 16 or 8
@@ -294,7 +294,7 @@ def perform_undo
 end
 
 def get_tile(tx, ty)
-  return 0 if tx < 0 || tx >= MAP_WIDTH || ty < 0 || ty >= MAP_HEIGHT
+  return -1 if tx < 0 || tx >= MAP_WIDTH || ty < 0 || ty >= MAP_HEIGHT
   $map[ty * MAP_WIDTH + tx]
 end
 
@@ -308,9 +308,9 @@ def set_tile(tx, ty, tid)
   end
 end
 
-# タイルIDを1文字表記に変換 (0: '.', 1..9: '1'..'9', 10..15: 'A'..'F')
+# タイルIDを1文字表記に変換 (負数: '.', 0..9: '0'..'9', 10..15: 'A'..'F')
 def tile_to_char(tid)
-  if tid <= 0
+  if tid < 0
     "."
   elsif tid < 10
     tid.to_s
@@ -363,6 +363,7 @@ end
 
 # サンプルマップ初期化（見本ダンジョン）
 def init_sample_map
+  $map = Array.new(MAP_WIDTH * MAP_HEIGHT, -1)
   MAP_HEIGHT.times do |y|
     MAP_WIDTH.times do |x|
       if x == 0 || x == MAP_WIDTH - 1 || y == 0 || y == MAP_HEIGHT - 1
@@ -488,7 +489,7 @@ end
 # マップ全消去
 def clear_map
   push_undo
-  $map = Array.new(MAP_WIDTH * MAP_HEIGHT, 0)
+  $map = Array.new(MAP_WIDTH * MAP_HEIGHT, -1)
   sync_tilemap_to_engine
   $minimap_dirty = true
   sfx(:boom)
@@ -506,7 +507,7 @@ def generate_map_text
     MAP_WIDTH.times do |x|
       tid = get_tile(x, y)
       if has_large_tiles
-        row_tokens << (tid <= 0 ? "." : tid.to_s)
+        row_tokens << (tid < 0 ? "." : tid.to_s)
       else
         row_tokens << tile_to_char(tid)
       end
@@ -563,7 +564,7 @@ end
 # タイル描画 (バンクテクスチャから直接転送)
 # ------------------------------------------------------------------------------
 def draw_tile_at(tid, px, py, scale = 1.0)
-  return if tid <= 0
+  return if tid < 0
   cols = ($sheet_cols && $sheet_cols > 0) ? $sheet_cols : 16
   u = (tid % cols) * 16
   v = (tid / cols) * 16
@@ -906,7 +907,7 @@ def update
       if tx >= 0 && tx < MAP_WIDTH && ty >= 0 && ty < MAP_HEIGHT
         case $current_tool
         when :pen
-          draw_tid = btn(:mouse_l) ? $selected_tile : (btn(:mouse_r) ? 0 : nil)
+          draw_tid = btn(:mouse_l) ? $selected_tile : (btn(:mouse_r) ? -1 : nil)
           if !draw_tid.nil?
             if btnp(:mouse_l) || btnp(:mouse_r)
               push_undo
@@ -919,7 +920,7 @@ def update
 
         when :rect
           if btnp(:mouse_l) || btnp(:mouse_r)
-            $rect_drag = [tx, ty, btnp(:mouse_l) ? $selected_tile : 0]
+            $rect_drag = [tx, ty, btnp(:mouse_l) ? $selected_tile : -1]
           elsif (!btn(:mouse_l) && !btn(:mouse_r)) && $rect_drag
             stx = $rect_drag[0]
             sty = $rect_drag[1]
@@ -932,16 +933,18 @@ def update
           if btnp(:mouse_l)
             flood_fill_tile(tx, ty, $selected_tile)
           elsif btnp(:mouse_r)
-            flood_fill_tile(tx, ty, 0)
+            flood_fill_tile(tx, ty, -1)
           end
 
         when :picker
           if btnp(:mouse_l) || btnp(:mouse_r)
             picked = get_tile(tx, ty)
-            $selected_tile = picked
-            $current_tool = :pen
-            sfx(:select)
-            notify("PICKED TILE: #{picked}")
+            if picked >= 0
+              $selected_tile = picked
+              $current_tool = :pen
+              sfx(:select)
+              notify("PICKED TILE: #{picked}")
+            end
           end
         end
       end
@@ -1129,7 +1132,7 @@ def draw
         next if tx >= MAP_WIDTH
 
         tid = get_tile(tx, ty)
-        if tid > 0
+        if tid >= 0
           draw_tile_at(tid, VIEW_X + dx * $cell_size, draw_py, scale)
         end
       end
@@ -1160,7 +1163,7 @@ def draw
 
       is_selected = ($current_mode == :objects && $selected_obj_idx == idx)
 
-      if obj[:spr].is_a?(Integer) && obj[:spr] > 0
+      if obj[:spr].is_a?(Integer) && obj[:spr] >= 0
         draw_tile_at(obj[:spr], ox, oy, scale)
       elsif obj[:spr].is_a?(String) && !obj[:spr].empty?
         spr(obj[:spr], ox, oy, false, false, 0, scale)
@@ -1255,7 +1258,7 @@ def draw
   rectfill(442, 21, 36, 36, 1)
   rect(442, 21, 36, 36, 5)
   if $current_mode == :terrain
-    if $selected_tile == 0
+    if $selected_tile < 0
       rectfill(444, 23, 32, 32, 0)
       line(448, 27, 472, 51, 8)
       line(448, 51, 472, 27, 8)
@@ -1270,7 +1273,7 @@ def draw
   else
     if $selected_obj_idx && $selected_obj_idx < $objects.size
       sel_o = $objects[$selected_obj_idx]
-      if sel_o[:spr].is_a?(Integer) && sel_o[:spr] > 0
+      if sel_o[:spr].is_a?(Integer) && sel_o[:spr] >= 0
         draw_tile_at(sel_o[:spr], 444, 23, 2.0)
       elsif sel_o[:spr].is_a?(String)
         spr(sel_o[:spr], 452, 31)
