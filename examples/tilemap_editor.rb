@@ -100,6 +100,9 @@ $selected_obj_idx = nil    # 選択中の配置済みオブジェクト
 $dragging_obj_idx = nil    # ドラッグ中のオブジェクト
 $drag_offset_x = 0
 $drag_offset_y = 0
+$drag_start_x = 0
+$drag_start_y = 0
+$drag_moved = false
 
 $obj_palette_tab = :chip   # :chip or :emoji (デフォルトは :chip)
 
@@ -200,11 +203,6 @@ $last_spr_mtime = 0
 def snap_floor(v, step)
   return v if step <= 1
   (v / step).to_i * step
-end
-
-def snap_round(v, step)
-  return v if step <= 1
-  ((v + step / 2) / step).to_i * step
 end
 
 def notify(msg)
@@ -915,10 +913,11 @@ def update
       # マウスボタン解放時: ドラッグ終了
       if !btn(:mouse_l) && $dragging_obj_idx
         $dragging_obj_idx = nil
+        $drag_moved = false
       end
 
       # オブジェクトモード時の操作
-      # スナップ座標の計算
+      # スナップ座標の計算 (常にセル左上基準の snap_floor に統一)
       snap_x = snap_floor(world_x, $grid_snap)
       snap_y = snap_floor(world_y, $grid_snap)
 
@@ -938,11 +937,18 @@ def update
         end
 
         if hit_idx
-          push_undo
           $selected_obj_idx = hit_idx
           $dragging_obj_idx = hit_idx
-          $drag_offset_x = world_x - $objects[hit_idx][:x]
-          $drag_offset_y = world_y - $objects[hit_idx][:y]
+          if $grid_snap > 1
+            $drag_offset_x = snap_x - snap_floor($objects[hit_idx][:x], $grid_snap)
+            $drag_offset_y = snap_y - snap_floor($objects[hit_idx][:y], $grid_snap)
+          else
+            $drag_offset_x = world_x - $objects[hit_idx][:x]
+            $drag_offset_y = world_y - $objects[hit_idx][:y]
+          end
+          $drag_start_x = snap_x
+          $drag_start_y = snap_y
+          $drag_moved = false
           sfx(:select)
           notify("SEL: #{$objects[hit_idx][:type].to_s.upcase}")
         else
@@ -962,21 +968,28 @@ def update
             $dragging_obj_idx = $selected_obj_idx
             $drag_offset_x = 0
             $drag_offset_y = 0
+            $drag_start_x = snap_x
+            $drag_start_y = snap_y
+            $drag_moved = true
             sfx(:jump)
             notify("PLACED #{new_obj[:type].to_s.upcase}")
           end
         end
 
-      # 2. ドラッグ移動中
+      # 2. ドラッグ移動中 (クリックしたセルから実際に動いたときのみ座標を更新)
       elsif btn(:mouse_l) && $dragging_obj_idx && $dragging_obj_idx < $objects.size
-        tx = world_x - $drag_offset_x
-        ty = world_y - $drag_offset_y
-        tx = snap_round(tx, $grid_snap)
-        ty = snap_round(ty, $grid_snap)
-        tx = [[tx, 0].max, MAP_WIDTH * 16 - 16].min
-        ty = [[ty, 0].max, MAP_HEIGHT * 16 - 16].min
-        $objects[$dragging_obj_idx][:x] = tx
-        $objects[$dragging_obj_idx][:y] = ty
+        if !$drag_moved && (snap_x != $drag_start_x || snap_y != $drag_start_y)
+          push_undo
+          $drag_moved = true
+        end
+        if $drag_moved
+          tx = snap_x - $drag_offset_x
+          ty = snap_y - $drag_offset_y
+          tx = [[tx, 0].max, MAP_WIDTH * 16 - 16].min
+          ty = [[ty, 0].max, MAP_HEIGHT * 16 - 16].min
+          $objects[$dragging_obj_idx][:x] = tx
+          $objects[$dragging_obj_idx][:y] = ty
+        end
 
       # 3. 右クリック押下時: オブジェクト削除
       elsif btnp(:mouse_r)
@@ -1110,7 +1123,7 @@ def draw
       if obj[:spr].is_a?(Integer) && obj[:spr] > 0
         draw_tile_at(obj[:spr], ox, oy, scale)
       elsif obj[:spr].is_a?(String) && !obj[:spr].empty?
-        spr(obj[:spr], ox, oy)
+        spr(obj[:spr], ox, oy, false, false, 0, scale)
       else
         # スプライトなし（ゾーンやポイント）
         rectfill(ox, oy, ow, oh, 1)

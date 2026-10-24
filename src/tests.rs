@@ -1803,7 +1803,8 @@ fn test_tilemap_editor_object_layer_workflow() {
     let mode = runtime.vm.globals.get("$current_mode").unwrap();
     assert_eq!(mode.as_ref(), &RObject::symbol("objects".into()), "Clicking x:150 y:10 should switch to OBJECTS");
 
-    // キャンバス上の空白をクリックして新規オブジェクトを配置 (x: 100, y: 100)
+    // キャンバス上の空白をクリックして新規オブジェクトを配置 (x: 53 -> world_x: 45, y: 67 -> world_y: 45)
+    // 16pxセル (32..47) の右下半分をクリックしても (32, 32) に配置され、次フレームで押しっぱなしでも (48, 48) にずれないことの確認
     let init_objs_len = match &runtime.vm.globals.get("$objects").unwrap().value {
         RValue::Array(a) => a.borrow().len(),
         _ => 0,
@@ -1812,15 +1813,37 @@ fn test_tilemap_editor_object_layer_workflow() {
         &mut runtime.vm,
         obj_cls.clone(),
         "mouse_x",
-        Box::new(|_, _| Ok(Rc::new(RObject::integer(100)))),
+        Box::new(|_, _| Ok(Rc::new(RObject::integer(53)))),
     );
     mrb_define_cmethod(
         &mut runtime.vm,
         obj_cls.clone(),
         "mouse_y",
-        Box::new(|_, _| Ok(Rc::new(RObject::integer(100)))),
+        Box::new(|_, _| Ok(Rc::new(RObject::integer(67)))),
+    );
+    mrb_define_cmethod(
+        &mut runtime.vm,
+        obj_cls.clone(),
+        "btn",
+        Box::new(|_, args| {
+            if let Some(arg) = args.first() {
+                if let RValue::Symbol(s) = &arg.value {
+                    return Ok(Rc::new(RObject::boolean(s == &"mouse_l".into())));
+                }
+            }
+            Ok(Rc::new(RObject::boolean(false)))
+        }),
     );
     runtime.call_update_result().expect("Placing object in objects mode should succeed");
+
+    // 2フレーム目: btnp は false、btn(:mouse_l) は true (マウス押しっぱなし)
+    mrb_define_cmethod(
+        &mut runtime.vm,
+        obj_cls.clone(),
+        "btnp",
+        Box::new(|_, _| Ok(Rc::new(RObject::boolean(false)))),
+    );
+    runtime.call_update_result().expect("Holding mouse on frame 2 should not shift object");
     runtime.call_draw_result().expect("Drawing after placing object should succeed");
 
     let new_objs_len = match &runtime.vm.globals.get("$objects").unwrap().value {
@@ -1829,7 +1852,33 @@ fn test_tilemap_editor_object_layer_workflow() {
     };
     assert_eq!(new_objs_len, init_objs_len + 1, "Placing object should add one object to $objects");
 
-    // 右クリックでオブジェクトを削除 (x: 100, y: 100)
+    let res_snap = mrb_funcall(&mut runtime.vm, None, "generate_map_text", &[]).unwrap();
+    let snap_str: String = res_snap.as_ref().try_into().unwrap();
+    assert!(
+        snap_str.contains(" 32 32 "),
+        "Object placed at world (45, 45) with 16px snap must stay at (32, 32), got:\n{}",
+        snap_str
+    );
+
+    // 右クリックでオブジェクトを削除 (x: 45 -> world_x: 37, y: 59 -> world_y: 37, inside 32..47)
+    mrb_define_cmethod(
+        &mut runtime.vm,
+        obj_cls.clone(),
+        "mouse_x",
+        Box::new(|_, _| Ok(Rc::new(RObject::integer(45)))),
+    );
+    mrb_define_cmethod(
+        &mut runtime.vm,
+        obj_cls.clone(),
+        "mouse_y",
+        Box::new(|_, _| Ok(Rc::new(RObject::integer(59)))),
+    );
+    mrb_define_cmethod(
+        &mut runtime.vm,
+        obj_cls.clone(),
+        "btn",
+        Box::new(|_, _| Ok(Rc::new(RObject::boolean(false)))),
+    );
     mrb_define_cmethod(
         &mut runtime.vm,
         obj_cls.clone(),
