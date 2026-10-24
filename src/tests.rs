@@ -2917,3 +2917,35 @@ __END__
         second_line
     );
 }
+
+#[test]
+fn test_screenshot_png_encoding_and_flip() {
+    // 2x2 のテスト画像（上段: 赤, 緑 / 下段: 青, 白）
+    // OpenGL 仮想画面は上下反転して格納されている想定なので
+    // 生のバッファで先頭行（y=0）が青・白、次行（y=1）が赤・緑
+    let mut raw_rgba = Vec::new();
+    // y=0 (OpenGLの下段): 青 [0, 0, 255, 255], 白 [255, 255, 255, 255]
+    raw_rgba.extend_from_slice(&[0, 0, 255, 255]);
+    raw_rgba.extend_from_slice(&[255, 255, 255, 255]);
+    // y=1 (OpenGLの上段): 赤 [255, 0, 0, 255], 緑 [0, 255, 0, 255]
+    raw_rgba.extend_from_slice(&[255, 0, 0, 255]);
+    raw_rgba.extend_from_slice(&[0, 255, 0, 255]);
+
+    let png_bytes = encode_screenshot_png(&raw_rgba, 2, 2).expect("PNG encode should succeed");
+    assert!(!png_bytes.is_empty());
+
+    // デコードして上下反転（正立）されているか検証
+    let decoder = png::Decoder::new(&png_bytes[..]);
+    let mut reader = decoder.read_info().expect("PNG read info should succeed");
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).expect("PNG decode should succeed");
+
+    assert_eq!(info.width, 2);
+    assert_eq!(info.height, 2);
+    // 反転後: 1行目が 赤, 緑
+    assert_eq!(&buf[0..4], &[255, 0, 0, 255], "Top-left should be red");
+    assert_eq!(&buf[4..8], &[0, 255, 0, 255], "Top-right should be green");
+    // 反転後: 2行目が 青, 白
+    assert_eq!(&buf[8..12], &[0, 0, 255, 255], "Bottom-left should be blue");
+    assert_eq!(&buf[12..16], &[255, 255, 255, 255], "Bottom-right should be white");
+}

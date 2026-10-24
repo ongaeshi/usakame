@@ -5539,6 +5539,79 @@ pub fn present_virtual_screen(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub fn encode_screenshot_png(rgba: &[u8], width: usize, height: usize) -> Result<Vec<u8>, String> {
+    if rgba.len() != width * height * 4 {
+        return Err(format!(
+            "Invalid RGBA buffer length: expected {}, got {}",
+            width * height * 4,
+            rgba.len()
+        ));
+    }
+    let mut bytes = rgba.to_vec();
+    let row_bytes = width * 4;
+
+    // RenderTarget は OpenGL のため上下反転しているのを正立させる
+    for y in 0..(height / 2) {
+        let top_start = y * row_bytes;
+        let bottom_start = (height - 1 - y) * row_bytes;
+        for i in 0..row_bytes {
+            bytes.swap(top_start + i, bottom_start + i);
+        }
+    }
+
+    let mut out = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut out, width as u32, height as u32);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_compression(png::Compression::Fast);
+        let mut writer = encoder
+            .write_header()
+            .map_err(|e| format!("PNG write_header error: {:?}", e))?;
+        writer
+            .write_image_data(&bytes)
+            .map_err(|e| format!("PNG write_image_data error: {:?}", e))?;
+    }
+    Ok(out)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn save_screenshot_from_render_target(render_target: &RenderTarget) -> Result<String, String> {
+    let image = render_target.texture.get_texture_data();
+    let width = image.width as usize;
+    let height = image.height as usize;
+    let png_bytes = encode_screenshot_png(&image.bytes, width, height)?;
+
+    let dir = std::path::Path::new("screenshots");
+    if !dir.exists() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("Failed to create screenshots dir: {}", e))?;
+    }
+
+    let mut filepath = String::new();
+    for i in 1..=9999 {
+        let candidate = format!("screenshots/screenshot_{:03}.png", i);
+        if !std::path::Path::new(&candidate).exists() {
+            filepath = candidate;
+            break;
+        }
+    }
+    if filepath.is_empty() {
+        filepath = format!(
+            "screenshots/screenshot_{}.png",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        );
+    }
+
+    std::fs::write(&filepath, png_bytes)
+        .map_err(|e| format!("Failed to write screenshot file: {}", e))?;
+
+    Ok(filepath)
+}
+
 // ==========================================
 // ネイティブ環境エントリポイント (`uk` CLI)
 // ==========================================
@@ -5818,6 +5891,19 @@ async fn run_native_with_hot_reload(
                 error_overlay_frames = ERROR_OVERLAY_DURATION_FRAMES;
             }
 
+            if is_key_pressed(KeyCode::F12) {
+                match save_screenshot_from_render_target(&render_target) {
+                    Ok(path) => {
+                        println!("[screenshot] Saved to {}", path);
+                        reload_banner_text = format!("SCREENSHOT: {}", path);
+                        reload_banner_frames = 90;
+                    }
+                    Err(err) => {
+                        eprintln!("[screenshot] Failed: {}", err);
+                    }
+                }
+            }
+
             let show_fps = rt.config.borrow().show_fps;
             present_virtual_screen(
                 &render_target,
@@ -5899,6 +5985,19 @@ async fn run_embedded_game(tail_data: String, mrb_bytes: Vec<u8>) {
 
         set_camera(&virtual_camera);
         runtime.call_draw();
+
+        if is_key_pressed(KeyCode::F12) {
+            match save_screenshot_from_render_target(&render_target) {
+                Ok(path) => {
+                    println!("[screenshot] Saved to {}", path);
+                    reload_banner_text = format!("SCREENSHOT: {}", path);
+                    reload_banner_frames = 90;
+                }
+                Err(err) => {
+                    eprintln!("[screenshot] Failed: {}", err);
+                }
+            }
+        }
 
         let show_fps = runtime.config.borrow().show_fps;
         present_virtual_screen(
@@ -6217,6 +6316,19 @@ async fn main() {
                 }
                 current_error = Some(err);
                 error_overlay_frames = ERROR_OVERLAY_DURATION_FRAMES;
+            }
+
+            if is_key_pressed(KeyCode::F12) {
+                match save_screenshot_from_render_target(&render_target) {
+                    Ok(path) => {
+                        println!("[screenshot] Saved to {}", path);
+                        reload_banner_text = format!("SCREENSHOT: {}", path);
+                        reload_banner_frames = 90;
+                    }
+                    Err(err) => {
+                        eprintln!("[screenshot] Failed: {}", err);
+                    }
+                }
             }
 
             let show_fps = rt.config.borrow().show_fps;
