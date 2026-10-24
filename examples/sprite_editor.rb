@@ -133,6 +133,7 @@ def push_undo
 end
 
 def perform_undo
+  return if $is_read_only
   return if $undo_stack.empty?
   sel_x, sel_y, saved_grid = $undo_stack.pop
   $sel_x = sel_x
@@ -145,44 +146,50 @@ end
 # 起動時の読み込み
 load_source = ($save_path != $target_path && read_file($save_path)) ? $save_path : $target_path
 $is_read_only = is_resource_read_only(load_source) || is_resource_read_only($save_path) || is_resource_read_only($target_path)
-loaded_bank = load_resource_bank(load_source, $current_bank)
 
-if loaded_bank && loaded_bank.size == BANK_SIZE * BANK_SIZE
-  update_bank($current_bank, loaded_bank)
-  if $is_read_only
+if $is_read_only
+  # テクスチャ（PNG参照）から読み込んだ場合：リードオンリーモードなので減色処理は不要！
+  # フルカラーRGBAテクスチャのまま直接バンクへロードする
+  if load_bank($current_bank, load_source)
     notify("LOADED BANK #{$current_bank} (READ-ONLY: PNG REFERENCE)")
   else
-    notify("LOADED BANK #{$current_bank} FROM #{load_source}")
+    notify("FAILED TO LOAD BANK #{$current_bank} FROM #{load_source}")
   end
 else
-  # サンプルうさぎスプライトをバンク0の (0, 0) に初期設定
-  sample_usagi = [
-    "....77....77....",
-    "...7EE7..7EE7...",
-    "...7EE7..7EE7...",
-    "...7777..7777...",
-    "...7777777777...",
-    "..888888888888..",
-    ".77707777770777.",
-    ".77707777770777.",
-    ".777777EE777777.",
-    "..777777777777..",
-    "...8888AA8888...",
-    "..778888888877..",
-    "..77.777777.77..",
-    "....777..777....",
-    "...777....777...",
-    "................"
-  ]
-  sample_usagi.each_with_index do |row, y|
-    16.times do |x|
-      ch = row[x]
-      if ch && ch != "."
-        set_bank_pixel($current_bank, x, y, ch.to_i(16))
+  loaded_bank = load_resource_bank(load_source, $current_bank)
+  if loaded_bank && loaded_bank.size == BANK_SIZE * BANK_SIZE
+    update_bank($current_bank, loaded_bank)
+    notify("LOADED BANK #{$current_bank} FROM #{load_source}")
+  else
+    # サンプルうさぎスプライトをバンク0の (0, 0) に初期設定
+    sample_usagi = [
+      "....77....77....",
+      "...7EE7..7EE7...",
+      "...7EE7..7EE7...",
+      "...7777..7777...",
+      "...7777777777...",
+      "..888888888888..",
+      ".77707777770777.",
+      ".77707777770777.",
+      ".777777EE777777.",
+      "..777777777777..",
+      "...8888AA8888...",
+      "..778888888877..",
+      "..77.777777.77..",
+      "....777..777....",
+      "...777....777...",
+      "................"
+    ]
+    sample_usagi.each_with_index do |row, y|
+      16.times do |x|
+        ch = row[x]
+        if ch && ch != "."
+          set_bank_pixel($current_bank, x, y, ch.to_i(16))
+        end
       end
     end
+    notify("TARGET: #{$target_path} (NEW BANK #{$current_bank})")
   end
-  notify("TARGET: #{$target_path} (NEW BANK #{$current_bank})")
 end
 
 # ------------------------------------------------------------------------------
@@ -195,13 +202,21 @@ def switch_bank(new_bank)
 
   load_source = ($save_path != $target_path && read_file($save_path)) ? $save_path : $target_path
   $is_read_only = is_resource_read_only(load_source) || is_resource_read_only($save_path) || is_resource_read_only($target_path)
-  loaded = load_resource_bank(load_source, $current_bank)
-  if loaded && loaded.size == BANK_SIZE * BANK_SIZE
-    update_bank($current_bank, loaded)
+  if $is_read_only
+    if load_bank($current_bank, load_source)
+      notify("SWITCHED TO BANK #{$current_bank} (READ-ONLY)")
+    else
+      notify("SWITCHED TO BANK #{$current_bank} (READ-ONLY: EMPTY)")
+    end
   else
-    update_bank($current_bank, Array.new(BANK_SIZE * BANK_SIZE, nil))
+    loaded = load_resource_bank(load_source, $current_bank)
+    if loaded && loaded.size == BANK_SIZE * BANK_SIZE
+      update_bank($current_bank, loaded)
+    else
+      update_bank($current_bank, Array.new(BANK_SIZE * BANK_SIZE, nil))
+    end
+    notify("SWITCHED TO BANK #{$current_bank}")
   end
-  notify("SWITCHED TO BANK #{$current_bank}")
 end
 
 # ------------------------------------------------------------------------------
@@ -307,6 +322,11 @@ end
 
 # 反転 (32x32 領域内)
 def flip_canvas(horizontal)
+  if $is_read_only
+    sfx(:boom)
+    notify("READ ONLY: Cannot edit PNG-backed bank in editor!")
+    return
+  end
   push_undo
   cur = get_canvas_pixels($sel_x, $sel_y)
   new_grid = Array.new(CANVAS_GRID * CANVAS_GRID, nil)
@@ -324,6 +344,11 @@ end
 
 # シフト移動 (dx, dy on 32x32)
 def shift_canvas(dx, dy)
+  if $is_read_only
+    sfx(:boom)
+    notify("READ ONLY: Cannot edit PNG-backed bank in editor!")
+    return
+  end
   push_undo
   cur = get_canvas_pixels($sel_x, $sel_y)
   new_grid = Array.new(CANVAS_GRID * CANVAS_GRID, nil)
@@ -340,6 +365,11 @@ def shift_canvas(dx, dy)
 end
 
 def clear_canvas
+  if $is_read_only
+    sfx(:boom)
+    notify("READ ONLY: Cannot edit PNG-backed bank in editor!")
+    return
+  end
   push_undo
   new_grid = Array.new(CANVAS_GRID * CANVAS_GRID, nil)
   set_canvas_pixels($sel_x, $sel_y, new_grid)
@@ -517,43 +547,50 @@ def update
                my >= $canvas_y && my < $canvas_y + CANVAS_GRID * $cell_size)
 
   if in_canvas
-    cx = (mx - $canvas_x) / $cell_size
-    cy = (my - $canvas_y) / $cell_size
-    cx = [[cx, 0].max, CANVAS_GRID - 1].min
-    cy = [[cy, 0].max, CANVAS_GRID - 1].min
+    if $is_read_only
+      if btnp(:mouse_l) || btnp(:mouse_r)
+        sfx(:boom)
+        notify("READ ONLY: Direct PNG reference (view-only). Edit PNG in external tool.")
+      end
+    else
+      cx = (mx - $canvas_x) / $cell_size
+      cy = (my - $canvas_y) / $cell_size
+      cx = [[cx, 0].max, CANVAS_GRID - 1].min
+      cy = [[cy, 0].max, CANVAS_GRID - 1].min
 
-    gx = $sel_x + cx
-    gy = $sel_y + cy
+      gx = $sel_x + cx
+      gy = $sel_y + cy
 
-    if gx < BANK_SIZE && gy < BANK_SIZE
-      idx = gy * BANK_SIZE + gx
+      if gx < BANK_SIZE && gy < BANK_SIZE
+        idx = gy * BANK_SIZE + gx
 
-      case $current_tool
-      when :pen
-        push_undo if btnp(:mouse_l) || btnp(:mouse_r)
-        if btn(:mouse_l)
-          set_bank_pixel($current_bank, gx, gy, $current_col)
-        elsif btn(:mouse_r)
-          set_bank_pixel($current_bank, gx, gy, nil)
-        end
-      when :eraser
-        push_undo if btnp(:mouse_l)
-        if btn(:mouse_l)
-          set_bank_pixel($current_bank, gx, gy, nil)
-        end
-      when :fill
-        if btnp(:mouse_l)
-          flood_fill(cx, cy, $current_col)
-        elsif btnp(:mouse_r)
-          flood_fill(cx, cy, nil)
-        end
-      when :picker
-        if btnp(:mouse_l)
-          picked = get_bank_pixel($current_bank, gx, gy)
-          $current_col = picked
-          $current_tool = :pen
-          sfx(:pickup)
-          notify("PICKED: #{picked ? COLOR_NAMES[picked] : 'TRANS'}")
+        case $current_tool
+        when :pen
+          push_undo if btnp(:mouse_l) || btnp(:mouse_r)
+          if btn(:mouse_l)
+            set_bank_pixel($current_bank, gx, gy, $current_col)
+          elsif btn(:mouse_r)
+            set_bank_pixel($current_bank, gx, gy, nil)
+          end
+        when :eraser
+          push_undo if btnp(:mouse_l)
+          if btn(:mouse_l)
+            set_bank_pixel($current_bank, gx, gy, nil)
+          end
+        when :fill
+          if btnp(:mouse_l)
+            flood_fill(cx, cy, $current_col)
+          elsif btnp(:mouse_r)
+            flood_fill(cx, cy, nil)
+          end
+        when :picker
+          if btnp(:mouse_l)
+            picked = get_bank_pixel($current_bank, gx, gy)
+            $current_col = picked
+            $current_tool = :pen
+            sfx(:pickup)
+            notify("PICKED: #{picked ? COLOR_NAMES[picked] : 'TRANS'}")
+          end
         end
       end
     end

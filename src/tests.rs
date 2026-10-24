@@ -2583,6 +2583,39 @@ fn test_png_backed_resource_read_only_in_sprite_editor() {
     // $is_read_only グローバル変数が true であること
     let is_ro = runtime.vm.globals.get("$is_read_only");
     assert_eq!(is_ro.map(|v| v.as_ref().clone()), Some(RObject::boolean(true)));
+
+    // フルカラーPNGのテクスチャが16色に減色されずにそのままバンク0に保持されていること
+    let original_png_bytes = std::fs::read("examples/tiny_dungeon.png").expect("Read tiny_dungeon.png");
+    let original_img = Image::from_file_with_format(&original_png_bytes, Some(ImageFormat::Png)).unwrap();
+    let banks = runtime.banks.borrow();
+    let bank0 = banks.get(&0).expect("Bank 0 should be loaded");
+    // 左上タイルの不透明ピクセル（例: 0, 0 や 4, 4 等）の色を検証
+    // tiny_dungeon.png のタイルの色は PALETTE_RGBA 16色以外のフルカラー色
+    let orig_px = &original_img.bytes[0..4];
+    assert_eq!(&bank0.rgba[0..4], orig_px, "Original full-color pixels should be preserved without palette reduction");
+}
+
+#[test]
+fn test_tilemap_editor_preserves_full_color_texture() {
+    let (_, tail_data, mrb_bytes) =
+        cli::compile_ruby_script_file(std::path::Path::new("examples/tilemap_editor.rb"))
+            .expect("tilemap_editor.rb should compile");
+
+    let mut runtime =
+        GameRuntime::new_with_args(&tail_data, &mrb_bytes, true, &["examples/tiny_dungeon.map".to_string()])
+            .expect("Tilemap editor should initialize with tiny_dungeon.map");
+
+    for _ in 0..10 {
+        runtime.call_update_result().expect("call_update should succeed");
+        runtime.call_draw_result().expect("call_draw should succeed");
+    }
+
+    let original_png_bytes = std::fs::read("examples/tiny_dungeon.png").expect("Read tiny_dungeon.png");
+    let original_img = Image::from_file_with_format(&original_png_bytes, Some(ImageFormat::Png)).unwrap();
+    let banks = runtime.banks.borrow();
+    let bank0 = banks.get(&0).expect("Bank 0 should be loaded");
+    let orig_px = &original_img.bytes[0..4];
+    assert_eq!(&bank0.rgba[0..4], orig_px, "Tilemap editor should load bank without palette reduction");
 }
 
 

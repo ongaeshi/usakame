@@ -296,11 +296,15 @@ end
 def reload_custom_sprites
   src = ($spr_path && read_file($spr_path)) ? $spr_path : $target_path
 
-  # 1. 256x256 バンクデータの読み込み
-  bank_pixels = load_resource_bank(src, $ref_bank)
-  if bank_pixels && bank_pixels.size == 256 * 256
-    update_bank($ref_bank, bank_pixels)
+  # 1. 256x256 バンクデータの読み込み (減色せずフルカラーRGBAテクスチャを直接ロード)
+  if load_bank($ref_bank, src)
     notify("SYNCED BANK #{$ref_bank} FROM #{src}")
+  else
+    bank_pixels = load_resource_bank(src, $ref_bank)
+    if bank_pixels && bank_pixels.size == 256 * 256
+      update_bank($ref_bank, bank_pixels)
+      notify("SYNCED BANK #{$ref_bank} FROM #{src}")
+    end
   end
 
   # 2. 旧形式の個別スプライトもフォールバック読み込み

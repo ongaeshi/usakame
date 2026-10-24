@@ -2826,6 +2826,81 @@ fn register_engine_api(
         }),
     );
 
+    // load_bank(bank_id, path_or_source, src_bank_id = nil):
+    // 外部ファイル（PNG画像、.spr、.rb、.map等の定義）から減色処理を行わずにフルカラーRGBAのまま直接バンクへロードする。
+    let banks_for_load_bank = banks.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "load_bank",
+        Box::new(move |_vm, args| {
+            let bank_id = arg_i32(args, 0, 0);
+            let path_str = args
+                .get(1)
+                .and_then(|v| String::try_from(v.as_ref()).ok())
+                .unwrap_or_default();
+            let src_bank_id = if args.len() >= 3 && !args[2].is_nil() {
+                arg_i32(args, 2, bank_id)
+            } else {
+                bank_id
+            };
+
+            let p = std::path::Path::new(&path_str);
+            let base_dir = p.parent();
+
+            // 1. PNG 画像ファイル直接指定の場合
+            if p.extension().and_then(|s| s.to_str()).map(|s| s.eq_ignore_ascii_case("png")) == Some(true)
+                && p.is_file()
+            {
+                if let Ok(bank) = BankData::from_file_or_base64(bank_id, &path_str, None) {
+                    bank.build_texture();
+                    let mut banks_mut = banks_for_load_bank.borrow_mut();
+                    banks_mut.insert(bank_id, bank);
+                    return Ok(Rc::new(RObject::boolean(true)));
+                }
+            }
+
+            // 2. スクリプトまたは外部リソースファイルからのパース
+            let tail = if p.extension().and_then(|s| s.to_str()) == Some("rb") {
+                cli::compile_ruby_script_file(p)
+                    .map(|(_, t, _)| t)
+                    .unwrap_or_default()
+            } else if p.is_file() {
+                let content = std::fs::read_to_string(p).unwrap_or_default();
+                if p.extension().and_then(|s| s.to_str()) == Some("map") {
+                    let spr_path = p.with_extension("spr");
+                    if spr_path.is_file() {
+                        let spr_content = std::fs::read_to_string(&spr_path).unwrap_or_default();
+                        format!("{}\n{}", content, spr_content)
+                    } else {
+                        content
+                    }
+                } else {
+                    content
+                }
+            } else {
+                path_str.clone()
+            };
+
+            let (_sprites, parsed_banks) = parse_tail_resources_full(&tail, base_dir);
+            let source_bank = parsed_banks
+                .get(&src_bank_id)
+                .or_else(|| parsed_banks.get(&0))
+                .or_else(|| parsed_banks.values().next());
+
+            if let Some(src_bank) = source_bank {
+                let mut loaded_bank = src_bank.clone();
+                loaded_bank.id = bank_id;
+                loaded_bank.build_texture();
+                let mut banks_mut = banks_for_load_bank.borrow_mut();
+                banks_mut.insert(bank_id, loaded_bank);
+                Ok(Rc::new(RObject::boolean(true)))
+            } else {
+                Ok(Rc::new(RObject::boolean(false)))
+            }
+        }),
+    );
+
     // bank_to_b64_png(pixels): 65536要素のカラーインデックス配列から Base64 PNG を生成
     mrb_define_cmethod(
         vm,
