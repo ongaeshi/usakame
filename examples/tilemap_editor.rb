@@ -138,7 +138,8 @@ $selected_emoji_idx = 0 # デフォルト "🌲"
 
 $cam_x = 0           # カメラ原点 (タイル単位)
 $cam_y = 0
-$selected_tile = 1   # 選択中タイルID (0..255)
+$selected_tile = 1       # 地形モード選択中タイルID (0..255)
+$selected_obj_chip = 10  # オブジェクトモード選択中チップID (0..255)
 $current_tool = :pen # :pen, :rect, :fill, :picker
 $cell_size = 16      # 16 or 8
 $show_grid = true    # グリッド線の表示
@@ -401,6 +402,8 @@ end
 loaded_objs = load_resource_objects(load_source)
 if loaded_objs && !loaded_objs.empty?
   $objects = loaded_objs
+  first_chip = $objects.find { |o| o[:spr].is_a?(Integer) && o[:spr] > 0 }
+  $selected_obj_chip = first_chip[:spr] if first_chip
 end
 sync_tilemap_to_engine
 $minimap_dirty = true
@@ -627,13 +630,25 @@ def update
   $cam_x = [[$cam_x, 0].max, MAP_WIDTH - max_tiles_x].min
   $cam_y = [[$cam_y, 0].max, MAP_HEIGHT - max_tiles_y].min
 
-  # マウスホイールでタイル切り替え (0..255)
+  # マウスホイールでタイル/チップ切り替え (0..255)
   wheel = mouse_wheel
   if wheel > 0.2
-    $selected_tile = ($selected_tile - 1) % NUM_TILES
+    if $current_mode == :terrain
+      $selected_tile = ($selected_tile - 1) % NUM_TILES
+    elsif $obj_palette_tab == :chip
+      $selected_obj_chip = ($selected_obj_chip - 1) % NUM_TILES
+    else
+      $selected_emoji_idx = ($selected_emoji_idx - 1) % EMOJI_PALETTE.size
+    end
     sfx(:cursor)
   elsif wheel < -0.2
-    $selected_tile = ($selected_tile + 1) % NUM_TILES
+    if $current_mode == :terrain
+      $selected_tile = ($selected_tile + 1) % NUM_TILES
+    elsif $obj_palette_tab == :chip
+      $selected_obj_chip = ($selected_obj_chip + 1) % NUM_TILES
+    else
+      $selected_emoji_idx = ($selected_emoji_idx + 1) % EMOJI_PALETTE.size
+    end
     sfx(:cursor)
   end
 
@@ -665,7 +680,7 @@ def update
   end
 
   # --- バンクビュー / 絵文字ビュー上でのドラッグ選択 (x: 336..464, y: 98..226) ---
-  if $current_mode == :terrain || ($current_mode == :objects && $obj_palette_tab == :chip)
+  if $current_mode == :terrain
     if (btn(:mouse_l) || btn(:mouse_r)) && (mx >= 336 && mx < 464 && my >= 98 && my < 226)
       col = ((mx - 336) / 8).to_i
       row = ((my - 98) / 8).to_i
@@ -673,6 +688,18 @@ def update
         tid = row * 16 + col
         if $selected_tile != tid
           $selected_tile = tid
+          sfx(:select)
+        end
+      end
+    end
+  elsif $current_mode == :objects && $obj_palette_tab == :chip
+    if (btn(:mouse_l) || btn(:mouse_r)) && (mx >= 336 && mx < 464 && my >= 98 && my < 226)
+      col = ((mx - 336) / 8).to_i
+      row = ((my - 98) / 8).to_i
+      if col >= 0 && col < 16 && row >= 0 && row < 16
+        tid = row * 16 + col
+        if $selected_obj_chip != tid
+          $selected_obj_chip = tid
           sfx(:select)
         end
       end
@@ -803,7 +830,7 @@ def update
           # [SET] (x: 438..464)
           elsif mx >= 438 && mx <= 464
             push_undo
-            new_spr = ($obj_palette_tab == :emoji) ? EMOJI_PALETTE[$selected_emoji_idx] : $selected_tile
+            new_spr = ($obj_palette_tab == :emoji) ? EMOJI_PALETTE[$selected_emoji_idx] : $selected_obj_chip
             cur_obj[:spr] = new_spr
             sfx(:powerup)
             notify("UPDATED SPR: #{new_spr}")
@@ -956,7 +983,7 @@ def update
           push_undo
           new_obj = nil
           if $obj_palette_tab == :chip
-            new_obj = { type: "chip_#{$selected_tile}", x: snap_x, y: snap_y, spr: $selected_tile }
+            new_obj = { type: "chip_#{$selected_obj_chip}", x: snap_x, y: snap_y, spr: $selected_obj_chip }
           else
             emoji_ch = EMOJI_PALETTE[$selected_emoji_idx]
             new_obj = { type: "obj", x: snap_x, y: snap_y, spr: emoji_ch }
@@ -1234,9 +1261,9 @@ def draw
     else
       # 配置予定のチップ/絵文字
       if $obj_palette_tab == :chip
-        draw_tile_at($selected_tile, 408, 25, 2.0)
+        draw_tile_at($selected_obj_chip, 408, 25, 2.0)
         print_text("CHIP", 446, 24, 10)
-        print_text("ID:#{$selected_tile}", 446, 36, 7)
+        print_text("ID:#{$selected_obj_chip}", 446, 36, 7)
       else
         spr(EMOJI_PALETTE[$selected_emoji_idx], 416, 33)
         print_text("EMOJI", 446, 24, 10)
@@ -1324,8 +1351,8 @@ def draw
       line(337, 99, 342, 104, 8)
       line(337, 104, 342, 99, 8)
 
-      sel_col = $selected_tile % 16
-      sel_row = $selected_tile / 16
+      sel_col = $selected_obj_chip % 16
+      sel_row = $selected_obj_chip / 16
       bx = 336 + sel_col * 8
       by = 98 + sel_row * 8
       rect(bx - 1, by - 1, 10, 10, 10)
@@ -1379,7 +1406,7 @@ def draw
       print_text("SET", 443, 233, 7)
     else
       if $obj_palette_tab == :chip
-        print_text("STAMP CHIP #{$selected_tile}", 344, 233, 6)
+        print_text("STAMP CHIP #{$selected_obj_chip}", 344, 233, 6)
       else
         print_text("STAMP #{EMOJI_PALETTE[$selected_emoji_idx]} (##{$selected_emoji_idx})", 344, 233, 6)
       end

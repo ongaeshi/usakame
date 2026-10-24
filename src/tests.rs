@@ -1855,9 +1855,15 @@ fn test_tilemap_editor_object_layer_workflow() {
     let res_snap = mrb_funcall(&mut runtime.vm, None, "generate_map_text", &[]).unwrap();
     let snap_str: String = res_snap.as_ref().try_into().unwrap();
     assert!(
-        snap_str.contains(" 32 32 "),
-        "Object placed at world (45, 45) with 16px snap must stay at (32, 32), got:\n{}",
+        snap_str.contains("chip_10 32 32 spr=10"),
+        "Object placed at world (45, 45) with 16px snap must stay at (32, 32) with independent $selected_obj_chip (10), got:\n{}",
         snap_str
+    );
+    let terr_tile = runtime.vm.globals.get("$selected_tile").unwrap();
+    assert_eq!(
+        terr_tile.as_ref(),
+        &RObject::integer(1),
+        "$selected_tile for terrain mode must remain 1 independently of $selected_obj_chip"
     );
 
     // 右クリックでオブジェクトを削除 (x: 45 -> world_x: 37, y: 59 -> world_y: 37, inside 32..47)
