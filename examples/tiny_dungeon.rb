@@ -37,42 +37,80 @@ $cam_x = 0
 $cam_y = 0
 
 # --- プレイヤー初期状態 (左上スタート部屋) ---
-$px = 48
-$py = 48
+# @OBJECTS から初期位置を取得 (フォールバック: 48, 48)
+p_obj = objects(:player).first
+$px = p_obj ? p_obj[:x] : 48
+$py = p_obj ? p_obj[:y] : 48
 $pdir = :right
 $score = 0
 $keys = 0
 $hp = 3
 
-# --- 宝箱 & アイテム状態 (全9箇所) ---
-$chests = [
-  # 部屋1: 左上エントランス
-  { x: 32,  y: 32,  opened: false },
-  { x: 112, y: 32,  opened: false },
-  # 部屋2: 右上大広間
-  { x: 320, y: 32,  opened: false },
-  { x: 448, y: 112, opened: false },
-  # 部屋3: 中央大回廊
-  { x: 256, y: 224, opened: false },
-  # 部屋4: 左下牢獄
-  { x: 48,  y: 360, opened: false },
-  { x: 128, y: 440, opened: false },
-  # 部屋5: 右下最深部 (黄金の宝物庫)
-  { x: 360, y: 360, opened: false },
-  { x: 448, y: 440, opened: false }
-]
+# --- 宝箱 & アイテム状態 ---
+# @OBJECTS から chest を読み込み
+def init_chests
+  chest_objs = objects(:chest)
+  if chest_objs.empty?
+    # フォールバック (全9箇所)
+    return [
+      { x: 32,  y: 32,  opened: false },
+      { x: 112, y: 32,  opened: false },
+      { x: 320, y: 32,  opened: false },
+      { x: 448, y: 112, opened: false },
+      { x: 256, y: 224, opened: false },
+      { x: 48,  y: 360, opened: false },
+      { x: 128, y: 440, opened: false },
+      { x: 360, y: 360, opened: false },
+      { x: 448, y: 440, opened: false }
+    ]
+  end
 
-# --- モンスター (スライム・スケルトン計6体) ---
-$monsters = [
-  # スライム (左右徘徊)
-  { x: 180, y: 80,  vx: 0.6, vy: 0,   id: 109, dir: 1, min_x: 130, max_x: 230 },
-  { x: 240, y: 240, vx: 0.5, vy: 0,   id: 109, dir: 1, min_x: 190, max_x: 300 },
-  { x: 80,  y: 400, vx: 0.5, vy: 0,   id: 109, dir: 1, min_x: 40,  max_x: 140 },
-  # スケルトン (上下徘徊)
-  { x: 380, y: 64,  vx: 0,   vy: 0.5, id: 111, dir: 1, min_y: 32,  max_y: 120 },
-  { x: 144, y: 240, vx: 0,   vy: 0.6, id: 111, dir: 1, min_y: 200, max_y: 300 },
-  { x: 416, y: 380, vx: 0.5, vy: 0,   id: 111, dir: 1, min_x: 340, max_x: 440 }
-]
+  chest_objs.map do |ch|
+    { x: ch[:x], y: ch[:y], opened: ch[:opened] == true }
+  end
+end
+
+$chests = init_chests
+
+# --- モンスター (スライム・スケルトン等) ---
+# @OBJECTS から slime, skeleton, enemy を読み込み
+def init_monsters
+  raw_mobs = objects(:slime) + objects(:skeleton) + objects(:enemy)
+  if raw_mobs.empty?
+    # フォールバック (計6体)
+    return [
+      { x: 180, y: 80,  vx: 0.6, vy: 0.0, id: 109, dir: 1, min_x: 130, max_x: 230 },
+      { x: 240, y: 240, vx: 0.5, vy: 0.0, id: 109, dir: 1, min_x: 190, max_x: 300 },
+      { x: 80,  y: 400, vx: 0.5, vy: 0.0, id: 109, dir: 1, min_x: 40,  max_x: 140 },
+      { x: 380, y: 64,  vx: 0.0, vy: 0.5, id: 111, dir: 1, min_y: 32,  max_y: 120 },
+      { x: 144, y: 240, vx: 0.0, vy: 0.6, id: 111, dir: 1, min_y: 200, max_y: 300 },
+      { x: 416, y: 380, vx: 0.5, vy: 0.0, id: 111, dir: 1, min_x: 340, max_x: 440 }
+    ]
+  end
+
+  raw_mobs.map do |m|
+    is_skel = (m[:type] == "skeleton" || m[:id] == 111 || m[:spr] == 111)
+    def_id = is_skel ? 111 : 109
+    mid = m[:spr] || m[:id] || def_id
+    has_min_y = !m[:min_y].nil?
+    mvx = m[:vx] || (has_min_y ? 0.0 : 0.5)
+    mvy = m[:vy] || (has_min_y ? 0.5 : 0.0)
+    {
+      x: m[:x].to_f,
+      y: m[:y].to_f,
+      vx: mvx.to_f,
+      vy: mvy.to_f,
+      id: mid.to_i,
+      dir: 1,
+      min_x: (m[:min_x] || (m[:x] - 50)).to_f,
+      max_x: (m[:max_x] || (m[:x] + 50)).to_f,
+      min_y: (m[:min_y] || (m[:y] - 40)).to_f,
+      max_y: (m[:max_y] || (m[:y] + 40)).to_f
+    }
+  end
+end
+
+$monsters = init_monsters
 
 # --- エフェクト (パーティクル) ---
 $particles = []

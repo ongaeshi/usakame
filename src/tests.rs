@@ -2668,6 +2668,23 @@ fn test_tiny_dungeon_example_script() {
     let cam_y: i32 = runtime.vm.globals.get("$cam_y").unwrap().as_ref().try_into().unwrap();
     assert!(cam_x > 0, "cam_x should scroll when player moves right");
     assert!(cam_y > 0, "cam_y should scroll when player moves down");
+
+    // @OBJECTS から player, chests, monsters が正しく読み込まれていること
+    let px = runtime.vm.globals.get("$px").expect("$px should exist");
+    assert!(matches!(px.value, RValue::Integer(300))); // 上記テストで 300 に変更済み
+    let chests = runtime.vm.globals.get("$chests").expect("$chests should exist");
+    if let RValue::Array(ref arr) = chests.value {
+        assert_eq!(arr.borrow().len(), 9, "$chests should have 9 items");
+    } else {
+        panic!("$chests must be an array");
+    }
+
+    let monsters = runtime.vm.globals.get("$monsters").expect("$monsters should exist");
+    if let RValue::Array(ref arr) = monsters.value {
+        assert_eq!(arr.borrow().len(), 6, "$monsters should have 6 items");
+    } else {
+        panic!("$monsters must be an array");
+    }
 }
 
 #[test]
