@@ -200,8 +200,6 @@ if tlen >= 3
   end
 end
 
-$custom_sprites = Array.new(16, nil)
-$has_custom_sprites = false
 $last_spr_mtime = 0
 
 def snap_floor(v, step)
@@ -310,37 +308,18 @@ def update_minimap_cache
   update_bank_rect(MINIMAP_BANK, 0, 0, MAP_WIDTH, MAP_HEIGHT, pixels)
 end
 
-# 外部スプライト／バンクの再読み込み
+# 外部スプライト／バンクの再読み込み (減色処理を行わずフルカラーRGBAのままバンクへ直接ロード)
 def reload_custom_sprites
-  src = ($spr_path && read_file($spr_path)) ? $spr_path : $target_path
-
-  # 1. 256x256 バンクデータの読み込み (減色せずフルカラーRGBAテクスチャを直接ロード)
-  if load_bank($ref_bank, src)
-    notify("SYNCED BANK #{$ref_bank} FROM #{src}")
-  else
-    bank_pixels = load_resource_bank(src, $ref_bank)
-    if bank_pixels && bank_pixels.size == 256 * 256
-      update_bank($ref_bank, bank_pixels)
-      notify("SYNCED BANK #{$ref_bank} FROM #{src}")
-    end
-  end
-
-  # 2. 旧形式の個別スプライトもフォールバック読み込み
   if $spr_path && read_file($spr_path)
     cur_mtime = file_mtime($spr_path)
     if cur_mtime > 0
       $last_spr_mtime = cur_mtime
     end
-    slots = load_resource_sprites($spr_path, 16)
-    count = 0
-    slots.each_with_index do |sgrid, sid|
-      if sgrid
-        $custom_sprites[sid] = sgrid
-        count += 1
-      end
-    end
-    $has_custom_sprites = (count > 0)
-    notify("SYNCED #{count} SPRITES FROM #{$spr_path}") if count > 0 && !bank_pixels
+  end
+
+  src = ($spr_path && read_file($spr_path)) ? $spr_path : $target_path
+  if load_bank($ref_bank, src)
+    notify("SYNCED BANK #{$ref_bank} FROM #{src}")
   end
   $minimap_dirty = true
 end
@@ -553,17 +532,13 @@ def export_map_only
 end
 
 # ------------------------------------------------------------------------------
-# タイルドット描画 (カスタムスプライトまたはバンクテクスチャ)
+# タイル描画 (バンクテクスチャから直接転送)
 # ------------------------------------------------------------------------------
 def draw_tile_at(tid, px, py, scale = 1.0)
   return if tid <= 0
-  if $has_custom_sprites && tid < $custom_sprites.size && $custom_sprites[tid]
-    spr($custom_sprites[tid], px, py, false, false, 0, scale)
-  else
-    u = (tid % 16) * 16
-    v = (tid / 16) * 16
-    blt(px, py, $ref_bank, u, v, 16, 16, 0, scale)
-  end
+  u = (tid % 16) * 16
+  v = (tid / 16) * 16
+  blt(px, py, $ref_bank, u, v, 16, 16, 0, scale)
 end
 
 # ------------------------------------------------------------------------------
@@ -1097,9 +1072,8 @@ def draw
     end
   end
 
-  # タイル描画 (オブジェクトモード時はパレット減光で地形を暗く表示)
-  pal(TERRAIN_DIM_PAL) if $current_mode == :objects
-  if $cell_size == 16 && !$has_custom_sprites
+  # タイル描画 (フルカラーテクスチャを保持するため減色パレット変換を行わず直接描画)
+  if $cell_size == 16
     map($cam_x, $cam_y, VIEW_X, VIEW_Y, tiles_x, tiles_y, $ref_bank)
   else
     tiles_y.times do |dy|
@@ -1117,7 +1091,6 @@ def draw
       end
     end
   end
-  pal() if $current_mode == :objects
 
   # グリッド線の一括描画
   if $show_grid

@@ -109,6 +109,8 @@ if tlen >= 3
   suf = $target_path[tlen - 3, 3]
   if suf == ".rb"
     $save_path = $target_path[0, tlen - 3] + ".spr"
+  elsif suf == "map"
+    $save_path = $target_path[0, tlen - 4] + ".spr"
   end
 end
 

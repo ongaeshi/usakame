@@ -2665,10 +2665,22 @@ fn test_tilemap_editor_preserves_full_color_texture() {
         GameRuntime::new_with_args(&tail_data, &mrb_bytes, true, &["examples/tiny_dungeon.map".to_string()])
             .expect("Tilemap editor should initialize with tiny_dungeon.map");
 
-    for _ in 0..10 {
+    for _ in 0..5 {
         runtime.call_update_result().expect("call_update should succeed");
         runtime.call_draw_result().expect("call_draw should succeed");
     }
+
+    // 8px ズーム時および :objects モード時にも正常にフルカラー描画され、減色スプライト配列が使われないこと
+    runtime.vm.globals.insert("$cell_size".to_string(), Rc::new(RObject::integer(8)));
+    runtime.call_draw_result().expect("call_draw at 8px should succeed");
+    runtime.vm.globals.insert("$cell_size".to_string(), Rc::new(RObject::integer(16)));
+    runtime.vm.globals.insert("$current_mode".to_string(), Rc::new(RObject::symbol("objects".into())));
+    runtime.call_draw_result().expect("call_draw in objects mode should succeed");
+
+    assert!(
+        runtime.vm.globals.get("$has_custom_sprites").is_none(),
+        "Tilemap editor should not use palette-reduced $custom_sprites"
+    );
 
     let original_png_bytes = std::fs::read("examples/tiny_dungeon.png").expect("Read tiny_dungeon.png");
     let original_img = Image::from_file_with_format(&original_png_bytes, Some(ImageFormat::Png)).unwrap();

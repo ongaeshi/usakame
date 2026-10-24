@@ -43,4 +43,4 @@ chip_106 170 86 spr=106
 chip_106 189 85 h=48 hp=10 w=48 spr=106
 obj 55 42 spr="🌲"
 obj 73 42 spr="🌲"
-obj 90 42 spr="🌲"
+obj 90 42 spr="🩻"

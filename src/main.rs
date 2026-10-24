@@ -2285,7 +2285,7 @@ pub fn check_resource_read_only(path_str: &str) -> bool {
         }
     }
 
-    if p.extension().and_then(|s| s.to_str()) == Some("rb") {
+    if matches!(p.extension().and_then(|s| s.to_str()), Some("rb" | "map")) {
         let spr_path = p.with_extension("spr");
         if let Ok(content) = std::fs::read_to_string(&spr_path) {
             if check_content(&content) {
@@ -2808,7 +2808,18 @@ fn register_engine_api(
                 String::new()
             };
 
-            let (_sprites, banks) = parse_tail_resources_full(&tail, base_dir);
+            let (sprites, banks) = parse_tail_resources_full(&tail, base_dir);
+            let has_bank_directive = tail.lines().any(|l| {
+                let t = l.trim();
+                t.starts_with("@BANK")
+                    || t.starts_with("@SHEET")
+                    || t.starts_with("@SPRITE")
+                    || t.starts_with("@PNG")
+                    || t.starts_with("@B64")
+            });
+            if (!has_bank_directive && sprites.is_empty()) || !banks.contains_key(&bank_id) {
+                return Ok(Rc::new(RObject::nil()));
+            }
             if let Some(bank) = banks.get(&bank_id) {
                 let mut pixels = Vec::with_capacity(BANK_PIXELS);
                 for px in bank.rgba.chunks_exact(4) {
@@ -2882,7 +2893,18 @@ fn register_engine_api(
                 path_str.clone()
             };
 
-            let (_sprites, parsed_banks) = parse_tail_resources_full(&tail, base_dir);
+            let (parsed_sprites, parsed_banks) = parse_tail_resources_full(&tail, base_dir);
+            let has_bank_directive = tail.lines().any(|l| {
+                let t = l.trim();
+                t.starts_with("@BANK")
+                    || t.starts_with("@SHEET")
+                    || t.starts_with("@SPRITE")
+                    || t.starts_with("@PNG")
+                    || t.starts_with("@B64")
+            });
+            if !has_bank_directive && parsed_sprites.is_empty() {
+                return Ok(Rc::new(RObject::boolean(false)));
+            }
             let source_bank = parsed_banks
                 .get(&src_bank_id)
                 .or_else(|| parsed_banks.get(&0))
