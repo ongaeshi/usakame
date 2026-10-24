@@ -496,6 +496,8 @@ fn test_cli_arg_parsing() {
         cli::CliAction::Run {
             script_path: std::path::PathBuf::from("game.rb"),
             script_args: Vec::new(),
+            screenshot_path: None,
+            screenshot_frames: 10,
         }
     );
 
@@ -505,6 +507,23 @@ fn test_cli_arg_parsing() {
         cli::CliAction::Run {
             script_path: std::path::PathBuf::from("editor.rb"),
             script_args: vec!["target.spr".to_string()],
+            screenshot_path: None,
+            screenshot_frames: 10,
+        }
+    );
+
+    let run_with_screenshot = cli::parse_cli_args(
+        ["uk", "run", "editor.rb", "--screenshot", "out.png", "--frames", "5", "--", "target.spr"]
+            .map(String::from),
+    )
+    .unwrap();
+    assert_eq!(
+        run_with_screenshot,
+        cli::CliAction::Run {
+            script_path: std::path::PathBuf::from("editor.rb"),
+            script_args: vec!["target.spr".to_string()],
+            screenshot_path: Some(std::path::PathBuf::from("out.png")),
+            screenshot_frames: 5,
         }
     );
 

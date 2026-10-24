@@ -17,6 +17,8 @@ pub enum CliAction {
     Run {
         script_path: PathBuf,
         script_args: Vec<String>,
+        screenshot_path: Option<PathBuf>,
+        screenshot_frames: u32,
     },
     /// 単一バイナリ（末尾にバンドル埋め込み済み）の直接起動、または埋め込みデモ起動
     RunEmbedded {
@@ -60,7 +62,8 @@ pub fn print_help() {
 uk - Usakame Retro Game Engine CLI
 
 USAGE:
-    uk run [script.rb]                  Run script natively with live hot-reload (default: game.rb)
+    uk run [script.rb] [--screenshot <out.png>] [--frames <N>] [-- args...]
+                                        Run script natively with live hot-reload (default: game.rb)
     uk build [script.rb] [-o <output>]  Build a standalone single binary from script
     uk browser [script.rb] [-p <port>]  Run script in the browser with live hot-reload
     uk pack [script.rb] [-o <output>]   Pack external resources into single standalone script
@@ -106,6 +109,8 @@ where
             return Ok(CliAction::Run {
                 script_path: default_script,
                 script_args: Vec::new(),
+                screenshot_path: None,
+                screenshot_frames: 10,
             });
         }
 
@@ -115,27 +120,7 @@ where
     match rest[0].as_str() {
         "help" | "--help" | "-h" => Ok(CliAction::Help),
         "version" | "--version" | "-V" => Ok(CliAction::Version),
-        "run" => {
-            let (script_path, script_args) = if rest.len() > 1 {
-                let p = PathBuf::from(&rest[1]);
-                let args = if rest.len() > 2 {
-                    if rest[2] == "--" {
-                        rest[3..].to_vec()
-                    } else {
-                        rest[2..].to_vec()
-                    }
-                } else {
-                    Vec::new()
-                };
-                (p, args)
-            } else {
-                (PathBuf::from("game.rb"), Vec::new())
-            };
-            Ok(CliAction::Run {
-                script_path,
-                script_args,
-            })
-        }
+        "run" => parse_run_args(&rest[1..]),
         "build" => {
             let mut script_path: Option<PathBuf> = None;
             let mut output_path: Option<PathBuf> = None;
@@ -302,19 +287,7 @@ where
             // `uk game.rb` のように直接 .rb ファイルが渡された場合も `uk run` として扱う
             let candidate = PathBuf::from(other);
             if other.ends_with(".rb") || candidate.exists() {
-                let script_args = if rest.len() > 1 {
-                    if rest[1] == "--" {
-                        rest[2..].to_vec()
-                    } else {
-                        rest[1..].to_vec()
-                    }
-                } else {
-                    Vec::new()
-                };
-                Ok(CliAction::Run {
-                    script_path: candidate,
-                    script_args,
-                })
+                parse_run_args(rest)
             } else {
                 Err(format!(
                     "Unknown command `{}`. Run `uk --help` for usage.",
@@ -323,6 +296,61 @@ where
             }
         }
     }
+}
+
+fn parse_run_args(args: &[String]) -> Result<CliAction, String> {
+    let mut script_path: Option<PathBuf> = None;
+    let mut script_args = Vec::new();
+    let mut screenshot_path: Option<PathBuf> = None;
+    let mut screenshot_frames: u32 = 10;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--screenshot" | "-s" => {
+                i += 1;
+                let s = args
+                    .get(i)
+                    .ok_or_else(|| "Missing argument for --screenshot".to_string())?;
+                screenshot_path = Some(PathBuf::from(s));
+            }
+            "--frames" | "--screenshot-frames" => {
+                i += 1;
+                let f = args
+                    .get(i)
+                    .ok_or_else(|| "Missing argument for --frames".to_string())?;
+                screenshot_frames = f
+                    .parse::<u32>()
+                    .map_err(|_| format!("Invalid frame count: {}", f))?;
+            }
+            "--" => {
+                i += 1;
+                while i < args.len() {
+                    script_args.push(args[i].clone());
+                    i += 1;
+                }
+                break;
+            }
+            arg if arg.starts_with('-') => {
+                return Err(format!("Unknown option for `uk run`: {}", arg));
+            }
+            arg => {
+                if script_path.is_none() {
+                    script_path = Some(PathBuf::from(arg));
+                } else {
+                    script_args.push(arg.to_string());
+                }
+            }
+        }
+        i += 1;
+    }
+
+    Ok(CliAction::Run {
+        script_path: script_path.unwrap_or_else(|| PathBuf::from("game.rb")),
+        script_args,
+        screenshot_path,
+        screenshot_frames,
+    })
 }
 
 /// PNG 画像バイト列を `__END__` セクション用の `@PNG` または `@SHEET` テキストブロックに変換する。

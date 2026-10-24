@@ -5620,34 +5620,46 @@ pub fn encode_screenshot_png(
 pub fn save_screenshot_from_render_target(
     render_target: &RenderTarget,
     scale: usize,
+    custom_path: Option<&std::path::Path>,
 ) -> Result<(String, usize, usize), String> {
     let image = render_target.texture.get_texture_data();
     let width = image.width as usize;
     let height = image.height as usize;
     let (png_bytes, out_w, out_h) = encode_screenshot_png(&image.bytes, width, height, scale)?;
 
-    let dir = std::path::Path::new("screenshots");
-    if !dir.exists() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("Failed to create screenshots dir: {}", e))?;
-    }
-
-    let mut filepath = String::new();
-    for i in 1..=9999 {
-        let candidate = format!("screenshots/screenshot_{:03}.png", i);
-        if !std::path::Path::new(&candidate).exists() {
-            filepath = candidate;
-            break;
+    let filepath = if let Some(p) = custom_path {
+        if let Some(parent) = p.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create screenshot dir: {}", e))?;
+            }
         }
-    }
-    if filepath.is_empty() {
-        filepath = format!(
-            "screenshots/screenshot_{}.png",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-        );
-    }
+        p.to_string_lossy().into_owned()
+    } else {
+        let dir = std::path::Path::new("screenshots");
+        if !dir.exists() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("Failed to create screenshots dir: {}", e))?;
+        }
+
+        let mut filepath = String::new();
+        for i in 1..=9999 {
+            let candidate = format!("screenshots/screenshot_{:03}.png", i);
+            if !std::path::Path::new(&candidate).exists() {
+                filepath = candidate;
+                break;
+            }
+        }
+        if filepath.is_empty() {
+            filepath = format!(
+                "screenshots/screenshot_{}.png",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+            );
+        }
+        filepath
+    };
 
     std::fs::write(&filepath, png_bytes)
         .map_err(|e| format!("Failed to write screenshot file: {}", e))?;
@@ -5666,6 +5678,8 @@ async fn run_native_with_hot_reload(
     initial_tail: String,
     initial_mrb: Vec<u8>,
     initial_error: Option<ScriptError>,
+    screenshot_path: Option<std::path::PathBuf>,
+    screenshot_frames: u32,
 ) {
     let mut current_error: Option<ScriptError> = initial_error;
     let mut runtime_opt: Option<Box<GameRuntime>> = None;
@@ -5945,6 +5959,30 @@ async fn run_native_with_hot_reload(
             );
             reload_banner_frames = reload_banner_frames.saturating_sub(1);
 
+            if let Some(ref auto_path) = screenshot_path {
+                if frame_count >= screenshot_frames as u64 {
+                    let scale = rt
+                        .config
+                        .borrow()
+                        .window_scale
+                        .round()
+                        .max(1.0) as usize;
+                    match save_screenshot_from_render_target(&render_target, scale, Some(auto_path)) {
+                        Ok((path, out_w, out_h)) => {
+                            println!(
+                                "[screenshot] Auto saved to {} ({}x{}, {}x) after {} frames",
+                                path, out_w, out_h, scale, frame_count
+                            );
+                            std::process::exit(0);
+                        }
+                        Err(err) => {
+                            eprintln!("[screenshot] Auto screenshot failed: {}", err);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
+
             if is_key_pressed(KeyCode::F12) {
                 let scale = rt
                     .config
@@ -5952,7 +5990,7 @@ async fn run_native_with_hot_reload(
                     .window_scale
                     .round()
                     .max(1.0) as usize;
-                match save_screenshot_from_render_target(&render_target, scale) {
+                match save_screenshot_from_render_target(&render_target, scale, None) {
                     Ok((path, out_w, out_h)) => {
                         println!("[screenshot] Saved to {} ({}x{}, {}x)", path, out_w, out_h, scale);
                         reload_banner_text = format!("SCREENSHOT: {} ({}x)", path, scale);
@@ -6053,7 +6091,7 @@ async fn run_embedded_game(tail_data: String, mrb_bytes: Vec<u8>) {
                 .window_scale
                 .round()
                 .max(1.0) as usize;
-            match save_screenshot_from_render_target(&render_target, scale) {
+            match save_screenshot_from_render_target(&render_target, scale, None) {
                 Ok((path, out_w, out_h)) => {
                     println!("[screenshot] Saved to {} ({}x{}, {}x)", path, out_w, out_h, scale);
                     reload_banner_text = format!("SCREENSHOT: {} ({}x)", path, scale);
@@ -6133,6 +6171,8 @@ fn main() {
         cli::CliAction::Run {
             script_path,
             script_args,
+            screenshot_path,
+            screenshot_frames,
         } => {
             let compile_res = cli::compile_ruby_script_file(&script_path);
             let initial_error = match &compile_res {
@@ -6155,7 +6195,16 @@ fn main() {
             };
             macroquad::Window::from_config(
                 window_conf_with_title_and_size(&title, parsed_cfg.window_width(), parsed_cfg.window_height()),
-                run_native_with_hot_reload(script_path, script_args, initial_source, tail_data, mrb_bytes, initial_error),
+                run_native_with_hot_reload(
+                    script_path,
+                    script_args,
+                    initial_source,
+                    tail_data,
+                    mrb_bytes,
+                    initial_error,
+                    screenshot_path,
+                    screenshot_frames,
+                ),
             );
         }
         cli::CliAction::RunEmbedded {
@@ -6383,25 +6432,6 @@ async fn main() {
                 show_fps,
             );
             reload_banner_frames = reload_banner_frames.saturating_sub(1);
-
-            if is_key_pressed(KeyCode::F12) {
-                let scale = rt
-                    .config
-                    .borrow()
-                    .window_scale
-                    .round()
-                    .max(1.0) as usize;
-                match save_screenshot_from_render_target(&render_target, scale) {
-                    Ok((path, out_w, out_h)) => {
-                        println!("[screenshot] Saved to {} ({}x{}, {}x)", path, out_w, out_h, scale);
-                        reload_banner_text = format!("SCREENSHOT: {} ({}x)", path, scale);
-                        reload_banner_frames = 90;
-                    }
-                    Err(err) => {
-                        eprintln!("[screenshot] Failed: {}", err);
-                    }
-                }
-            }
 
             if error_overlay_frames > 0 {
                 if let Some(ref err) = current_error {
