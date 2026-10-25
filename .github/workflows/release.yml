@@ -1,0 +1,141 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset_name: uk-linux-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset_name: uk-windows-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset_name: uk-macos-arm64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            asset_name: uk-macos-x86_64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libx11-dev libxi-dev libgl1-mesa-dev libasound2-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Compress-Archive -Path "target/${{ matrix.target }}/release/uk.exe" -DestinationPath "dist/${{ matrix.asset_name }}.zip"
+
+      - name: Package binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          chmod +x "target/${{ matrix.target }}/release/uk"
+          tar -czf "dist/${{ matrix.asset_name }}.tar.gz" -C "target/${{ matrix.target }}/release" uk
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.asset_name }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          merge-multiple: true
+          path: artifacts
+
+      - name: Determine tag and release title
+        id: release_info
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "tag_name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+            echo "release_title=Release ${{ github.ref_name }}" >> $GITHUB_OUTPUT
+            echo "is_latest_tag=false" >> $GITHUB_OUTPUT
+          else
+            echo "tag_name=latest" >> $GITHUB_OUTPUT
+            echo "release_title=Latest Build" >> $GITHUB_OUTPUT
+            echo "is_latest_tag=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update latest git tag
+        if: steps.release_info.outputs.is_latest_tag == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -fa latest -m "Latest build (${{ github.sha }})"
+          git push origin latest --force
+
+      - name: Generate Release Notes
+        run: |
+          if [ "${{ steps.release_info.outputs.is_latest_tag }}" = "true" ]; then
+            cat << 'EOF' > release_body.md
+### Latest Automated Build
+
+This release is automatically generated on every push to the `main` branch.
+
+- **Commit**: ${{ github.sha }}
+
+#### Available Binaries
+- **Windows (x64)**: [`uk-windows-x86_64.zip`](https://github.com/${{ github.repository }}/releases/download/latest/uk-windows-x86_64.zip)
+- **Linux (x64)**: [`uk-linux-x86_64.tar.gz`](https://github.com/${{ github.repository }}/releases/download/latest/uk-linux-x86_64.tar.gz)
+- **macOS (Apple Silicon - M1/M2/M3/M4)**: [`uk-macos-arm64.tar.gz`](https://github.com/${{ github.repository }}/releases/download/latest/uk-macos-arm64.tar.gz)
+- **macOS (Intel)**: [`uk-macos-x86_64.tar.gz`](https://github.com/${{ github.repository }}/releases/download/latest/uk-macos-x86_64.tar.gz)
+EOF
+          else
+            echo "Release for tag ${{ steps.release_info.outputs.tag_name }}" > release_body.md
+          fi
+
+      - name: Create or Update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_info.outputs.tag_name }}
+          name: ${{ steps.release_info.outputs.release_title }}
+          body_path: release_body.md
+          files: artifacts/*
+          make_latest: true
+          overwrite: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

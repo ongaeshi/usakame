@@ -37,7 +37,19 @@ Rust（`macroquad` + `mrubyedge`）で構築されており、ネイティブデ
 - Rust 1.85+（2024 edition）
 - （ブラウザ実行時）`rustup target add wasm32-unknown-unknown`
 
-### ビルド & インストール
+### バイナリのダウンロード（GitHub Releases）
+
+Rust の開発環境をセットアップしなくても、GitHub Releases から各 OS 向けのビルド済みバイナリ（`uk`）をダウンロードしてすぐに利用できます。`main` ブランチへの push に連動して、常に最新（latest）のバイナリが自動ビルド・更新されます。
+
+- 📦 **[GitHub Releases (latest) からダウンロード](https://github.com/ongaeshi/usakame/releases/latest)**
+  - **Windows (x64)**: `uk-windows-x86_64.zip`
+  - **macOS (Apple Silicon)**: `uk-macos-arm64.tar.gz`
+  - **macOS (Intel)**: `uk-macos-x86_64.tar.gz`
+  - **Linux (x64)**: `uk-linux-x86_64.tar.gz`
+
+ダウンロードしたアーカイブを展開し、実行ファイル `uk`（Windows の場合は `uk.exe`）を PATH の通ったディレクトリに配置してください。
+
+### ソースコードからのビルド & インストール
 ```bash
 cargo build --release
 # 生成された target/release/uk を PATH の通った場所に配置
