@@ -28,7 +28,7 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             asset_name: uk-macos-arm64
-          - os: macos-13
+          - os: macos-latest
             target: x86_64-apple-darwin
             asset_name: uk-macos-x86_64
     steps:
@@ -47,6 +47,8 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Build release binary
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package binary (Windows)
