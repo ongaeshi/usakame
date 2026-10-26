@@ -3237,5 +3237,29 @@ fn test_platformer_example_script() {
     }
 }
 
+#[test]
+fn test_sprite_editor_palette_switching() {
+    let (_, tail_data, mrb_bytes) =
+        cli::compile_ruby_script_file(std::path::Path::new("examples/sprite_editor.rb"))
+            .expect("examples/sprite_editor.rb should compile");
+
+    // examples/platformer.rb には @PALETTE 0, 1, 2, 3 が定義されている
+    let mut runtime =
+        GameRuntime::new_with_args(&tail_data, &mrb_bytes, true, &["examples/platformer.rb".to_string()])
+            .expect("Sprite editor should initialize with platformer.rb");
+
+    for _ in 0..10 {
+        runtime.call_update_result().expect("call_update should succeed");
+        runtime.call_draw_result().expect("call_draw should succeed");
+    }
+
+    // load_resource_palettes でパレットがランタイムに読み込まれていることを検証
+    assert!(runtime.palettes.borrow().contains_key(&0));
+    assert!(runtime.palettes.borrow().contains_key(&1));
+    assert!(runtime.palettes.borrow().contains_key(&2));
+    assert!(runtime.palettes.borrow().contains_key(&3));
+}
+
+
 
 

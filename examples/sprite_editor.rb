@@ -149,6 +149,28 @@ end
 load_source = ($save_path != $target_path && read_file($save_path)) ? $save_path : $target_path
 $is_read_only = is_resource_read_only(load_source) || is_resource_read_only($save_path) || is_resource_read_only($target_path)
 
+# パレット管理
+$current_pal = 0
+$available_palettes = [0]
+pals = load_resource_palettes(load_source)
+if pals && !pals.empty?
+  $available_palettes = pals
+  $current_pal = pals[0] || 0
+end
+
+def cycle_palette(dir)
+  if $available_palettes.size > 1
+    idx = $available_palettes.index($current_pal) || 0
+    new_idx = (idx + dir) % $available_palettes.size
+    $current_pal = $available_palettes[new_idx]
+  else
+    $current_pal = ($current_pal + dir) % 8
+    $current_pal = 0 if $current_pal < 0
+  end
+  sfx(:click)
+  notify("PALETTE: #{$current_pal}")
+end
+
 if $is_read_only
   # テクスチャ（PNG参照）から読み込んだ場合：リードオンリーモードなので減色処理は不要！
   # フルカラーRGBAテクスチャのまま直接バンクへロードする
@@ -218,6 +240,12 @@ def switch_bank(new_bank)
       update_bank($current_bank, Array.new(BANK_SIZE * BANK_SIZE, nil))
     end
     notify("SWITCHED TO BANK #{$current_bank}")
+  end
+
+  pals = load_resource_palettes(load_source)
+  if pals && !pals.empty?
+    $available_palettes = pals
+    $current_pal = pals[0] unless $available_palettes.include?($current_pal)
   end
 end
 
@@ -483,6 +511,15 @@ def update
       end
     end
 
+    # 2.5 パレット切り替え [< P0 >] (y: 52..68)
+    if my >= 52 && my <= 68
+      if mx >= 266 && mx <= 282 # [<]
+        cycle_palette(-1)
+      elsif mx >= 310 && mx <= 328 # [>]
+        cycle_palette(1)
+      end
+    end
+
     # 3. パレット選択 (4x4, x: 220..316, y: 76..172)
     if mx >= 220 && mx < 320 && my >= 76 && my < 176
       col_idx = (mx - 220) / 25
@@ -664,7 +701,7 @@ def draw
   end
 
   # バンクテクスチャから 32x32 を 6倍拡大描画 (左上基準 blt で 192x192 ぴったり描画)
-  blt($canvas_x, $canvas_y, $current_bank, $sel_x, $sel_y, 32, 32, 0, 6.0)
+  blt($canvas_x, $canvas_y, $current_bank, $sel_x, $sel_y, 32, 32, 0, 6.0, $current_pal)
 
   # グリッド線 (一括描画で高速化)
   if $show_grid
@@ -734,12 +771,12 @@ def draw
   rect(219, 37, 18, 18, 5)
   anim_off_x = $anim_playing ? (($anim_frame % 4) * 16) : 0
   draw_u = ($sel_x + anim_off_x) % BANK_SIZE
-  blt(220, 38, $current_bank, draw_u, $sel_y, 16, 16)
+  blt(220, 38, $current_bank, draw_u, $sel_y, 16, 16, 0, 1.0, $current_pal)
 
   # 2x プレビュー (32x32, x: 242, y: 30)
   rectfill(241, 29, 34, 34, preview_bg)
   rect(241, 29, 34, 34, 5)
-  blt(242, 30, $current_bank, $sel_x, $sel_y, 32, 32, 0, 1.0)
+  blt(242, 30, $current_bank, $sel_x, $sel_y, 32, 32, 0, 1.0, $current_pal)
 
   # [BG]
   rectfill(282, 32, 24, 15, 2)
@@ -751,10 +788,29 @@ def draw
   rect(310, 32, 24, 15, 6)
   print_text($anim_playing ? "■" : "▶", 318, 36, 7)
 
-  # パレットヘッダー (y: 65)
-  print_text("PALETTE (#{$current_col ? COLOR_NAMES[$current_col] : 'TRANS'})", 220, 66, 6)
+  # パレットヘッダー & [< P0 >] 切替ボタン (y: 52..68)
+  print_text("PALETTE", 220, 56, 6)
+
+  # [<] ボタン
+  rectfill(268, 52, 14, 14, 2)
+  rect(268, 52, 14, 14, 6)
+  print_text("<", 273, 55, 7)
+
+  # [P#{$current_pal}] 表示バッジ
+  rectfill(284, 52, 26, 14, 1)
+  rect(284, 52, 26, 14, 5)
+  print_text("P#{$current_pal}", 288, 55, 10)
+
+  # [>] ボタン
+  rectfill(312, 52, 14, 14, 2)
+  rect(312, 52, 14, 14, 6)
+  print_text(">", 317, 55, 7)
+
+  # 選択中のカラー名
+  print_text("#{$current_col ? COLOR_NAMES[$current_col] : 'TRANS'}", 220, 66, 5)
 
   # 16色グリッド (4x4, y: 76..172)
+  pal_bank($current_pal)
   4.times do |row|
     4.times do |col_idx|
       c_id = row * 4 + col_idx
@@ -768,6 +824,7 @@ def draw
       end
     end
   end
+  pal_bank(0)
 
   # [TRANS]
   rectfill(220, 180, 96, 16, $current_col.nil? ? 8 : 1)
@@ -812,7 +869,7 @@ def draw
   rect($minimap_x - 1, $minimap_y - 1, $minimap_size + 2, $minimap_size + 2, 5)
 
   # バンク全体の 1/2 縮小テクスチャ転送描画
-  blt($minimap_x, $minimap_y, $current_bank, 0, 0, 256, 256, 0, 0.5)
+  blt($minimap_x, $minimap_y, $current_bank, 0, 0, 256, 256, 0, 0.5, $current_pal)
 
   # 選択中 32x32 領域の枠線表示 (ミニマップ上では 16x16 px)
   sel_box_x = $minimap_x + $sel_x / 2

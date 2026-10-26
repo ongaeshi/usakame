@@ -3445,6 +3445,60 @@ fn register_engine_api(
         }),
     );
 
+    // load_resource_palettes(path): ターゲットファイル内の全パレットをランタイムに登録し、有効なパレットID配列を返す
+    let palettes_for_load_palettes = palettes.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "load_resource_palettes",
+        Box::new(move |_vm, args| {
+            let path_str = args
+                .first()
+                .and_then(|v| String::try_from(v.as_ref()).ok())
+                .unwrap_or_default();
+            let p = std::path::Path::new(&path_str);
+            let tail = if p.extension().and_then(|s| s.to_str()) == Some("rb") {
+                cli::compile_ruby_script_file(p)
+                    .map(|(_, t, _)| t)
+                    .unwrap_or_default()
+            } else if p.is_file() {
+                let content = std::fs::read_to_string(p).unwrap_or_default();
+                if p.extension().and_then(|s| s.to_str()) == Some("map") {
+                    let spr_path = p.with_extension("spr");
+                    if spr_path.is_file() {
+                        let spr_content = std::fs::read_to_string(&spr_path).unwrap_or_default();
+                        format!("{}\n{}", content, spr_content)
+                    } else {
+                        content
+                    }
+                } else {
+                    content
+                }
+            } else {
+                String::new()
+            };
+
+            let parsed_pals = parse_tail_palettes(&tail);
+            let mut pal_ids: Vec<i32> = Vec::new();
+            if !parsed_pals.is_empty() {
+                let mut pals_mut = palettes_for_load_palettes.borrow_mut();
+                for (id, pal) in parsed_pals {
+                    pals_mut.insert(id, pal);
+                    pal_ids.push(id);
+                }
+            }
+            if !pal_ids.contains(&0) {
+                pal_ids.push(0);
+            }
+            pal_ids.sort();
+            let ary: Vec<Rc<RObject>> = pal_ids
+                .into_iter()
+                .map(|id| Rc::new(RObject::integer(id as i64)))
+                .collect();
+            Ok(Rc::new(RObject::array(ary)))
+        }),
+    );
+
     // load_bank(bank_id, path_or_source, src_bank_id = nil):
     // 外部ファイル（PNG画像、.spr、.rb、.map等の定義）から減色処理を行わずにフルカラーRGBAのまま直接バンクへロードする。
     let banks_for_load_bank = banks.clone();
