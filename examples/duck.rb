@@ -1,6 +1,10 @@
 # 16bit風 元気なアヒルちゃん 泳ぎアニメーション サンプル
 # Usakame Engine (16x16 Pixel Art, 16 Colors)
 
+config(
+  palette: 1
+)
+
 $frame = 0
 
 # ぷかぷか揺れる波のオフセット（Floatの減算エラーを回避する安全な整数テーブル）
@@ -43,7 +47,7 @@ def draw
 end
 
 __END__
-@PALETTE 0
+@PALETTE 1
 0: #181024
 1: #10326E
 2: #1868B8

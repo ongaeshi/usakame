@@ -870,7 +870,7 @@ pub fn parse_tail_palettes(data_section: &str) -> HashMap<i32, PaletteRgba> {
                 palettes.insert(id, current_pal);
             }
             let mut parts = rest.split_whitespace();
-            let mut pal_id = 0;
+            let mut pal_id = 1;
             let mut start_idx = 0;
 
             if let Some(first) = parts.next() {
@@ -878,6 +878,11 @@ pub fn parse_tail_palettes(data_section: &str) -> HashMap<i32, PaletteRgba> {
                     pal_id = id;
                     start_idx = 1;
                 }
+            }
+            if pal_id == 0 {
+                eprintln!("[warn] @PALETTE 0 is reserved as the system palette (PICO-8 16-color) and cannot be overridden. Custom palettes must use ID >= 1.");
+                current_id = None;
+                continue;
             }
             current_id = Some(pal_id);
             current_pal = palettes.get(&pal_id).copied().unwrap_or(PALETTE_RGBA);
@@ -906,6 +911,8 @@ pub fn parse_tail_palettes(data_section: &str) -> HashMap<i32, PaletteRgba> {
     if let Some(id) = current_id {
         palettes.insert(id, current_pal);
     }
+
+    palettes.insert(0, PALETTE_RGBA);
 
     palettes
 }
@@ -3664,7 +3671,9 @@ fn register_engine_api(
             *active_pal_bank_for_pal_bank.borrow_mut() = id;
             let mut state = state_for_pal_bank.borrow_mut();
             state.active_pal_bank = id;
-            if let Some(pal) = palettes_for_pal_bank.borrow().get(&id) {
+            if id == 0 {
+                state.palette_rgba = PALETTE_RGBA;
+            } else if let Some(pal) = palettes_for_pal_bank.borrow().get(&id) {
                 state.palette_rgba = *pal;
             } else {
                 state.palette_rgba = PALETTE_RGBA;
@@ -3689,6 +3698,8 @@ fn register_engine_api(
     // config(opts): 画面解像度・倍率・フォント等の設定
     let cfg_for_config = config.clone();
     let state_for_config = draw_state.clone();
+    let active_pal_bank_for_config = active_pal_bank.clone();
+    let palettes_for_config = palettes.clone();
     mrb_define_cmethod(
         vm,
         obj_class.clone(),
@@ -3738,6 +3749,21 @@ fn register_engine_api(
                             "show_fps" | "fps" => {
                                 if let Some(b) = robject_to_bool(v) {
                                     cfg.show_fps = b;
+                                }
+                            }
+                            "palette" | "pal" => {
+                                if let Some(n) = robject_to_u32(v).map(|x| x as i32) {
+                                    cfg.default_palette = n;
+                                    *active_pal_bank_for_config.borrow_mut() = n;
+                                    let mut state = state_for_config.borrow_mut();
+                                    state.active_pal_bank = n;
+                                    if n == 0 {
+                                        state.palette_rgba = PALETTE_RGBA;
+                                    } else if let Some(pal) = palettes_for_config.borrow().get(&n) {
+                                        state.palette_rgba = *pal;
+                                    } else {
+                                        state.palette_rgba = PALETTE_RGBA;
+                                    }
                                 }
                             }
                             _ => {}
@@ -6569,13 +6595,7 @@ impl GameRuntime {
         let objects = Rc::new(RefCell::new(tail_objects));
         let emoji_atlas = Rc::new(RefCell::new(emoji::EmojiAtlas::new()));
         let bitmap_font = Rc::new(BitmapFont::new(!headless));
-        let initial_draw_state = {
-            let mut ds = DrawState::default();
-            if let Some(pal0) = palettes.borrow().get(&0) {
-                ds.palette_rgba = *pal0;
-            }
-            ds
-        };
+        let initial_draw_state = DrawState::default();
         let draw_state = Rc::new(RefCell::new(initial_draw_state));
         let sound_bank = Rc::new(RefCell::new(sound::SoundBank::new(
             HashMap::new(),
@@ -6718,11 +6738,13 @@ impl GameRuntime {
         {
             let mut ds = self.draw_state.borrow_mut();
             *ds = DrawState::default();
-            if let Some(pal0) = self.palettes.borrow().get(&0) {
-                ds.palette_rgba = *pal0;
-            }
             ds.screen_w = self.config.borrow().screen_width as i32;
             ds.screen_h = self.config.borrow().screen_height as i32;
+            let def_pal = self.config.borrow().default_palette;
+            if def_pal > 0 && let Some(pal) = self.palettes.borrow().get(&def_pal) {
+                ds.active_pal_bank = def_pal;
+                ds.palette_rgba = *pal;
+            }
         }
         register_engine_api(
             &mut new_vm,

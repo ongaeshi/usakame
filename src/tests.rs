@@ -2991,6 +2991,7 @@ fn test_screenshot_png_encoding_and_flip() {
 #[test]
 fn test_parse_tail_palettes_and_sprite_binding() {
     let tail = r#"
+# @PALETTE 0 はシステム予約のため無視され、パレット0は標準色のままとなる
 @PALETTE 0
 3: #008840
 B: #58F878
@@ -3012,22 +3013,22 @@ B: #78F878
     let (sprites, banks, palettes) = parse_tail_resources_full(tail, None);
 
     // パレットのパース検証
+    // パレット0は @PALETTE 0 で上書きされず標準 PALETTE_RGBA を維持
     assert!(palettes.contains_key(&0));
     assert!(palettes.contains_key(&1));
     let pal0 = &palettes[&0];
-    assert_eq!(pal0[3], [0, 136, 64, 255]);
-    assert_eq!(pal0[11], [88, 248, 120, 255]);
+    assert_eq!(*pal0, PALETTE_RGBA);
 
     let pal1 = &palettes[&1];
     assert_eq!(pal1[8], [248, 56, 0, 255]);
     assert_eq!(pal1[11], [120, 248, 120, 255]);
 
-    // スプライト0（パレット0）のレンダリング結果検証
+    // スプライト0（パレット0）のレンダリング結果検証（標準 PALETTE_RGBA の色3）
     let sp0 = &sprites[&0];
     assert_eq!(sp0.palette_id, 0);
     // (3, 0) は色3
     let p0_off = (0 * sp0.width as usize + 3) * 4;
-    assert_eq!(&sp0.rgba[p0_off..p0_off + 4], &[0, 136, 64, 255]);
+    assert_eq!(&sp0.rgba[p0_off..p0_off + 4], &PALETTE_RGBA[3]);
 
     // スプライト1（パレット1）のレンダリング結果検証
     let sp1 = &sprites[&1];
@@ -3118,6 +3119,47 @@ __END__
 
     // draw 実行
     rt.call_draw();
+
+    // blt にパレット引数を渡しても、グローバルの draw_state.palette_rgba は汚染されず PALETTE_RGBA のまま
+    assert_eq!(rt.draw_state.borrow().palette_rgba, PALETTE_RGBA);
+}
+
+#[test]
+fn test_palette_0_is_system_reserved_and_config_palette() {
+    let script = r##"
+config(
+  palette: 1
+)
+
+def update
+  # pal_bank(0) でシステムパレットに戻す
+  pal_bank(0)
+end
+
+__END__
+# 0番の上書きを試みるが無視される
+@PALETTE 0
+0: #FF0000
+5: #00FF00
+
+@PALETTE 1
+0: #112233
+"##;
+
+    let (tail, mrb) = cli::compile_ruby_script_str_with_filename(script, Some("test_sys_pal.rb")).expect("compile should succeed");
+    let mut rt = GameRuntime::new(&tail, &mrb, true).expect("Runtime creation should succeed");
+
+    // config(palette: 1) により初期パレットバンクは 1
+    assert_eq!(rt.draw_state.borrow().active_pal_bank, 1);
+    assert_eq!(rt.draw_state.borrow().palette_rgba[0], [17, 34, 51, 255]);
+
+    // update 実行で pal_bank(0) が呼ばれる
+    rt.call_update();
+
+    // パレット0はシステムパレット PALETTE_RGBA であり、@PALETTE 0 で上書きされていないこと
+    assert_eq!(rt.draw_state.borrow().active_pal_bank, 0);
+    assert_eq!(rt.draw_state.borrow().palette_rgba, PALETTE_RGBA);
+    assert_eq!(rt.draw_state.borrow().palette_rgba[0], PALETTE_RGBA[0]);
 }
 
 #[test]
@@ -3256,7 +3298,7 @@ fn test_sprite_editor_palette_switching() {
         cli::compile_ruby_script_file(std::path::Path::new("examples/sprite_editor.rb"))
             .expect("examples/sprite_editor.rb should compile");
 
-    // examples/platformer.rb には @PALETTE 0, 1, 2, 3 が定義されている
+    // examples/platformer.rb には @PALETTE 1, 2, 3, 4 が定義されている
     let mut runtime =
         GameRuntime::new_with_args(&tail_data, &mrb_bytes, true, &["examples/platformer.rb".to_string()])
             .expect("Sprite editor should initialize with platformer.rb");
@@ -3271,16 +3313,17 @@ fn test_sprite_editor_palette_switching() {
     assert!(runtime.palettes.borrow().contains_key(&1));
     assert!(runtime.palettes.borrow().contains_key(&2));
     assert!(runtime.palettes.borrow().contains_key(&3));
+    assert!(runtime.palettes.borrow().contains_key(&4));
 
     // load_resource_sprite_palettes と自動切り替え動作の検証スクリプト
     let test_script = r#"
 pals = load_resource_sprite_palettes("examples/platformer.rb")
-# Sprite 8 (32x32) は pal:3
-# 占有タイル 8, 9, 24, 25 が全て pal:3 にマッピングされていること
-raise "Sprite 8 palette mapping failed" unless pals[8] == 3
-raise "Sprite 9 palette mapping failed" unless pals[9] == 3
-raise "Sprite 24 palette mapping failed" unless pals[24] == 3
-raise "Sprite 25 palette mapping failed" unless pals[25] == 3
+# Sprite 8 (32x32) は pal:4
+# 占有タイル 8, 9, 24, 25 が全て pal:4 にマッピングされていること
+raise "Sprite 8 palette mapping failed" unless pals[8] == 4
+raise "Sprite 9 palette mapping failed" unless pals[9] == 4
+raise "Sprite 24 palette mapping failed" unless pals[24] == 4
+raise "Sprite 25 palette mapping failed" unless pals[25] == 4
 "#;
     let (t, m) = cli::compile_ruby_script_str_with_filename(test_script, Some("test_pals.rb")).unwrap();
     let _rt = GameRuntime::new(&t, &m, true).expect("Sprite palette mapping test should pass");

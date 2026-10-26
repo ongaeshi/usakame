@@ -662,6 +662,8 @@ end
 # 描画処理 (draw)
 # ------------------------------------------------------------------------------
 def draw
+  # UI 描画は常にシステムパレット(0)で行う
+  pal_bank(0)
   cls(0) # 背景: 黒
 
   mx = mouse_x
@@ -832,6 +834,7 @@ def draw
   print_text("#{$current_col ? COLOR_NAMES[$current_col] : 'TRANS'}", 220, 66, 5)
 
   # 16色グリッド (4x4, y: 76..172)
+  # カラーチップの塗りつぶしは選択パレットで描画
   pal_bank($current_pal)
   4.times do |row|
     4.times do |col_idx|
@@ -839,6 +842,15 @@ def draw
       bx = 220 + col_idx * 25
       by = 76 + row * 25
       rectfill(bx, by, 22, 22, c_id)
+    end
+  end
+  # グリッド枠線やUI描画はシステムパレット(0)で行う
+  pal_bank(0)
+  4.times do |row|
+    4.times do |col_idx|
+      c_id = row * 4 + col_idx
+      bx = 220 + col_idx * 25
+      by = 76 + row * 25
       if $current_col == c_id
         rect(bx - 1, by - 1, 24, 24, 7)
       else
@@ -846,7 +858,6 @@ def draw
       end
     end
   end
-  pal_bank(0)
 
   # [TRANS]
   rectfill(220, 180, 96, 16, $current_col.nil? ? 8 : 1)

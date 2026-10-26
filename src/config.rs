@@ -19,6 +19,7 @@ pub struct AppConfig {
     pub text_size: u32, // 0 = 自動判定 (screen_width <= 256 ? 8 : 16)
     pub title: String,
     pub show_fps: bool,
+    pub default_palette: i32,
 }
 
 impl Default for AppConfig {
@@ -31,6 +32,7 @@ impl Default for AppConfig {
             text_size: 0,
             title: "Usakame Retro Engine".to_string(),
             show_fps: false,
+            default_palette: 0,
         }
     }
 }
@@ -86,6 +88,7 @@ pub fn parse_config_from_source(source: &str) -> AppConfig {
                     "text_size" => if let Ok(n) = v.parse::<u32>() { config.text_size = n; },
                     "title" => config.title = v.to_string(),
                     "show_fps" | "fps" => config.show_fps = v == "true" || v == "1",
+                    "palette" | "pal" => if let Ok(n) = v.parse::<i32>() { config.default_palette = n; },
                     _ => {}
                 }
             }
