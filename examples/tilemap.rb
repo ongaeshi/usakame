@@ -37,8 +37,8 @@ def can_move?(nx, ny)
     # 施錠ドア(4)はカギを持っていれば自動で開く(msetで消す)
     if t == 4 && $keys > 0
       $keys -= 1
-      mset(tx, ty, -1)
-      t = -1
+      mdel(tx, ty)
+      t = nil
     end
     return false if solid_tile?(t)
     i += 1
@@ -86,26 +86,26 @@ def update
   cy = ($py + 8) / 16
   under = mget(cx, cy)
   if under == 3
-    # コイン(3)を取得して空タイル(-1)に書き換え
-    mset(cx, cy, -1)
+    # コイン(3)を取得して消去
+    mdel(cx, cy)
     $coins += 1
   elsif under == 5
     # カギ(5)を取得
-    mset(cx, cy, -1)
+    mdel(cx, cy)
     $keys += 1
   elsif under == 6
     $cleared = true
   end
 
-  # Z / Space: 目の前のタイルを掘る(2->-1) または 空マスに土ブロックを置く(-1->2)
+  # Z / Space: 目の前のタイルを掘る(2->消去) または 空マスに土ブロックを置く(nil->2)
   act = btn(4)
   if act && ($prev_act == false)
     tx = cx + $dir_x
     ty = cy + $dir_y
     front = mget(tx, ty)
     if front == 2
-      mset(tx, ty, -1)
-    elsif front < 0 && (tx != cx || ty != cy)
+      mdel(tx, ty)
+    elsif front.nil? && (tx != cx || ty != cy)
       mset(tx, ty, 2)
     end
   end
@@ -147,7 +147,7 @@ def draw
   tx = cx + $dir_x
   ty = cy + $dir_y
   front_id = mget(tx, ty)
-  cursor_col = (front_id == 2) ? 10 : ((front_id < 0) ? 11 : 8)
+  cursor_col = (front_id == 2) ? 10 : (front_id.nil? ? 11 : 8)
   rect(tx * 16 + 1, ty * 16 + 1, 14, 14, cursor_col)
 
   # プレイヤー描画
@@ -172,7 +172,7 @@ def draw
     rx = 0
     while rx < 32
       tid = mget(rx, ry)
-      if tid >= 0
+      if tid
         mcol = (tid == 1) ? 5 : ((tid == 2) ? 4 : ((tid == 3) ? 10 : ((tid == 4) ? 8 : 11)))
         rectfill(mx + rx * 2, my + ry, 2, 1, mcol)
       end

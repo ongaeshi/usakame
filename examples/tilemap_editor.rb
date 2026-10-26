@@ -271,7 +271,12 @@ end
 def sync_tilemap_to_engine
   MAP_HEIGHT.times do |y|
     MAP_WIDTH.times do |x|
-      mset(x, y, get_tile(x, y))
+      tid = get_tile(x, y)
+      if tid < 0
+        mdel(x, y)
+      else
+        mset(x, y, tid)
+      end
     end
   end
 end
@@ -303,7 +308,11 @@ def set_tile(tx, ty, tid)
   idx = ty * MAP_WIDTH + tx
   if $map[idx] != tid
     $map[idx] = tid
-    mset(tx, ty, tid)
+    if tid < 0
+      mdel(tx, ty)
+    else
+      mset(tx, ty, tid)
+    end
     $minimap_dirty = true
   end
 end

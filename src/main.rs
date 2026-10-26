@@ -1386,6 +1386,10 @@ impl Tilemap {
         }
     }
 
+    pub fn remove(&mut self, x: i32, y: i32) {
+        self.cells.remove(&(x, y));
+    }
+
     /// 1行分のテキスト（空白・カンマ区切りトークン、または1文字1タイルの16進文字列 `0`..`F`/`.`）を行 `y` に反映する
     pub fn parse_row_line(&mut self, start_x: i32, y: i32, line: &str) {
         let trimmed = line.trim();
@@ -3910,7 +3914,7 @@ fn register_engine_api(
         }),
     );
 
-    // mget(cel_x = 0, cel_y = 0): タイルマップ上のセル (cel_x, cel_y) のタイル番号を取得（未設定は -1）
+    // mget(cel_x = 0, cel_y = 0): タイルマップ上のセル (cel_x, cel_y) のタイル番号を取得（未設定・空セルは nil）
     let map_for_mget = tilemap.clone();
     mrb_define_cmethod(
         vm,
@@ -3920,11 +3924,15 @@ fn register_engine_api(
             let cx = arg_i32(args, 0, 0);
             let cy = arg_i32(args, 1, 0);
             let val = map_for_mget.borrow().get(cx, cy);
-            Ok(Rc::new(RObject::integer(val as i64)))
+            if val < 0 {
+                Ok(Rc::new(RObject::nil()))
+            } else {
+                Ok(Rc::new(RObject::integer(val as i64)))
+            }
         }),
     );
 
-    // mset(cel_x = 0, cel_y = 0, val = -1): タイルマップ上のセル (cel_x, cel_y) にタイル番号 val を設定（負数で消去）
+    // mset(cel_x = 0, cel_y = 0, val = nil): タイルマップ上のセル (cel_x, cel_y) にタイル番号 val を設定（nil で消去、負数は ArgumentError）
     let map_for_mset = tilemap.clone();
     mrb_define_cmethod(
         vm,
@@ -3933,8 +3941,49 @@ fn register_engine_api(
         Box::new(move |_vm, args| {
             let cx = arg_i32(args, 0, 0);
             let cy = arg_i32(args, 1, 0);
-            let val = arg_i32(args, 2, -1);
-            map_for_mset.borrow_mut().set(cx, cy, val);
+            if args.len() < 3 || args[2].is_nil() {
+                map_for_mset.borrow_mut().remove(cx, cy);
+                return Ok(Rc::new(RObject::nil()));
+            }
+            let val = match &args[2].value {
+                RValue::Integer(n) => *n,
+                RValue::Float(f) => *f as i64,
+                _ => return Err(mrubyedge::Error::TypeMismatch),
+            };
+            if val < 0 {
+                return Err(mrubyedge::Error::ArgumentError(format!(
+                    "tile ID cannot be negative ({val}). Use nil or mdel(x, y) to erase a tile."
+                )));
+            }
+            map_for_mset.borrow_mut().set(cx, cy, val as i32);
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
+
+    // mdel(cel_x = 0, cel_y = 0): タイルマップ上のセル (cel_x, cel_y) のタイルを消去
+    let map_for_mdel = tilemap.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "mdel",
+        Box::new(move |_vm, args| {
+            let cx = arg_i32(args, 0, 0);
+            let cy = arg_i32(args, 1, 0);
+            map_for_mdel.borrow_mut().remove(cx, cy);
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
+
+    // mclear(cel_x = 0, cel_y = 0): mdel のエイリアス
+    let map_for_mclear = tilemap.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "mclear",
+        Box::new(move |_vm, args| {
+            let cx = arg_i32(args, 0, 0);
+            let cy = arg_i32(args, 1, 0);
+            map_for_mclear.borrow_mut().remove(cx, cy);
             Ok(Rc::new(RObject::nil()))
         }),
     );

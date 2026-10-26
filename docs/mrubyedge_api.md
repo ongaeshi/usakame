@@ -315,4 +315,4 @@ Usakame では、`Math` モジュール配下のメソッドが定義されて�
 
 ### 2.13 Usakame ゲームエンジン API
 
-グラフィックス描画（`cls`, `spr`, `rect`, `line`, `blt`, `print_text` 等）、キー・マウス入力（`btn`, `mouse_x` 等）、タイルマップ（`map`, `mget`, `mset`）、サウンド（`sfx`, `music`）などのエンジン固有 API については、[docs/api.md](file:///c:/Users/ongaeshi/Code/usakame/docs/api.md) を参照してください。
+グラフィックス描画（`cls`, `spr`, `rect`, `line`, `blt`, `print_text` 等）、キー・マウス入力（`btn`, `mouse_x` 等）、タイルマップ（`map`, `mget`, `mset`, `mdel`）、サウンド（`sfx`, `music`）などのエンジン固有 API については、[docs/api.md](file:///c:/Users/ongaeshi/Code/usakame/docs/api.md) を参照してください。

@@ -1456,7 +1456,7 @@ fn test_map_mget_mset_in_ruby_script_and_hot_reload() {
 $tile_at_2_0 = 0
 def update
   $tile_at_2_0 = mget(2, 0)
-  mset(2, 0, -1)
+  mdel(2, 0)
   mset(5, 3, 2)
 end
 def draw
@@ -2875,9 +2875,9 @@ fn test_tilemap_editor_hires_and_unshrunk_palette() {
 fn test_tile_zero_can_be_placed_and_rendered() {
     let script = r#"
 mset(0, 0, 0)   # タイルID 0 を配置
-mset(1, 0, -1)  # 空マス
+mset(1, 0, nil) # 空マス (nilで消去)
 $t0 = mget(0, 0)
-$t1 = mget(1, 0)
+$t1_is_nil = mget(1, 0).nil?
 
 def update
 end
@@ -2894,9 +2894,9 @@ __END__
     let mut runtime = GameRuntime::new(&tail, &mrb, true).unwrap();
 
     let t0: i32 = runtime.vm.globals.get("$t0").unwrap().as_ref().try_into().unwrap();
-    let t1: i32 = runtime.vm.globals.get("$t1").unwrap().as_ref().try_into().unwrap();
+    let t1_is_nil: bool = runtime.vm.globals.get("$t1_is_nil").unwrap().as_ref().try_into().unwrap();
     assert_eq!(t0, 0, "Tile ID 0 should be stored and returned as 0");
-    assert_eq!(t1, -1, "Empty cell should return -1");
+    assert!(t1_is_nil, "Empty cell should return nil");
 
     // draw で map() が tile_id == 0 を描画してもエラーなく完了すること
     runtime.call_draw_result().expect("map() should draw tile ID 0 without error");
@@ -3332,6 +3332,47 @@ fn test_math_numeric_and_format_extensions() {
     $test_ok = true
     "#;
     let (t, m) = cli::compile_ruby_script_str_with_filename(script, Some("test_math.rb")).unwrap();
+    let rt = GameRuntime::new(&t, &m, true).expect("Runtime init should succeed");
+    let ok = rt.vm.globals.get("$test_ok").cloned();
+    assert_eq!(ok.map(|o| o.as_ref().clone()), Some(RObject::boolean(true)));
+}
+
+#[test]
+fn test_mget_nil_and_mset_mdel_api() {
+    let script = r#"
+    # 1. 未設定セルは nil を返す
+    raise "Empty cell should return nil" unless mget(0, 0).nil?
+
+    # 2. mset(x, y, 0) で 0番タイル配置
+    mset(0, 0, 0)
+    raise "Tile 0 should be 0" unless mget(0, 0) == 0
+
+    # 3. mset(x, y, nil) で消去
+    mset(0, 0, nil)
+    raise "Erased cell should return nil" unless mget(0, 0).nil?
+
+    # 4. mdel(x, y) で消去
+    mset(1, 1, 5)
+    raise "Tile 5 should be 5" unless mget(1, 1) == 5
+    mdel(1, 1)
+    raise "mdel cell should return nil" unless mget(1, 1).nil?
+
+    # 5. mclear(x, y) で消去
+    mset(2, 2, 7)
+    mclear(2, 2)
+    raise "mclear cell should return nil" unless mget(2, 2).nil?
+
+    # 6. mset に -1 を渡すと ArgumentError
+    begin
+      mset(3, 3, -1)
+      raise "mset with -1 should raise ArgumentError"
+    rescue ArgumentError
+      # Expected!
+    end
+
+    $test_ok = true
+    "#;
+    let (t, m) = cli::compile_ruby_script_str_with_filename(script, Some("test_map_nil.rb")).unwrap();
     let rt = GameRuntime::new(&t, &m, true).expect("Runtime init should succeed");
     let ok = rt.vm.globals.get("$test_ok").cloned();
     assert_eq!(ok.map(|o| o.as_ref().clone()), Some(RObject::boolean(true)));

@@ -118,6 +118,7 @@ $particles = []
 # 壁判定用タイルIDリスト (Kenney Tiny Dungeon の壁・柱・障害物)
 # 0..27 などの外壁、および 36..41 などの下壁
 def solid_tile?(tile_id)
+  return false if tile_id.nil?
   return true if tile_id >= 0 && tile_id <= 27
   return true if tile_id >= 36 && tile_id <= 41
   return true if tile_id == 64 || tile_id == 65 # 柱や松明

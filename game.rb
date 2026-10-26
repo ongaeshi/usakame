@@ -233,7 +233,7 @@ def setup_arena_map
   while ty < MAP_CELLS
     tx = 0
     while tx < MAP_CELLS
-      tile = -1
+      tile = nil
       if tx == 0 || ty == 0 || tx == MAP_CELLS - 1 || ty == MAP_CELLS - 1
         tile = 2 # 外周の石壁
       elsif (tx == 8 || tx == 23) && (ty == 8 || ty == 23)
@@ -255,10 +255,14 @@ def setup_arena_map
       # プレイヤー初期位置周辺 (13..18, 13..18) は障害物を置かない
       if tx >= 13 && tx <= 18 && ty >= 13 && ty <= 18
         if tile == 2 || tile == 3 || tile == 4
-          tile = -1
+          tile = nil
         end
       end
-      mset(tx, ty, tile)
+      if tile.nil?
+        mdel(tx, ty)
+      else
+        mset(tx, ty, tile)
+      end
       tx += 1
     end
     ty += 1
@@ -272,7 +276,7 @@ end
 def break_tile_at(tx, ty)
   t = mget(tx, ty)
   if t == 3 || t == 4
-    mset(tx, ty, -1)
+    mdel(tx, ty)
     wx = tx * 16 + 8
     wy = ty * 16 + 8
     spawn_burst_particles(wx, wy, (t == 3) ? 9 : 12, 8)
@@ -309,7 +313,7 @@ def can_walk?(nx, ny, break_crates)
     t = mget(tx, ty)
     if break_crates && (t == 3 || (t == 4 && $form == 1))
       break_tile_at(tx, ty)
-      t = -1
+      t = nil
     end
     return false if solid_tile?(t)
     i += 1
