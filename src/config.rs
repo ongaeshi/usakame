@@ -160,3 +160,33 @@ pub fn nearest_palette_index(r: u8, g: u8, b: u8) -> usize {
     }
     best_idx
 }
+
+/// 16進数カラーコード文字列（`#RRGGBB`, `#RGB`, `0xRRGGBB`, `RRGGBB`）を `[r, g, b, 255]` に変換する
+pub fn parse_hex_color(s: &str) -> Option<[u8; 4]> {
+    let trimmed = s.trim();
+    let hex_str = if let Some(stripped) = trimmed.strip_prefix('#') {
+        stripped
+    } else if let Some(stripped) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+        stripped
+    } else {
+        trimmed
+    };
+
+    if hex_str.len() == 6 && hex_str.chars().all(|c| c.is_ascii_hexdigit()) {
+        let r = u8::from_str_radix(&hex_str[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&hex_str[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&hex_str[4..6], 16).ok()?;
+        Some([r, g, b, 255])
+    } else if hex_str.len() == 3 && hex_str.chars().all(|c| c.is_ascii_hexdigit()) {
+        let r_ch = hex_str.chars().nth(0)?;
+        let g_ch = hex_str.chars().nth(1)?;
+        let b_ch = hex_str.chars().nth(2)?;
+        let r = u8::from_str_radix(&format!("{}{}", r_ch, r_ch), 16).ok()?;
+        let g = u8::from_str_radix(&format!("{}{}", g_ch, g_ch), 16).ok()?;
+        let b = u8::from_str_radix(&format!("{}{}", b_ch, b_ch), 16).ok()?;
+        Some([r, g, b, 255])
+    } else {
+        None
+    }
+}
+

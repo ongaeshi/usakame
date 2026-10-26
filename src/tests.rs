@@ -1339,7 +1339,7 @@ fn test_pal_and_palt_state_and_sprite_rgba() {
     let mut pal_map = DEFAULT_PAL_MAP;
     pal_map[8] = 12; // Red -> Blue
     let palt_mask = 1 << 1; // Dark Blue を透明化
-    let transformed = sp.apply_palette(&pal_map, palt_mask);
+    let transformed = sp.apply_palette(&pal_map, palt_mask, &PALETTE_RGBA);
 
     // (0,0): Dark Blue (1) -> palt により透明 [0, 0, 0, 0]
     assert_eq!(&transformed[0..4], &[0, 0, 0, 0]);
@@ -2298,7 +2298,7 @@ fn test_rabbit_knight_example_script() {
 #[test]
 fn test_bank_parse_and_sprite_sync() {
     let tail = "@SPRITE 0\n7777\n7777\n@SPRITE 1\n8888\n8888\n";
-    let (sprites, banks) = parse_tail_resources_full(tail, None);
+    let (sprites, banks, _) = parse_tail_resources_full(tail, None);
 
     assert!(sprites.contains_key(&0));
     assert!(sprites.contains_key(&1));
@@ -2987,3 +2987,103 @@ fn test_screenshot_png_encoding_and_flip() {
     assert_eq!(&s_buf[(1 * 4 + 1) * 4..(1 * 4 + 1) * 4 + 4], &[255, 0, 0, 255]);
     assert_eq!(&s_buf[(0 * 4 + 2) * 4..(0 * 4 + 2) * 4 + 4], &[0, 255, 0, 255]);
 }
+
+#[test]
+fn test_parse_tail_palettes_and_sprite_binding() {
+    let tail = r#"
+@PALETTE 0
+3: #008840
+B: #58F878
+
+@PALETTE 1
+0: #000000
+B: #78F878
+8: #F83800
+
+@SPRITE 0
+...3...
+...B...
+
+@SPRITE 1 pal:1
+...8...
+...B...
+"#;
+
+    let (sprites, banks, palettes) = parse_tail_resources_full(tail, None);
+
+    // パレットのパース検証
+    assert!(palettes.contains_key(&0));
+    assert!(palettes.contains_key(&1));
+    let pal0 = &palettes[&0];
+    assert_eq!(pal0[3], [0, 136, 64, 255]);
+    assert_eq!(pal0[11], [88, 248, 120, 255]);
+
+    let pal1 = &palettes[&1];
+    assert_eq!(pal1[8], [248, 56, 0, 255]);
+    assert_eq!(pal1[11], [120, 248, 120, 255]);
+
+    // スプライト0（パレット0）のレンダリング結果検証
+    let sp0 = &sprites[&0];
+    assert_eq!(sp0.palette_id, 0);
+    // (3, 0) は色3
+    let p0_off = (0 * sp0.width as usize + 3) * 4;
+    assert_eq!(&sp0.rgba[p0_off..p0_off + 4], &[0, 136, 64, 255]);
+
+    // スプライト1（パレット1）のレンダリング結果検証
+    let sp1 = &sprites[&1];
+    assert_eq!(sp1.palette_id, 1);
+    // (3, 0) は色8
+    let p1_off = (0 * sp1.width as usize + 3) * 4;
+    assert_eq!(&sp1.rgba[p1_off..p1_off + 4], &[248, 56, 0, 255]);
+
+    // Bank 0 への書き込み同期検証
+    let bank0 = &banks[&0];
+    let bank_sp0_px = bank0.get_pixel(3, 0);
+    assert_eq!(bank_sp0_px, Some(3));
+    let bank_sp1_px = bank0.get_pixel(16 + 3, 0);
+    assert_eq!(bank_sp1_px, Some(8));
+}
+
+#[test]
+fn test_ruby_pal_bank_and_pal_rgb_apis() {
+    let script = r##"
+def update
+  # パレットバンク切り替え
+  pal_bank(1)
+
+  # pal(c0, hex) での動的RGB変更
+  pal(3, "#123456")
+
+  # pal(c0, r, g, b) でのRGB変更
+  pal(4, 100, 150, 200)
+
+  # pal() でリセット
+  pal()
+end
+
+def draw
+  cls(0)
+end
+
+__END__
+@PALETTE 1
+0: #001122
+3: #334455
+"##;
+
+    let (tail, mrb) = cli::compile_ruby_script_str_with_filename(script, Some("test.rb")).expect("compile should succeed");
+    let mut rt = GameRuntime::new(&tail, &mrb, true).expect("Runtime creation should succeed");
+
+    // 初期状態ではパレット0
+    assert_eq!(rt.draw_state.borrow().active_pal_bank, 0);
+
+    // 1フレーム実行
+    rt.call_update();
+
+    // pal_bank(1) が実行されたことを確認
+    assert_eq!(rt.draw_state.borrow().active_pal_bank, 1);
+    // pal() リセット後も、選択中バンク1の定義値（色0 = #001122）に戻る
+    let ds = *rt.draw_state.borrow();
+    assert_eq!(ds.palette_rgba[0], [0, 17, 34, 255]);
+}
+

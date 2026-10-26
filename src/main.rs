@@ -28,23 +28,36 @@ pub use bundle::{decode_base64, encode_base64};
 // ==========================================
 // リソース管理 & 描画処理
 // ==========================================
+pub type PaletteRgba = [[u8; 4]; 16];
+
 #[derive(Clone)]
 pub struct SpriteData {
     pub width: u16,
     pub height: u16,
     /// RGBA ピクセルデータ (width * height * 4 bytes)
     pub rgba: Vec<u8>,
+    /// パレットインデックスデータ (0..15 or None)
+    pub indexed: Vec<Option<u8>>,
+    /// 関連付けられたパレットID (デフォルト 0)
+    pub palette_id: i32,
     pub texture: Option<Texture2D>,
-    /// パレット置換・透過設定 `(pal_map, palt_mask)` ごとの変換済みテクスチャキャッシュ
-    pub pal_cache: RefCell<HashMap<([u8; 16], u16), Texture2D>>,
+    /// パレット置換・透過設定 `(pal_map, palt_mask, palette_rgba)` ごとの変換済みテクスチャキャッシュ
+    pub pal_cache: RefCell<HashMap<([u8; 16], u16, PaletteRgba), Texture2D>>,
 }
 
 impl SpriteData {
     pub fn from_rgba(width: u16, height: u16, rgba: Vec<u8>) -> Self {
+        let total_pixels = width as usize * height as usize;
+        let mut indexed = Vec::with_capacity(total_pixels);
+        for px in rgba.chunks_exact(4) {
+            indexed.push(rgba_to_palette_opt(px));
+        }
         Self {
             width,
             height,
             rgba,
+            indexed,
+            palette_id: 0,
             texture: None,
             pal_cache: RefCell::new(HashMap::new()),
         }
@@ -52,6 +65,11 @@ impl SpriteData {
 
     /// 16進数テキスト行 (`0`..`F`, `.` は透明) からスプライトを生成する（基本 16x16）
     pub fn from_lines(lines: &[&str]) -> Self {
+        Self::from_lines_with_palette(lines, &PALETTE_RGBA, 0)
+    }
+
+    /// 指定したパレットRGBAを使って16進数テキスト行からスプライトを生成する
+    pub fn from_lines_with_palette(lines: &[&str], palette: &PaletteRgba, palette_id: i32) -> Self {
         let max_cols = lines
             .iter()
             .map(|l| l.chars().count())
@@ -60,6 +78,7 @@ impl SpriteData {
         let width = max_cols.max(SPRITE_SIZE);
         let height = lines.len().max(SPRITE_SIZE);
         let mut rgba = vec![0u8; width * height * 4];
+        let mut indexed = vec![None; width * height];
 
         for (y, line) in lines.iter().take(height).enumerate() {
             for (x, ch) in line.chars().take(width).enumerate() {
@@ -68,9 +87,11 @@ impl SpriteData {
                     c if c.is_ascii_hexdigit() => c.to_digit(16).map(|d| d as usize),
                     _ => None,
                 };
+                let px_idx = y * width + x;
                 if let Some(idx) = color_idx {
-                    let off = (y * width + x) * 4;
-                    rgba[off..off + 4].copy_from_slice(&PALETTE_RGBA[idx & 0x0F]);
+                    let off = px_idx * 4;
+                    rgba[off..off + 4].copy_from_slice(&palette[idx & 0x0F]);
+                    indexed[px_idx] = Some((idx & 0x0F) as u8);
                 }
             }
         }
@@ -79,6 +100,8 @@ impl SpriteData {
             width: width as u16,
             height: height as u16,
             rgba,
+            indexed,
+            palette_id,
             texture: None,
             pal_cache: RefCell::new(HashMap::new()),
         }
@@ -189,17 +212,22 @@ impl SpriteData {
         self.pal_cache.borrow_mut().clear();
     }
 
-    /// パレット置換マップ `pal_map` と透過ビットマスク `palt_mask` を適用した RGBA ピクセル配列を生成する
-    pub fn apply_palette(&self, pal_map: &[u8; 16], palt_mask: u16) -> Vec<u8> {
-        if *pal_map == DEFAULT_PAL_MAP && palt_mask == 0 {
+    /// パレット置換マップ `pal_map`、透過ビットマスク `palt_mask`、およびターゲットパレット `target_palette` を適用した RGBA ピクセル配列を生成する
+    pub fn apply_palette(&self, pal_map: &[u8; 16], palt_mask: u16, target_palette: &PaletteRgba) -> Vec<u8> {
+        let is_identity_pal = *pal_map == DEFAULT_PAL_MAP && *target_palette == PALETTE_RGBA;
+        if is_identity_pal && palt_mask == 0 {
             return self.rgba.clone();
         }
         let mut out = self.rgba.clone();
-        for px in out.chunks_exact_mut(4) {
+        for (i, px) in out.chunks_exact_mut(4).enumerate() {
             if px[3] == 0 {
                 continue;
             }
-            let src_idx = nearest_palette_index(px[0], px[1], px[2]);
+            let src_idx = if let Some(indexed) = self.indexed.get(i).copied().flatten() {
+                indexed as usize
+            } else {
+                nearest_palette_index(px[0], px[1], px[2])
+            };
             if (palt_mask & (1 << src_idx)) != 0 {
                 px[0] = 0;
                 px[1] = 0;
@@ -207,27 +235,32 @@ impl SpriteData {
                 px[3] = 0;
             } else {
                 let dst_idx = (pal_map[src_idx] & 0x0F) as usize;
-                if dst_idx != src_idx {
-                    let dst_rgba = PALETTE_RGBA[dst_idx];
-                    px[0] = dst_rgba[0];
-                    px[1] = dst_rgba[1];
-                    px[2] = dst_rgba[2];
-                }
+                let dst_rgba = target_palette[dst_idx];
+                px[0] = dst_rgba[0];
+                px[1] = dst_rgba[1];
+                px[2] = dst_rgba[2];
+                px[3] = dst_rgba[3];
             }
         }
         out
     }
 
     /// パレット変換済みの `Texture2D` を取得またはオンデマンド生成してキャッシュから返す
-    pub fn get_or_build_pal_texture(&self, pal_map: &[u8; 16], palt_mask: u16) -> Option<Texture2D> {
-        if *pal_map == DEFAULT_PAL_MAP && palt_mask == 0 {
+    pub fn get_or_build_pal_texture(
+        &self,
+        pal_map: &[u8; 16],
+        palt_mask: u16,
+        target_palette: &PaletteRgba,
+    ) -> Option<Texture2D> {
+        let is_identity_pal = *pal_map == DEFAULT_PAL_MAP && *target_palette == PALETTE_RGBA;
+        if is_identity_pal && palt_mask == 0 {
             return self.texture.clone();
         }
-        let key = (*pal_map, palt_mask);
+        let key = (*pal_map, palt_mask, *target_palette);
         if let Some(tex) = self.pal_cache.borrow().get(&key) {
             return Some(tex.clone());
         }
-        let transformed_rgba = self.apply_palette(pal_map, palt_mask);
+        let transformed_rgba = self.apply_palette(pal_map, palt_mask, target_palette);
         let image = Image {
             bytes: transformed_rgba,
             width: self.width,
@@ -275,7 +308,7 @@ pub struct BankData {
     pub texture: RefCell<Option<Texture2D>>,
     pub dirty: std::cell::Cell<bool>,
     /// パレット置換・透過設定ごとの変換済みテクスチャキャッシュ
-    pub pal_cache: RefCell<HashMap<([u8; 16], u16), Texture2D>>,
+    pub pal_cache: RefCell<HashMap<([u8; 16], u16, PaletteRgba), Texture2D>>,
 }
 
 impl Default for BankData {
@@ -355,7 +388,25 @@ impl BankData {
         self.write_tile(slot_id, (self.sheet_width / 16).max(1) as usize, src_rgba);
     }
 
+    pub fn write_16x16_indexed(&mut self, slot_id: usize, src_rgba: &[u8], src_indexed: &[Option<u8>]) {
+        self.write_tile_indexed(slot_id, (self.sheet_width / 16).max(1) as usize, src_rgba, src_indexed);
+    }
+
     pub fn write_tile(&mut self, slot_id: usize, cols: usize, src_rgba: &[u8]) {
+        self.write_tile_indexed_internal(slot_id, cols, src_rgba, None);
+    }
+
+    pub fn write_tile_indexed(&mut self, slot_id: usize, cols: usize, src_rgba: &[u8], src_indexed: &[Option<u8>]) {
+        self.write_tile_indexed_internal(slot_id, cols, src_rgba, Some(src_indexed));
+    }
+
+    fn write_tile_indexed_internal(
+        &mut self,
+        slot_id: usize,
+        cols: usize,
+        src_rgba: &[u8],
+        src_indexed: Option<&[Option<u8>]>,
+    ) {
         let cols = cols.max(1);
         let slot_x = (slot_id % cols) * 16;
         let slot_y = (slot_id / cols) * 16;
@@ -371,11 +422,18 @@ impl BankData {
                 self.rgba[dst_start..dst_end].copy_from_slice(&src_rgba[src_start..src_end]);
             }
             for x in 0..16 {
-                let p_off = src_start + x * 4;
-                if p_off + 4 <= src_rgba.len() {
-                    let col = rgba_to_palette_opt(&src_rgba[p_off..p_off + 4]);
-                    self.indexed[(slot_y + y) * BANK_WIDTH + slot_x + x] = col;
-                }
+                let px_idx = y * 16 + x;
+                let col = if let Some(indexed) = src_indexed {
+                    indexed.get(px_idx).copied().flatten()
+                } else {
+                    let p_off = src_start + x * 4;
+                    if p_off + 4 <= src_rgba.len() {
+                        rgba_to_palette_opt(&src_rgba[p_off..p_off + 4])
+                    } else {
+                        None
+                    }
+                };
+                self.indexed[(slot_y + y) * BANK_WIDTH + slot_x + x] = col;
             }
         }
         self.dirty.set(true);
@@ -530,16 +588,21 @@ impl BankData {
         self.ensure_texture();
     }
 
-    pub fn apply_palette(&self, pal_map: &[u8; 16], palt_mask: u16) -> Vec<u8> {
-        if *pal_map == DEFAULT_PAL_MAP && palt_mask == 0 {
+    pub fn apply_palette(&self, pal_map: &[u8; 16], palt_mask: u16, target_palette: &PaletteRgba) -> Vec<u8> {
+        let is_identity_pal = *pal_map == DEFAULT_PAL_MAP && *target_palette == PALETTE_RGBA;
+        if is_identity_pal && palt_mask == 0 {
             return self.rgba.clone();
         }
         let mut out = self.rgba.clone();
-        for px in out.chunks_exact_mut(4) {
+        for (i, px) in out.chunks_exact_mut(4).enumerate() {
             if px[3] == 0 {
                 continue;
             }
-            let src_idx = nearest_palette_index(px[0], px[1], px[2]);
+            let src_idx = if let Some(indexed) = self.indexed.get(i).copied().flatten() {
+                indexed as usize
+            } else {
+                nearest_palette_index(px[0], px[1], px[2])
+            };
             if (palt_mask & (1 << src_idx)) != 0 {
                 px[0] = 0;
                 px[1] = 0;
@@ -547,27 +610,32 @@ impl BankData {
                 px[3] = 0;
             } else {
                 let dst_idx = (pal_map[src_idx] & 0x0F) as usize;
-                if dst_idx != src_idx {
-                    let dst_rgba = PALETTE_RGBA[dst_idx];
-                    px[0] = dst_rgba[0];
-                    px[1] = dst_rgba[1];
-                    px[2] = dst_rgba[2];
-                }
+                let dst_rgba = target_palette[dst_idx];
+                px[0] = dst_rgba[0];
+                px[1] = dst_rgba[1];
+                px[2] = dst_rgba[2];
+                px[3] = dst_rgba[3];
             }
         }
         out
     }
 
-    pub fn get_or_build_pal_texture(&self, pal_map: &[u8; 16], palt_mask: u16) -> Option<Texture2D> {
+    pub fn get_or_build_pal_texture(
+        &self,
+        pal_map: &[u8; 16],
+        palt_mask: u16,
+        target_palette: &PaletteRgba,
+    ) -> Option<Texture2D> {
         self.ensure_texture();
-        if *pal_map == DEFAULT_PAL_MAP && palt_mask == 0 {
+        let is_identity_pal = *pal_map == DEFAULT_PAL_MAP && *target_palette == PALETTE_RGBA;
+        if is_identity_pal && palt_mask == 0 {
             return self.texture.borrow().clone();
         }
-        let key = (*pal_map, palt_mask);
+        let key = (*pal_map, palt_mask, *target_palette);
         if let Some(tex) = self.pal_cache.borrow().get(&key) {
             return Some(tex.clone());
         }
-        let transformed_rgba = self.apply_palette(pal_map, palt_mask);
+        let transformed_rgba = self.apply_palette(pal_map, palt_mask, target_palette);
         let image = Image {
             bytes: transformed_rgba,
             width: self.width,
@@ -650,7 +718,7 @@ pub fn decode_png_sheet_into_sprites(
 
 #[derive(Clone, Copy)]
 enum ResourceBlockKind {
-    TextSprite(i32),
+    TextSprite(i32, Option<i32>),
     Base64Sprite(i32),
     PngSheet {
         start_id: i32,
@@ -670,11 +738,152 @@ fn parse_tile_dims(s: &str) -> Option<(u16, u16)> {
     if w > 0 && h > 0 { Some((w, h)) } else { None }
 }
 
+/// パレット行（例: "3: #008840", "B = #58F878", "#008840 #112233"）を解析してパレットに適用する
+fn parse_palette_line(line: &str, pal: &mut PaletteRgba, next_auto_idx: &mut usize) {
+    let mut parts: Vec<&str> = Vec::new();
+    for tok in line.split_whitespace() {
+        if tok.starts_with('#') && config::parse_hex_color(tok).is_none() {
+            // # から始まりカラーコードでないものはコメント行とみなす
+            break;
+        }
+        parts.push(tok);
+    }
+    if parts.is_empty() {
+        return;
+    }
+
+    let mut i = 0;
+    while i < parts.len() {
+        let tok = parts[i];
+
+        // 1. "idx:col" や "idx=col"
+        if let Some((idx_str, col_str)) = tok.split_once(':').or_else(|| tok.split_once('=')) {
+            let idx_str = idx_str.trim();
+            let col_str = col_str.trim();
+            let idx_opt = idx_str
+                .parse::<usize>()
+                .ok()
+                .or_else(|| usize::from_str_radix(idx_str, 16).ok());
+
+            if let Some(idx) = idx_opt {
+                if idx < 16 {
+                    if !col_str.is_empty() {
+                        if let Some(rgba) = config::parse_hex_color(col_str) {
+                            pal[idx] = rgba;
+                            *next_auto_idx = idx + 1;
+                            i += 1;
+                            continue;
+                        }
+                    } else if i + 1 < parts.len() {
+                        // "3:" の次に "#008840" が来るケース
+                        let next_tok = parts[i + 1];
+                        if let Some(rgba) = config::parse_hex_color(next_tok) {
+                            pal[idx] = rgba;
+                            *next_auto_idx = idx + 1;
+                            i += 2;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. "idx" の次に "#008840" が来るケース（例: "3 #008840" または "3 = #008840"）
+        if let Ok(idx) = tok.parse::<usize>().or_else(|_| usize::from_str_radix(tok, 16)) {
+            if idx < 16 {
+                let mut next_i = i + 1;
+                if next_i < parts.len() && (parts[next_i] == ":" || parts[next_i] == "=") {
+                    next_i += 1;
+                }
+                if next_i < parts.len() {
+                    if let Some(rgba) = config::parse_hex_color(parts[next_i]) {
+                        pal[idx] = rgba;
+                        *next_auto_idx = idx + 1;
+                        i = next_i + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // 3. 単独カラーコード（例: "#008840", "0x008840"）
+        if let Some(rgba) = config::parse_hex_color(tok) {
+            if *next_auto_idx < 16 {
+                pal[*next_auto_idx] = rgba;
+                *next_auto_idx += 1;
+                i += 1;
+                continue;
+            }
+        }
+
+        i += 1;
+    }
+}
+
+/// `data_section` 内の `@PALETTE [id]` ブロックを走査し、IDごとの16色パレットを抽出する
+pub fn parse_tail_palettes(data_section: &str) -> HashMap<i32, PaletteRgba> {
+    let mut palettes = HashMap::new();
+    let mut current_id: Option<i32> = None;
+    let mut current_pal = PALETTE_RGBA;
+    let mut next_auto_idx = 0usize;
+
+    for raw_line in data_section.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if let Some(rest) = line.strip_prefix("@PALETTE") {
+            if let Some(id) = current_id {
+                palettes.insert(id, current_pal);
+            }
+            let mut parts = rest.split_whitespace();
+            let mut pal_id = 0;
+            let mut start_idx = 0;
+
+            if let Some(first) = parts.next() {
+                if let Ok(id) = first.parse::<i32>() {
+                    pal_id = id;
+                    start_idx = 1;
+                }
+            }
+            current_id = Some(pal_id);
+            current_pal = palettes.get(&pal_id).copied().unwrap_or(PALETTE_RGBA);
+            next_auto_idx = 0;
+
+            let all_parts: Vec<&str> = rest.split_whitespace().collect();
+            let inline_line = all_parts[start_idx..].join(" ");
+            parse_palette_line(&inline_line, &mut current_pal, &mut next_auto_idx);
+            continue;
+        }
+
+        if current_id.is_none() {
+            continue;
+        }
+
+        if line.starts_with('@') {
+            if let Some(id) = current_id.take() {
+                palettes.insert(id, current_pal);
+            }
+            continue;
+        }
+
+        parse_palette_line(line, &mut current_pal, &mut next_auto_idx);
+    }
+
+    if let Some(id) = current_id {
+        palettes.insert(id, current_pal);
+    }
+
+    palettes
+}
+
 fn flush_resource_block(
     kind: Option<ResourceBlockKind>,
     lines: &mut Vec<String>,
     sprites: &mut HashMap<i32, SpriteData>,
     banks: &mut HashMap<i32, BankData>,
+    palettes: &HashMap<i32, PaletteRgba>,
     base_dir: Option<&Path>,
 ) {
     let Some(block_kind) = kind else {
@@ -686,12 +895,14 @@ fn flush_resource_block(
     }
 
     match block_kind {
-        ResourceBlockKind::TextSprite(id) => {
+        ResourceBlockKind::TextSprite(id, pal_id_opt) => {
+            let pal_id = pal_id_opt.unwrap_or(0);
+            let pal = palettes.get(&pal_id).unwrap_or(&PALETTE_RGBA);
             let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
-            let sp = SpriteData::from_lines(&refs);
+            let sp = SpriteData::from_lines_with_palette(&refs, pal, pal_id);
             if (0..=255).contains(&id) {
                 let bank0 = banks.entry(0).or_insert_with(|| BankData::new(0));
-                bank0.write_16x16(id as usize, &sp.rgba);
+                bank0.write_16x16_indexed(id as usize, &sp.rgba, &sp.indexed);
             }
             sprites.insert(id, sp);
         }
@@ -755,11 +966,12 @@ fn flush_resource_block(
     lines.clear();
 }
 
-/// `__END__` 以降のスプライトおよびバンク定義をパースする
+/// `__END__` 以降のスプライトおよびバンク定義、パレット定義をパースする
 pub fn parse_tail_resources_full(
     data_section: &str,
     base_dir: Option<&Path>,
-) -> (HashMap<i32, SpriteData>, HashMap<i32, BankData>) {
+) -> (HashMap<i32, SpriteData>, HashMap<i32, BankData>, HashMap<i32, PaletteRgba>) {
+    let palettes = parse_tail_palettes(data_section);
     let mut sprites = HashMap::new();
     let mut banks = HashMap::new();
     banks.insert(0, BankData::new(0));
@@ -775,7 +987,7 @@ pub fn parse_tail_resources_full(
         }
 
         if let Some(rest) = line.strip_prefix("@BANK") {
-            flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites, &mut banks, base_dir);
+            flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites, &mut banks, &palettes, base_dir);
             let mut parts = rest.split_whitespace();
             if let Some(id_str) = parts.next()
                 && let Ok(id) = id_str.parse::<i32>()
@@ -799,7 +1011,7 @@ pub fn parse_tail_resources_full(
             .or_else(|| line.strip_prefix("@PNG"))
             .or_else(|| line.strip_prefix("@B64"))
         {
-            flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites, &mut banks, base_dir);
+            flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites, &mut banks, &palettes, base_dir);
             let mut parts = rest.split_whitespace();
             if let Some(id_str) = parts.next()
                 && let Ok(id) = id_str.parse::<i32>()
@@ -818,7 +1030,7 @@ pub fn parse_tail_resources_full(
                 }
             }
         } else if let Some(rest) = line.strip_prefix("@SHEET") {
-            flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites, &mut banks, base_dir);
+            flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites, &mut banks, &palettes, base_dir);
             let mut parts = rest.split_whitespace();
             if let Some(id_str) = parts.next()
                 && let Ok(start_id) = id_str.parse::<i32>()
@@ -896,40 +1108,57 @@ pub fn parse_tail_resources_full(
                 });
             }
         } else if let Some(rest) = line.strip_prefix("@SPRITE") {
-            flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites, &mut banks, base_dir);
+            flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites, &mut banks, &palettes, base_dir);
             let mut parts = rest.split_whitespace();
             if let Some(id_str) = parts.next()
                 && let Ok(id) = id_str.parse::<i32>()
             {
-                if let Some(emoji_token) = parts.next() {
-                    // 数値トークン（例: @SPRITE 1 16 16）は寸法指定であり絵文字ではないため TextSprite として扱う
-                    if emoji_token.chars().all(|c| c.is_ascii_digit()) {
-                        current_kind = Some(ResourceBlockKind::TextSprite(id));
-                    } else {
-                        let atlas = emoji_atlas.get_or_insert_with(emoji::EmojiAtlas::new);
-                        if let Some(sp) = atlas.extract_sprite(emoji_token) {
-                            if (0..=255).contains(&id) {
-                                let bank0 = banks.entry(0).or_insert_with(|| BankData::new(0));
-                                bank0.write_16x16(id as usize, &sp.rgba);
-                            }
-                            sprites.insert(id, sp);
-                        } else {
-                            current_kind = Some(ResourceBlockKind::TextSprite(id));
+                let remaining: Vec<&str> = parts.collect();
+                let mut pal_id_opt = None;
+                let mut emoji_token = None;
+                let mut is_dim = false;
+
+                for tok in remaining {
+                    if let Some(val_str) = tok
+                        .strip_prefix("pal:")
+                        .or_else(|| tok.strip_prefix("p:"))
+                        .or_else(|| tok.strip_prefix("pal="))
+                        .or_else(|| tok.strip_prefix("p="))
+                    {
+                        if let Ok(pid) = val_str.parse::<i32>() {
+                            pal_id_opt = Some(pid);
                         }
+                    } else if tok.chars().all(|c| c.is_ascii_digit()) {
+                        is_dim = true;
+                    } else if emoji_token.is_none() {
+                        emoji_token = Some(tok);
+                    }
+                }
+
+                if let Some(tok) = emoji_token && !is_dim {
+                    let atlas = emoji_atlas.get_or_insert_with(emoji::EmojiAtlas::new);
+                    if let Some(sp) = atlas.extract_sprite(tok) {
+                        if (0..=255).contains(&id) {
+                            let bank0 = banks.entry(0).or_insert_with(|| BankData::new(0));
+                            bank0.write_16x16(id as usize, &sp.rgba);
+                        }
+                        sprites.insert(id, sp);
+                    } else {
+                        current_kind = Some(ResourceBlockKind::TextSprite(id, pal_id_opt));
                     }
                 } else {
-                    current_kind = Some(ResourceBlockKind::TextSprite(id));
+                    current_kind = Some(ResourceBlockKind::TextSprite(id, pal_id_opt));
                 }
             }
         } else if line.starts_with('@') {
-            flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites, &mut banks, base_dir);
+            flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites, &mut banks, &palettes, base_dir);
         } else if current_kind.is_some() {
             current_lines.push(line.to_string());
         }
     }
 
-    flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites, &mut banks, base_dir);
-    (sprites, banks)
+    flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites, &mut banks, &palettes, base_dir);
+    (sprites, banks, palettes)
 }
 
 /// `__END__` 以降のスプライト定義をパースする（後方互換ラッパー）
@@ -1645,7 +1874,7 @@ fn draw_sprite_transformed(
         if let Some(ref texture) = sprite.texture {
             draw_texture_ex(texture, draw_x, draw_y, WHITE, params);
         }
-    } else if let Some(texture) = sprite.get_or_build_pal_texture(&state.pal_map, state.palt_mask) {
+    } else if let Some(texture) = sprite.get_or_build_pal_texture(&state.pal_map, state.palt_mask, &state.palette_rgba) {
         draw_texture_ex(&texture, draw_x, draw_y, WHITE, params);
     }
 }
@@ -1712,7 +1941,7 @@ fn draw_bank_rect(
         if let Some(ref texture) = *bank.texture.borrow() {
             draw_texture_ex(texture, draw_x, draw_y, WHITE, params);
         }
-    } else if let Some(texture) = bank.get_or_build_pal_texture(&state.pal_map, state.palt_mask) {
+    } else if let Some(texture) = bank.get_or_build_pal_texture(&state.pal_map, state.palt_mask, &state.palette_rgba) {
         draw_texture_ex(&texture, draw_x, draw_y, WHITE, params);
     }
 }
@@ -1840,6 +2069,8 @@ pub struct DrawState {
     pub palt_mask: u16,
     pub screen_w: i32,
     pub screen_h: i32,
+    pub active_pal_bank: i32,
+    pub palette_rgba: PaletteRgba,
 }
 
 impl Default for DrawState {
@@ -1852,6 +2083,8 @@ impl Default for DrawState {
             palt_mask: 0,
             screen_w: SCREEN_WIDTH as i32,
             screen_h: SCREEN_HEIGHT as i32,
+            active_pal_bank: 0,
+            palette_rgba: PALETTE_RGBA,
         }
     }
 }
@@ -1903,7 +2136,7 @@ impl DrawState {
     }
 
     pub fn is_default_palette(&self) -> bool {
-        self.pal_map == DEFAULT_PAL_MAP && self.palt_mask == 0
+        self.pal_map == DEFAULT_PAL_MAP && self.palt_mask == 0 && self.palette_rgba == PALETTE_RGBA
     }
 
     pub fn map_color_index(&self, col: i32) -> usize {
@@ -1912,7 +2145,8 @@ impl DrawState {
     }
 
     pub fn map_color(&self, col: i32) -> Color {
-        PALETTE[self.map_color_index(col)]
+        let rgba = self.palette_rgba[self.map_color_index(col)];
+        Color::from_rgba(rgba[0], rgba[1], rgba[2], rgba[3])
     }
 
     /// ワールド座標系のスパン群にカメラオフセット `(-cam_x, -cam_y)` とクリッピング矩形 `clip` を適用する
@@ -2447,6 +2681,8 @@ fn register_engine_api(
     banks: Rc<RefCell<HashMap<i32, BankData>>>,
     active_spr_bank: Rc<RefCell<i32>>,
     active_map_bank: Rc<RefCell<i32>>,
+    palettes: Rc<RefCell<HashMap<i32, PaletteRgba>>>,
+    active_pal_bank: Rc<RefCell<i32>>,
     tilemap: Rc<RefCell<Tilemap>>,
     objects: Rc<RefCell<Vec<MapObject>>>,
     emoji_atlas: Rc<RefCell<emoji::EmojiAtlas>>,
@@ -2480,8 +2716,11 @@ fn register_engine_api(
         }),
     );
 
-    // spr_bank(id = 0): spr の参照先バンクを設定
+    // spr_bank(id = 0): spr の参照先バンクを設定（同番号の @PALETTE があれば自動連動）
     let active_spr_bank_for_spr_bank = active_spr_bank.clone();
+    let active_pal_bank_for_spr_bank = active_pal_bank.clone();
+    let palettes_for_spr_bank = palettes.clone();
+    let state_for_spr_bank = draw_state.clone();
     mrb_define_cmethod(
         vm,
         obj_class.clone(),
@@ -2489,6 +2728,34 @@ fn register_engine_api(
         Box::new(move |_vm, args| {
             let id = arg_i32(args, 0, 0);
             *active_spr_bank_for_spr_bank.borrow_mut() = id;
+            if let Some(pal) = palettes_for_spr_bank.borrow().get(&id) {
+                *active_pal_bank_for_spr_bank.borrow_mut() = id;
+                let mut state = state_for_spr_bank.borrow_mut();
+                state.active_pal_bank = id;
+                state.palette_rgba = *pal;
+            }
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
+
+    // pal_bank(id = 0): 描画用カラーパレットバンクを設定
+    let active_pal_bank_for_pal_bank = active_pal_bank.clone();
+    let palettes_for_pal_bank = palettes.clone();
+    let state_for_pal_bank = draw_state.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "pal_bank",
+        Box::new(move |_vm, args| {
+            let id = arg_i32(args, 0, 0);
+            *active_pal_bank_for_pal_bank.borrow_mut() = id;
+            let mut state = state_for_pal_bank.borrow_mut();
+            state.active_pal_bank = id;
+            if let Some(pal) = palettes_for_pal_bank.borrow().get(&id) {
+                state.palette_rgba = *pal;
+            } else {
+                state.palette_rgba = PALETTE_RGBA;
+            }
             Ok(Rc::new(RObject::nil()))
         }),
     );
@@ -2665,6 +2932,7 @@ fn register_engine_api(
 
     // pal(c0 = nil, c1 = nil): パレット色 c0 を c1 に置き換える（引数なしまたは nil でパレット置換と palt をリセット）
     let state_for_pal = draw_state.clone();
+    let palettes_for_pal = palettes.clone();
     mrb_define_cmethod(
         vm,
         obj_class.clone(),
@@ -2674,6 +2942,12 @@ fn register_engine_api(
             if args.is_empty() || matches!(args[0].value, RValue::Nil) {
                 state.reset_pal();
                 state.reset_palt();
+                let bank_id = state.active_pal_bank;
+                if let Some(pal) = palettes_for_pal.borrow().get(&bank_id) {
+                    state.palette_rgba = *pal;
+                } else {
+                    state.palette_rgba = PALETTE_RGBA;
+                }
             } else if let RValue::Array(ref arr_cell) = args[0].value {
                 for (idx, item) in arr_cell.borrow().iter().take(16).enumerate() {
                     let dst = match item.value {
@@ -2683,8 +2957,24 @@ fn register_engine_api(
                     };
                     state.set_pal(idx as i32, dst);
                 }
+            } else if args.len() >= 4 {
+                // pal(c0, r, g, b): RGB直接変更
+                let c0 = (arg_i32(args, 0, 0).rem_euclid(16)) as usize;
+                let r = arg_i32(args, 1, 0).clamp(0, 255) as u8;
+                let g = arg_i32(args, 2, 0).clamp(0, 255) as u8;
+                let b = arg_i32(args, 3, 0).clamp(0, 255) as u8;
+                state.palette_rgba[c0] = [r, g, b, 255];
             } else {
                 let c0 = arg_i32(args, 0, 0);
+                if let Some(arg1) = args.get(1) {
+                    if let Ok(color_str) = String::try_from(arg1.as_ref()) {
+                        if let Some(rgba) = config::parse_hex_color(&color_str) {
+                            let idx = (c0.rem_euclid(16)) as usize;
+                            state.palette_rgba[idx] = rgba;
+                            return Ok(Rc::new(RObject::nil()));
+                        }
+                    }
+                }
                 let c1 = arg_i32(args, 1, c0);
                 state.set_pal(c0, c1);
             }
@@ -2841,7 +3131,7 @@ fn register_engine_api(
                 String::new()
             };
 
-            let (sprites, banks) = parse_tail_resources_full(&tail, p.parent());
+            let (sprites, banks, _) = parse_tail_resources_full(&tail, p.parent());
             let bank0_opt = banks.get(&0);
             let mut slot_list = Vec::with_capacity(num_slots);
 
@@ -2952,7 +3242,7 @@ fn register_engine_api(
                 String::new()
             };
 
-            let (sprites, banks) = parse_tail_resources_full(&tail, base_dir);
+            let (sprites, banks, _) = parse_tail_resources_full(&tail, base_dir);
             let has_bank_directive = tail.lines().any(|l| {
                 let t = l.trim();
                 t.starts_with("@BANK")
@@ -3037,7 +3327,7 @@ fn register_engine_api(
                 path_str.clone()
             };
 
-            let (parsed_sprites, parsed_banks) = parse_tail_resources_full(&tail, base_dir);
+            let (parsed_sprites, parsed_banks, _) = parse_tail_resources_full(&tail, base_dir);
             let has_bank_directive = tail.lines().any(|l| {
                 let t = l.trim();
                 t.starts_with("@BANK")
@@ -3522,7 +3812,7 @@ fn register_engine_api(
                 let h = raw_h.abs();
                 if let Some(bank) = banks_for_headless_blt.borrow().get(&bank_id) {
                     if !state.is_default_palette() {
-                        let _ = bank.apply_palette(&state.pal_map, state.palt_mask);
+                        let _ = bank.apply_palette(&state.pal_map, state.palt_mask, &state.palette_rgba);
                     }
                     let _ = compute_sprite_draw_params(
                         w, h, x, y, flip_x, flip_y, rotate, scale,
@@ -3728,7 +4018,7 @@ fn register_engine_api(
                         if let Ok(s) = String::try_from(first.as_ref()) {
                             if let Some(sp) = emoji_for_headless.borrow_mut().get_or_insert(&s, false) {
                                 if !state.is_default_palette() {
-                                    let _ = sp.apply_palette(&state.pal_map, state.palt_mask);
+                                    let _ = sp.apply_palette(&state.pal_map, state.palt_mask, &state.palette_rgba);
                                 }
                                 let _ = compute_sprite_draw_params(
                                     sp.width as f32,
@@ -3750,7 +4040,7 @@ fn register_engine_api(
                 let banks_ref = banks_for_headless_spr.borrow();
                 if let Some(bank) = banks_ref.get(&cur_bank_id) {
                     if !state.is_default_palette() {
-                        let _ = bank.apply_palette(&state.pal_map, state.palt_mask);
+                        let _ = bank.apply_palette(&state.pal_map, state.palt_mask, &state.palette_rgba);
                     }
                     let _ = compute_sprite_draw_params(
                         (tile_w * 16) as f32,
@@ -3764,7 +4054,7 @@ fn register_engine_api(
                     );
                 } else if let Some(sp) = sprites_for_headless.borrow().get(&id) {
                     if !state.is_default_palette() {
-                        let _ = sp.apply_palette(&state.pal_map, state.palt_mask);
+                        let _ = sp.apply_palette(&state.pal_map, state.palt_mask, &state.palette_rgba);
                     }
                     let _ = compute_sprite_draw_params(
                         sp.width as f32,
@@ -3837,7 +4127,7 @@ fn register_engine_api(
                         }
                         if let Some(bank) = bank_opt {
                             if !state.is_default_palette() {
-                                let _ = bank.apply_palette(&state.pal_map, state.palt_mask);
+                                let _ = bank.apply_palette(&state.pal_map, state.palt_mask, &state.palette_rgba);
                             }
                             let _ = compute_sprite_draw_params(
                                 16.0,
@@ -3851,7 +4141,7 @@ fn register_engine_api(
                             );
                         } else if let Some(sp) = sprites_ref.get(&tile_id) {
                             if !state.is_default_palette() {
-                                let _ = sp.apply_palette(&state.pal_map, state.palt_mask);
+                                let _ = sp.apply_palette(&state.pal_map, state.palt_mask, &state.palette_rgba);
                             }
                             let _ = compute_sprite_draw_params(
                                 sp.width as f32,
@@ -5090,6 +5380,8 @@ pub struct GameRuntime {
     pub banks: Rc<RefCell<HashMap<i32, BankData>>>,
     pub active_spr_bank: Rc<RefCell<i32>>,
     pub active_map_bank: Rc<RefCell<i32>>,
+    pub palettes: Rc<RefCell<HashMap<i32, PaletteRgba>>>,
+    pub active_pal_bank: Rc<RefCell<i32>>,
     pub tilemap: Rc<RefCell<Tilemap>>,
     pub objects: Rc<RefCell<Vec<MapObject>>>,
     pub emoji_atlas: Rc<RefCell<emoji::EmojiAtlas>>,
@@ -5115,7 +5407,7 @@ impl GameRuntime {
         headless: bool,
         script_args: &[String],
     ) -> Result<Self, ScriptError> {
-        let (mut sprites_map, mut banks_map) = parse_tail_resources_full(tail_data, None);
+        let (mut sprites_map, mut banks_map, palettes_map) = parse_tail_resources_full(tail_data, None);
         let tail_map = parse_tail_map(tail_data);
         let tail_objects = parse_tail_objects(tail_data);
         let (mut sfx_map, mut music_map) = sound::parse_tail_sounds(tail_data);
@@ -5146,11 +5438,20 @@ impl GameRuntime {
         let banks = Rc::new(RefCell::new(banks_map));
         let active_spr_bank = Rc::new(RefCell::new(0));
         let active_map_bank = Rc::new(RefCell::new(0));
+        let palettes = Rc::new(RefCell::new(palettes_map));
+        let active_pal_bank = Rc::new(RefCell::new(0));
         let tilemap = Rc::new(RefCell::new(tail_map.clone()));
         let objects = Rc::new(RefCell::new(tail_objects));
         let emoji_atlas = Rc::new(RefCell::new(emoji::EmojiAtlas::new()));
         let bitmap_font = Rc::new(BitmapFont::new(!headless));
-        let draw_state = Rc::new(RefCell::new(DrawState::default()));
+        let initial_draw_state = {
+            let mut ds = DrawState::default();
+            if let Some(pal0) = palettes.borrow().get(&0) {
+                ds.palette_rgba = *pal0;
+            }
+            ds
+        };
+        let draw_state = Rc::new(RefCell::new(initial_draw_state));
         let sound_bank = Rc::new(RefCell::new(sound::SoundBank::new(
             HashMap::new(),
             HashMap::new(),
@@ -5164,6 +5465,8 @@ impl GameRuntime {
             banks.clone(),
             active_spr_bank.clone(),
             active_map_bank.clone(),
+            palettes.clone(),
+            active_pal_bank.clone(),
             tilemap.clone(),
             objects.clone(),
             emoji_atlas.clone(),
@@ -5209,6 +5512,8 @@ impl GameRuntime {
             banks,
             active_spr_bank,
             active_map_bank,
+            palettes,
+            active_pal_bank,
             tilemap,
             objects,
             emoji_atlas,
@@ -5253,12 +5558,14 @@ impl GameRuntime {
     /// メソッド定義とスプライト・マップ定義をホットリロードする。
     /// ただしスクリプト上のトップレベル初期値や `@MAP` 自体が書き換えられた場合は新しい定義を採用する。
     pub fn hot_reload(&mut self, new_tail_data: &str, new_mrb_bytes: &[u8]) -> Result<(), ScriptError> {
-        let (mut new_sprites_map, mut new_banks_map) = parse_tail_resources_full(new_tail_data, None);
+        let (mut new_sprites_map, mut new_banks_map, new_palettes_map) = parse_tail_resources_full(new_tail_data, None);
         let new_tail_map = parse_tail_map(new_tail_data);
         let new_tail_objects = parse_tail_objects(new_tail_data);
         let (mut new_sfx_map, mut new_music_map) = sound::parse_tail_sounds(new_tail_data);
 
         *self.objects.borrow_mut() = new_tail_objects;
+        *self.palettes.borrow_mut() = new_palettes_map;
+        *self.active_pal_bank.borrow_mut() = 0;
 
         let mut new_rite = rite::load(new_mrb_bytes)
             .map_err(|e| format!("Failed to load RITE(.mrb) on reload: {:?}", e))?;
@@ -5286,6 +5593,9 @@ impl GameRuntime {
         {
             let mut ds = self.draw_state.borrow_mut();
             *ds = DrawState::default();
+            if let Some(pal0) = self.palettes.borrow().get(&0) {
+                ds.palette_rgba = *pal0;
+            }
             ds.screen_w = self.config.borrow().screen_width as i32;
             ds.screen_h = self.config.borrow().screen_height as i32;
         }
@@ -5295,6 +5605,8 @@ impl GameRuntime {
             self.banks.clone(),
             self.active_spr_bank.clone(),
             self.active_map_bank.clone(),
+            self.palettes.clone(),
+            self.active_pal_bank.clone(),
             temp_tilemap.clone(),
             self.objects.clone(),
             self.emoji_atlas.clone(),
@@ -5356,6 +5668,8 @@ impl GameRuntime {
             self.banks.clone(),
             self.active_spr_bank.clone(),
             self.active_map_bank.clone(),
+            self.palettes.clone(),
+            self.active_pal_bank.clone(),
             self.tilemap.clone(),
             self.objects.clone(),
             self.emoji_atlas.clone(),

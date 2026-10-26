@@ -494,6 +494,7 @@ pub fn unpack_tail_data_to_sections(
     for line in tail_data.lines() {
         let trimmed = line.trim();
         let detected = if trimmed.starts_with("@SPRITE")
+            || trimmed.starts_with("@PALETTE")
             || trimmed.starts_with("@BANK")
             || trimmed.starts_with("@PNG")
             || trimmed.starts_with("@SHEET")
