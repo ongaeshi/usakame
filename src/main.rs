@@ -4514,7 +4514,11 @@ fn register_engine_api(
             for y in 0..height {
                 for x in 0..width {
                     let tid = tmap.get(x as i32, y as i32);
-                    tiles.push(Rc::new(RObject::integer(tid as i64)));
+                    if tid < 0 {
+                        tiles.push(Rc::new(RObject::nil()));
+                    } else {
+                        tiles.push(Rc::new(RObject::integer(tid as i64)));
+                    }
                 }
             }
 
