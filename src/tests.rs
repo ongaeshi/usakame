@@ -3221,4 +3221,21 @@ fn test_sprite_overlap_behavior() {
     assert_eq!(sprites[&1].width, 16);
 }
 
+#[test]
+fn test_platformer_example_script() {
+    let (_, tail_data, mrb_bytes) =
+        cli::compile_ruby_script_file(std::path::Path::new("examples/platformer.rb"))
+            .expect("examples/platformer.rb should compile");
+
+    let mut runtime =
+        GameRuntime::new(&tail_data, &mrb_bytes, true).expect("examples/platformer.rb should initialize");
+
+    // 120 フレーム実行してクラッシュしないことを検証
+    for _ in 0..120 {
+        runtime.call_update();
+        runtime.call_draw();
+    }
+}
+
+
 
