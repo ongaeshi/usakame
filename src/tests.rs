@@ -3120,3 +3120,105 @@ __END__
     rt.call_draw();
 }
 
+#[test]
+fn test_sprite_variable_size_32x32() {
+    let mut tail = String::from("@SPRITE 0 32x32\n");
+    for y in 0..32 {
+        let row = format!("{:X}", y % 16).repeat(32);
+        tail.push_str(&row);
+        tail.push('\n');
+    }
+
+    let (sprites, banks, _) = parse_tail_resources_full(&tail, None);
+    let sp = sprites.get(&0).expect("Sprite 0 should exist");
+    assert_eq!(sp.width, 32);
+    assert_eq!(sp.height, 32);
+
+    let bank0 = banks.get(&0).expect("Bank 0 should exist");
+    // (0, 0) は行0（色0）
+    assert_eq!(bank0.get_pixel(0, 0), Some(0));
+    // (31, 0) は行0（色0）
+    assert_eq!(bank0.get_pixel(31, 0), Some(0));
+    // (0, 15) は行15（色15）
+    assert_eq!(bank0.get_pixel(0, 15), Some(15));
+    // (31, 31) は行31 (31 % 16 = 15)
+    assert_eq!(bank0.get_pixel(31, 31), Some(15));
+
+    // Ruby スクリプトで spr(0, 10, 20) を呼び出しても正常に描画できる
+    let script = format!(r##"
+def update; end
+def draw
+  spr(0, 10, 20)
+  # 明示指定でも描画できる
+  spr(0, 50, 20, 2, 2)
+end
+
+__END__
+{}
+"##, tail);
+
+    let (parsed_tail, mrb) = cli::compile_ruby_script_str_with_filename(&script, Some("test_32.rb")).unwrap();
+    let mut rt = GameRuntime::new(&parsed_tail, &mrb, true).unwrap();
+    rt.call_draw();
+}
+
+#[test]
+fn test_sprite_variable_size_16x32_and_auto_detection() {
+    // 16x32 の明示指定
+    let mut tail = String::from("@SPRITE 4 16x32\n");
+    for _ in 0..32 {
+        tail.push_str("7777777777777777\n");
+    }
+
+    // 24x24 の自動サイズ判定（ヘッダにサイズ指定なし）
+    tail.push_str("@SPRITE 8\n");
+    for _ in 0..24 {
+        tail.push_str("........................\n");
+    }
+
+    let (sprites, banks, _) = parse_tail_resources_full(&tail, None);
+
+    let sp4 = sprites.get(&4).expect("Sprite 4 should exist");
+    assert_eq!(sp4.width, 16);
+    assert_eq!(sp4.height, 32);
+
+    let sp8 = sprites.get(&8).expect("Sprite 8 should exist");
+    assert_eq!(sp8.width, 24);
+    assert_eq!(sp8.height, 24);
+
+    let bank0 = banks.get(&0).expect("Bank 0 should exist");
+    // スロット4の原点は ( (4 % 16)*16, (4 / 16)*16 ) = (64, 0)
+    assert_eq!(bank0.get_pixel(64, 0), Some(7));
+    assert_eq!(bank0.get_pixel(64, 31), Some(7));
+}
+
+#[test]
+fn test_sprite_overlap_behavior() {
+    // ID 0 に 32x32 を配置し、ID 1 (16x16) を重ねて定義
+    let mut tail = String::from("@SPRITE 0 32x32\n");
+    for _ in 0..32 {
+        tail.push_str(&"1".repeat(32));
+        tail.push('\n');
+    }
+    tail.push_str("@SPRITE 1 16x16\n");
+    for _ in 0..16 {
+        tail.push_str(&"2".repeat(16));
+        tail.push('\n');
+    }
+
+    let (sprites, banks, _) = parse_tail_resources_full(&tail, None);
+    let bank0 = banks.get(&0).unwrap();
+
+    // スロット1の原点 (16, 0) は ID 1 (色2) で上書きされている
+    assert_eq!(bank0.get_pixel(16, 0), Some(2));
+    // スロット0の原点 (0, 0) は ID 0 のまま (色1)
+    assert_eq!(bank0.get_pixel(0, 0), Some(1));
+    // スロット16の原点 (0, 16) は ID 0 の下半分 (色1)
+    assert_eq!(bank0.get_pixel(0, 16), Some(1));
+
+    // sprites マップには両方が正しく格納されている
+    assert_eq!(sprites[&0].width, 32);
+    assert_eq!(sprites[&1].width, 16);
+}
+
+

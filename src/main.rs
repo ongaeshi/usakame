@@ -65,18 +65,33 @@ impl SpriteData {
 
     /// 16進数テキスト行 (`0`..`F`, `.` は透明) からスプライトを生成する（基本 16x16）
     pub fn from_lines(lines: &[&str]) -> Self {
-        Self::from_lines_with_palette(lines, &PALETTE_RGBA, 0)
+        Self::from_lines_with_palette_and_dims(lines, &PALETTE_RGBA, 0, None)
     }
 
     /// 指定したパレットRGBAを使って16進数テキスト行からスプライトを生成する
     pub fn from_lines_with_palette(lines: &[&str], palette: &PaletteRgba, palette_id: i32) -> Self {
-        let max_cols = lines
-            .iter()
-            .map(|l| l.chars().count())
-            .max()
-            .unwrap_or(SPRITE_SIZE);
-        let width = max_cols.max(SPRITE_SIZE);
-        let height = lines.len().max(SPRITE_SIZE);
+        Self::from_lines_with_palette_and_dims(lines, palette, palette_id, None)
+    }
+
+    /// 指定したパレットRGBAおよび指定サイズを使って16進数テキスト行からスプライトを生成する
+    pub fn from_lines_with_palette_and_dims(
+        lines: &[&str],
+        palette: &PaletteRgba,
+        palette_id: i32,
+        explicit_dims: Option<(u16, u16)>,
+    ) -> Self {
+        let (width, height) = if let Some((w, h)) = explicit_dims {
+            (w.max(1) as usize, h.max(1) as usize)
+        } else {
+            let max_cols = lines
+                .iter()
+                .map(|l| l.chars().count())
+                .max()
+                .unwrap_or(SPRITE_SIZE);
+            let w = max_cols.max(SPRITE_SIZE);
+            let h = lines.len().max(SPRITE_SIZE);
+            (w, h)
+        };
         let mut rgba = vec![0u8; width * height * 4];
         let mut indexed = vec![None; width * height];
 
@@ -400,29 +415,31 @@ impl BankData {
         self.write_tile_indexed_internal(slot_id, cols, src_rgba, Some(src_indexed));
     }
 
-    fn write_tile_indexed_internal(
+    pub fn write_rect_indexed(
         &mut self,
-        slot_id: usize,
-        cols: usize,
+        slot_x: usize,
+        slot_y: usize,
+        w: usize,
+        h: usize,
         src_rgba: &[u8],
         src_indexed: Option<&[Option<u8>]>,
     ) {
-        let cols = cols.max(1);
-        let slot_x = (slot_id % cols) * 16;
-        let slot_y = (slot_id / cols) * 16;
-        if slot_y + 16 > BANK_HEIGHT || slot_x + 16 > BANK_WIDTH {
+        if slot_x >= BANK_WIDTH || slot_y >= BANK_HEIGHT || w == 0 || h == 0 {
             return;
         }
-        for y in 0..16 {
-            let src_start = y * 16 * 4;
-            let src_end = src_start + 16 * 4;
+        let copy_w = w.min(BANK_WIDTH - slot_x);
+        let copy_h = h.min(BANK_HEIGHT - slot_y);
+
+        for y in 0..copy_h {
+            let src_start = y * w * 4;
+            let src_end = src_start + copy_w * 4;
             let dst_start = ((slot_y + y) * BANK_WIDTH + slot_x) * 4;
-            let dst_end = dst_start + 16 * 4;
+            let dst_end = dst_start + copy_w * 4;
             if src_end <= src_rgba.len() && dst_end <= self.rgba.len() {
                 self.rgba[dst_start..dst_end].copy_from_slice(&src_rgba[src_start..src_end]);
             }
-            for x in 0..16 {
-                let px_idx = y * 16 + x;
+            for x in 0..copy_w {
+                let px_idx = y * w + x;
                 let col = if let Some(indexed) = src_indexed {
                     indexed.get(px_idx).copied().flatten()
                 } else {
@@ -438,6 +455,19 @@ impl BankData {
         }
         self.dirty.set(true);
         self.pal_cache.borrow_mut().clear();
+    }
+
+    fn write_tile_indexed_internal(
+        &mut self,
+        slot_id: usize,
+        cols: usize,
+        src_rgba: &[u8],
+        src_indexed: Option<&[Option<u8>]>,
+    ) {
+        let cols = cols.max(1);
+        let slot_x = (slot_id % cols) * 16;
+        let slot_y = (slot_id / cols) * 16;
+        self.write_rect_indexed(slot_x, slot_y, 16, 16, src_rgba, src_indexed);
     }
 
     pub fn clear_16x16(&mut self, slot_id: usize) {
@@ -718,7 +748,7 @@ pub fn decode_png_sheet_into_sprites(
 
 #[derive(Clone, Copy)]
 enum ResourceBlockKind {
-    TextSprite(i32, Option<i32>),
+    TextSprite(i32, Option<i32>, Option<(u16, u16)>),
     Base64Sprite(i32),
     PngSheet {
         start_id: i32,
@@ -884,6 +914,7 @@ fn flush_resource_block(
     sprites: &mut HashMap<i32, SpriteData>,
     banks: &mut HashMap<i32, BankData>,
     palettes: &HashMap<i32, PaletteRgba>,
+    occupied_slots: &mut HashMap<(usize, usize), (i32, u16, u16)>,
     base_dir: Option<&Path>,
 ) {
     let Some(block_kind) = kind else {
@@ -895,14 +926,43 @@ fn flush_resource_block(
     }
 
     match block_kind {
-        ResourceBlockKind::TextSprite(id, pal_id_opt) => {
+        ResourceBlockKind::TextSprite(id, pal_id_opt, dims_opt) => {
             let pal_id = pal_id_opt.unwrap_or(0);
             let pal = palettes.get(&pal_id).unwrap_or(&PALETTE_RGBA);
             let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
-            let sp = SpriteData::from_lines_with_palette(&refs, pal, pal_id);
+            let sp = SpriteData::from_lines_with_palette_and_dims(&refs, pal, pal_id, dims_opt);
             if (0..=255).contains(&id) {
+                let slot_x = (id as usize % 16) * 16;
+                let slot_y = (id as usize / 16) * 16;
+                let tiles_w = (sp.width as usize + 15) / 16;
+                let tiles_h = (sp.height as usize + 15) / 16;
+                let start_tx = slot_x / 16;
+                let start_ty = slot_y / 16;
+
+                for ty in start_ty..start_ty + tiles_h {
+                    for tx in start_tx..start_tx + tiles_w {
+                        if let Some(&(prev_id, prev_w, prev_h)) = occupied_slots.get(&(tx, ty)) {
+                            if prev_id != id {
+                                eprintln!(
+                                    "Warning: @SPRITE {} ({}x{}) overlaps with @SPRITE {} ({}x{}) at tile ({}, {})",
+                                    id, sp.width, sp.height, prev_id, prev_w, prev_h, tx, ty
+                                );
+                            }
+                        } else {
+                            occupied_slots.insert((tx, ty), (id, sp.width, sp.height));
+                        }
+                    }
+                }
+
                 let bank0 = banks.entry(0).or_insert_with(|| BankData::new(0));
-                bank0.write_16x16_indexed(id as usize, &sp.rgba, &sp.indexed);
+                bank0.write_rect_indexed(
+                    slot_x,
+                    slot_y,
+                    sp.width as usize,
+                    sp.height as usize,
+                    &sp.rgba,
+                    Some(&sp.indexed),
+                );
             }
             sprites.insert(id, sp);
         }
@@ -911,8 +971,37 @@ fn flush_resource_block(
             match SpriteData::from_base64(&joined) {
                 Ok(sp) => {
                     if (0..=255).contains(&id) {
+                        let slot_x = (id as usize % 16) * 16;
+                        let slot_y = (id as usize / 16) * 16;
+                        let tiles_w = (sp.width as usize + 15) / 16;
+                        let tiles_h = (sp.height as usize + 15) / 16;
+                        let start_tx = slot_x / 16;
+                        let start_ty = slot_y / 16;
+
+                        for ty in start_ty..start_ty + tiles_h {
+                            for tx in start_tx..start_tx + tiles_w {
+                                if let Some(&(prev_id, prev_w, prev_h)) = occupied_slots.get(&(tx, ty)) {
+                                    if prev_id != id {
+                                        eprintln!(
+                                            "Warning: @SPRITE {} ({}x{}) overlaps with @SPRITE {} ({}x{}) at tile ({}, {})",
+                                            id, sp.width, sp.height, prev_id, prev_w, prev_h, tx, ty
+                                        );
+                                    }
+                                } else {
+                                    occupied_slots.insert((tx, ty), (id, sp.width, sp.height));
+                                }
+                            }
+                        }
+
                         let bank0 = banks.entry(0).or_insert_with(|| BankData::new(0));
-                        bank0.write_16x16(id as usize, &sp.rgba);
+                        bank0.write_rect_indexed(
+                            slot_x,
+                            slot_y,
+                            sp.width as usize,
+                            sp.height as usize,
+                            &sp.rgba,
+                            Some(&sp.indexed),
+                        );
                     }
                     sprites.insert(id, sp);
                 }
@@ -975,6 +1064,7 @@ pub fn parse_tail_resources_full(
     let mut sprites = HashMap::new();
     let mut banks = HashMap::new();
     banks.insert(0, BankData::new(0));
+    let mut occupied_slots: HashMap<(usize, usize), (i32, u16, u16)> = HashMap::new();
 
     let mut current_kind: Option<ResourceBlockKind> = None;
     let mut current_lines: Vec<String> = Vec::new();
@@ -987,7 +1077,15 @@ pub fn parse_tail_resources_full(
         }
 
         if let Some(rest) = line.strip_prefix("@BANK") {
-            flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites, &mut banks, &palettes, base_dir);
+            flush_resource_block(
+                current_kind.take(),
+                &mut current_lines,
+                &mut sprites,
+                &mut banks,
+                &palettes,
+                &mut occupied_slots,
+                base_dir,
+            );
             let mut parts = rest.split_whitespace();
             if let Some(id_str) = parts.next()
                 && let Ok(id) = id_str.parse::<i32>()
@@ -1011,7 +1109,15 @@ pub fn parse_tail_resources_full(
             .or_else(|| line.strip_prefix("@PNG"))
             .or_else(|| line.strip_prefix("@B64"))
         {
-            flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites, &mut banks, &palettes, base_dir);
+            flush_resource_block(
+                current_kind.take(),
+                &mut current_lines,
+                &mut sprites,
+                &mut banks,
+                &palettes,
+                &mut occupied_slots,
+                base_dir,
+            );
             let mut parts = rest.split_whitespace();
             if let Some(id_str) = parts.next()
                 && let Ok(id) = id_str.parse::<i32>()
@@ -1020,8 +1126,37 @@ pub fn parse_tail_resources_full(
                 if !inline_b64.is_empty() {
                     if let Ok(sp) = SpriteData::from_base64(&inline_b64) {
                         if (0..=255).contains(&id) {
+                            let slot_x = (id as usize % 16) * 16;
+                            let slot_y = (id as usize / 16) * 16;
+                            let tiles_w = (sp.width as usize + 15) / 16;
+                            let tiles_h = (sp.height as usize + 15) / 16;
+                            let start_tx = slot_x / 16;
+                            let start_ty = slot_y / 16;
+
+                            for ty in start_ty..start_ty + tiles_h {
+                                for tx in start_tx..start_tx + tiles_w {
+                                    if let Some(&(prev_id, prev_w, prev_h)) = occupied_slots.get(&(tx, ty)) {
+                                        if prev_id != id {
+                                            eprintln!(
+                                                "Warning: @SPRITE {} ({}x{}) overlaps with @SPRITE {} ({}x{}) at tile ({}, {})",
+                                                id, sp.width, sp.height, prev_id, prev_w, prev_h, tx, ty
+                                            );
+                                        }
+                                    } else {
+                                        occupied_slots.insert((tx, ty), (id, sp.width, sp.height));
+                                    }
+                                }
+                            }
+
                             let bank0 = banks.entry(0).or_insert_with(|| BankData::new(0));
-                            bank0.write_16x16(id as usize, &sp.rgba);
+                            bank0.write_rect_indexed(
+                                slot_x,
+                                slot_y,
+                                sp.width as usize,
+                                sp.height as usize,
+                                &sp.rgba,
+                                Some(&sp.indexed),
+                            );
                         }
                         sprites.insert(id, sp);
                     }
@@ -1030,7 +1165,15 @@ pub fn parse_tail_resources_full(
                 }
             }
         } else if let Some(rest) = line.strip_prefix("@SHEET") {
-            flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites, &mut banks, &palettes, base_dir);
+            flush_resource_block(
+                current_kind.take(),
+                &mut current_lines,
+                &mut sprites,
+                &mut banks,
+                &palettes,
+                &mut occupied_slots,
+                base_dir,
+            );
             let mut parts = rest.split_whitespace();
             if let Some(id_str) = parts.next()
                 && let Ok(start_id) = id_str.parse::<i32>()
@@ -1108,13 +1251,22 @@ pub fn parse_tail_resources_full(
                 });
             }
         } else if let Some(rest) = line.strip_prefix("@SPRITE") {
-            flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites, &mut banks, &palettes, base_dir);
+            flush_resource_block(
+                current_kind.take(),
+                &mut current_lines,
+                &mut sprites,
+                &mut banks,
+                &palettes,
+                &mut occupied_slots,
+                base_dir,
+            );
             let mut parts = rest.split_whitespace();
             if let Some(id_str) = parts.next()
                 && let Ok(id) = id_str.parse::<i32>()
             {
                 let remaining: Vec<&str> = parts.collect();
                 let mut pal_id_opt = None;
+                let mut dims_opt = None;
                 let mut emoji_token = None;
                 let mut is_dim = false;
 
@@ -1128,6 +1280,9 @@ pub fn parse_tail_resources_full(
                         if let Ok(pid) = val_str.parse::<i32>() {
                             pal_id_opt = Some(pid);
                         }
+                    } else if let Some(dims) = parse_tile_dims(tok) {
+                        dims_opt = Some(dims);
+                        is_dim = true;
                     } else if tok.chars().all(|c| c.is_ascii_digit()) {
                         is_dim = true;
                     } else if emoji_token.is_none() {
@@ -1139,25 +1294,44 @@ pub fn parse_tail_resources_full(
                     let atlas = emoji_atlas.get_or_insert_with(emoji::EmojiAtlas::new);
                     if let Some(sp) = atlas.extract_sprite(tok) {
                         if (0..=255).contains(&id) {
+                            let slot_x = (id as usize % 16) * 16;
+                            let slot_y = (id as usize / 16) * 16;
+                            occupied_slots.insert((slot_x / 16, slot_y / 16), (id, sp.width, sp.height));
                             let bank0 = banks.entry(0).or_insert_with(|| BankData::new(0));
                             bank0.write_16x16(id as usize, &sp.rgba);
                         }
                         sprites.insert(id, sp);
                     } else {
-                        current_kind = Some(ResourceBlockKind::TextSprite(id, pal_id_opt));
+                        current_kind = Some(ResourceBlockKind::TextSprite(id, pal_id_opt, dims_opt));
                     }
                 } else {
-                    current_kind = Some(ResourceBlockKind::TextSprite(id, pal_id_opt));
+                    current_kind = Some(ResourceBlockKind::TextSprite(id, pal_id_opt, dims_opt));
                 }
             }
         } else if line.starts_with('@') {
-            flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites, &mut banks, &palettes, base_dir);
+            flush_resource_block(
+                current_kind.take(),
+                &mut current_lines,
+                &mut sprites,
+                &mut banks,
+                &palettes,
+                &mut occupied_slots,
+                base_dir,
+            );
         } else if current_kind.is_some() {
             current_lines.push(line.to_string());
         }
     }
 
-    flush_resource_block(current_kind.take(), &mut current_lines, &mut sprites, &mut banks, &palettes, base_dir);
+    flush_resource_block(
+        current_kind.take(),
+        &mut current_lines,
+        &mut sprites,
+        &mut banks,
+        &palettes,
+        &mut occupied_slots,
+        base_dir,
+    );
     (sprites, banks, palettes)
 }
 
@@ -4002,6 +4176,12 @@ fn register_engine_api(
                 let x = arg_f32(args, 1, 0.0) - state.cam_x as f32;
                 let y = arg_f32(args, 2, 0.0) - state.cam_y as f32;
 
+                let has_explicit_tiles = if let Some(arg3) = args.get(3) {
+                    !matches!(arg3.value, RValue::Bool(_))
+                } else {
+                    false
+                };
+
                 let (tile_w, tile_h, flip_x, flip_y, rotate, scale) = if let Some(arg3) = args.get(3) {
                     match &arg3.value {
                         RValue::Bool(b) => {
@@ -4052,13 +4232,22 @@ fn register_engine_api(
                 let id = arg_i32(args, 0, 0);
                 let cur_bank_id = *act_spr_for_headless.borrow();
                 let banks_ref = banks_for_headless_spr.borrow();
+                let sprites_ref = sprites_for_headless.borrow();
+                let (draw_w, draw_h) = if has_explicit_tiles {
+                    ((tile_w * 16) as f32, (tile_h * 16) as f32)
+                } else if let Some(sp) = sprites_ref.get(&id) {
+                    (sp.width as f32, sp.height as f32)
+                } else {
+                    (16.0, 16.0)
+                };
+
                 if let Some(bank) = banks_ref.get(&cur_bank_id) {
                     if !state.is_default_palette() {
                         let _ = bank.apply_palette(&state.pal_map, state.palt_mask, &state.palette_rgba);
                     }
                     let _ = compute_sprite_draw_params(
-                        (tile_w * 16) as f32,
-                        (tile_h * 16) as f32,
+                        draw_w,
+                        draw_h,
                         x,
                         y,
                         flip_x,
@@ -4066,7 +4255,7 @@ fn register_engine_api(
                         rotate,
                         scale,
                     );
-                } else if let Some(sp) = sprites_for_headless.borrow().get(&id) {
+                } else if let Some(sp) = sprites_ref.get(&id) {
                     if !state.is_default_palette() {
                         let _ = sp.apply_palette(&state.pal_map, state.palt_mask, &state.palette_rgba);
                     }
@@ -4729,6 +4918,12 @@ fn register_engine_api(
             let y = arg_f32(args, 2, 0.0) - state.cam_y as f32;
 
             // 第4引数の型によるスマート判定 (数値なら w, h / 真偽値なら flip_x, flip_y)
+            let has_explicit_tiles = if let Some(arg3) = args.get(3) {
+                !matches!(arg3.value, RValue::Bool(_))
+            } else {
+                false
+            };
+
             let (tile_w, tile_h, flip_x, flip_y, rotate, scale) = if let Some(arg3) = args.get(3) {
                 match &arg3.value {
                     RValue::Bool(b) => {
@@ -4771,12 +4966,19 @@ fn register_engine_api(
             let id = arg_i32(args, 0, 0);
             let cur_bank_id = *act_spr_for_spr.borrow();
             let banks_ref = banks_for_spr.borrow();
+            let sprites_ref = sprites_for_spr.borrow();
+            let (draw_w, draw_h) = if has_explicit_tiles {
+                ((tile_w * 16) as f32, (tile_h * 16) as f32)
+            } else if let Some(sp) = sprites_ref.get(&id) {
+                (sp.width as f32, sp.height as f32)
+            } else {
+                (16.0, 16.0)
+            };
+
             if let Some(bank) = banks_ref.get(&cur_bank_id) {
                 let cols = (bank.sheet_width / 16).max(1) as i32;
                 let u = ((id % cols) * 16) as f32;
                 let v = ((id / cols) * 16) as f32;
-                let w = (tile_w * 16) as f32;
-                let h = (tile_h * 16) as f32;
                 draw_bank_rect(
                     bank,
                     &state,
@@ -4784,18 +4986,15 @@ fn register_engine_api(
                     y,
                     u,
                     v,
-                    w,
-                    h,
+                    draw_w,
+                    draw_h,
                     flip_x,
                     flip_y,
                     rotate,
                     scale,
                 );
-            } else {
-                let sprites_ref = sprites_for_spr.borrow();
-                if let Some(sprite) = sprites_ref.get(&id) {
-                    draw_sprite_transformed(sprite, &state, x, y, flip_x, flip_y, rotate, scale);
-                }
+            } else if let Some(sprite) = sprites_ref.get(&id) {
+                draw_sprite_transformed(sprite, &state, x, y, flip_x, flip_y, rotate, scale);
             }
             Ok(Rc::new(RObject::nil()))
         }),
