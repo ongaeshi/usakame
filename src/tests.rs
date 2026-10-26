@@ -3230,11 +3230,24 @@ fn test_platformer_example_script() {
     let mut runtime =
         GameRuntime::new(&tail_data, &mrb_bytes, true).expect("examples/platformer.rb should initialize");
 
-    // 120 フレーム実行してクラッシュしないことを検証
+    // 120 フレーム実行してエラーなく動作することを検証
     for _ in 0..120 {
-        runtime.call_update();
-        runtime.call_draw();
+        runtime
+            .call_update_result()
+            .expect("platformer update should succeed");
+        runtime
+            .call_draw_result()
+            .expect("platformer draw should succeed");
     }
+
+    // spawn_stars (Math::PI, Math.cos, Math.sin) を直接呼び出して動作検証
+    mrb_funcall(
+        &mut runtime.vm,
+        None,
+        "spawn_stars",
+        &[Rc::new(RObject::float(100.0)), Rc::new(RObject::float(100.0))],
+    )
+    .expect("spawn_stars should succeed with Math");
 }
 
 #[test]
@@ -3272,6 +3285,58 @@ raise "Sprite 25 palette mapping failed" unless pals[25] == 3
     let (t, m) = cli::compile_ruby_script_str_with_filename(test_script, Some("test_pals.rb")).unwrap();
     let _rt = GameRuntime::new(&t, &m, true).expect("Sprite palette mapping test should pass");
 }
+
+#[test]
+fn test_math_numeric_and_format_extensions() {
+    let script = r#"
+    # 1. Float#%
+    f_mod1 = 12.5 % 5
+    f_mod2 = (100.0 * 0.2) % 300
+    raise "Float#% failed: #{f_mod1}" unless (f_mod1 - 2.5).abs < 0.001
+    raise "Float#% failed: #{f_mod2}" unless (f_mod2 - 20.0).abs < 0.001
+
+    # 2. Float#floor, ceil, round
+    raise "Float#floor failed" unless 3.7.floor == 3
+    raise "Float#ceil failed" unless 3.2.ceil == 4
+    raise "Float#round failed" unless 3.5.round == 4
+
+    # 3. Integer#% with Float
+    raise "Integer#% with Float failed" unless (10 % 2.5).abs < 0.001
+
+    # 4. Math::PI and Math trigonometric functions
+    raise "Math::PI failed" unless (Math::PI - 3.14159265).abs < 0.001
+    raise "Math.cos failed" unless (Math.cos(0.0) - 1.0).abs < 0.001
+    raise "Math.sin failed" unless Math.sin(0.0).abs < 0.001
+    raise "Math.sqrt failed" unless (Math.sqrt(16.0) - 4.0).abs < 0.001
+    raise "top-level cos failed" unless (cos(0.0) - 1.0).abs < 0.001
+
+    # 5. format / sprintf / String#%
+    s1 = format("%06d", 500)
+    raise "format %06d failed: #{s1}" unless s1 == "000500"
+
+    s2 = format("*%02d", 7)
+    raise "format *%02d failed: #{s2}" unless s2 == "*07"
+
+    s3 = sprintf("SCORE: %d, NAME: %s", 100, "rabbit")
+    raise "sprintf failed: #{s3}" unless s3 == "SCORE: 100, NAME: rabbit"
+
+    s4 = "%04d" % 42
+    raise "String#% failed: #{s4}" unless s4 == "0042"
+
+    # 6. rand(Range), rand(Integer), rand()
+    r1 = rand(15..35)
+    raise "rand(15..35) out of range: #{r1}" unless r1 >= 15 && r1 <= 35
+    r2 = rand(10)
+    raise "rand(10) out of range: #{r2}" unless r2 >= 0 && r2 < 10
+
+    $test_ok = true
+    "#;
+    let (t, m) = cli::compile_ruby_script_str_with_filename(script, Some("test_math.rb")).unwrap();
+    let rt = GameRuntime::new(&t, &m, true).expect("Runtime init should succeed");
+    let ok = rt.vm.globals.get("$test_ok").cloned();
+    assert_eq!(ok.map(|o| o.as_ref().clone()), Some(RObject::boolean(true)));
+}
+
 
 
 

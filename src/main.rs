@@ -16,7 +16,9 @@ use std::rc::Rc;
 
 use macroquad::prelude::*;
 use mrubyedge::rite;
-use mrubyedge::yamrb::helpers::{mrb_define_cmethod, mrb_funcall};
+use mrubyedge::yamrb::helpers::{
+    mrb_define_cmethod, mrb_define_module_cmethod, mrb_define_singleton_cmethod, mrb_funcall,
+};
 use mrubyedge::yamrb::value::{RObject, RValue};
 use mrubyedge::yamrb::vm::VM;
 
@@ -2849,6 +2851,735 @@ pub fn check_resource_read_only(path_str: &str) -> bool {
     false
 }
 
+fn get_math_f64_arg(args: &[Rc<RObject>], idx: usize, func_name: &str) -> Result<f64, mrubyedge::Error> {
+    if idx >= args.len() {
+        return Err(mrubyedge::Error::ArgumentError(format!(
+            "wrong number of arguments to {} (given {}, expected {})",
+            func_name,
+            args.len(),
+            idx + 1
+        )));
+    }
+    match &args[idx].value {
+        RValue::Float(f) => Ok(*f),
+        RValue::Integer(i) => Ok(*i as f64),
+        _ => Err(mrubyedge::Error::TypeMismatch),
+    }
+}
+
+/// Float / Integer の数値組み込みクラス拡張 (% / modulo, floor, ceil, round)
+fn register_numeric_extensions(vm: &mut VM) {
+    if let Some(float_class) = vm.builtin_class_table.get("Float").cloned() {
+        // Float#%
+        mrb_define_cmethod(
+            vm,
+            float_class.clone(),
+            "%",
+            Box::new(|vm, args| {
+                if args.is_empty() {
+                    return Err(mrubyedge::Error::ArgumentError(
+                        "wrong number of arguments (given 0, expected 1)".to_string(),
+                    ));
+                }
+                let lhs = match &vm.getself()?.value {
+                    RValue::Float(f) => *f,
+                    RValue::Integer(i) => *i as f64,
+                    _ => return Err(mrubyedge::Error::TypeMismatch),
+                };
+                let rhs = match &args[0].value {
+                    RValue::Float(f) => *f,
+                    RValue::Integer(i) => *i as f64,
+                    _ => return Err(mrubyedge::Error::TypeMismatch),
+                };
+                if rhs == 0.0 {
+                    return Err(mrubyedge::Error::ZeroDivisionError);
+                }
+                let res = lhs - rhs * (lhs / rhs).floor();
+                Ok(Rc::new(RObject::float(res)))
+            }),
+        );
+
+        // Float#modulo
+        mrb_define_cmethod(
+            vm,
+            float_class.clone(),
+            "modulo",
+            Box::new(|vm, args| {
+                if args.is_empty() {
+                    return Err(mrubyedge::Error::ArgumentError(
+                        "wrong number of arguments (given 0, expected 1)".to_string(),
+                    ));
+                }
+                let lhs = match &vm.getself()?.value {
+                    RValue::Float(f) => *f,
+                    RValue::Integer(i) => *i as f64,
+                    _ => return Err(mrubyedge::Error::TypeMismatch),
+                };
+                let rhs = match &args[0].value {
+                    RValue::Float(f) => *f,
+                    RValue::Integer(i) => *i as f64,
+                    _ => return Err(mrubyedge::Error::TypeMismatch),
+                };
+                if rhs == 0.0 {
+                    return Err(mrubyedge::Error::ZeroDivisionError);
+                }
+                let res = lhs - rhs * (lhs / rhs).floor();
+                Ok(Rc::new(RObject::float(res)))
+            }),
+        );
+
+        // Float#floor
+        mrb_define_cmethod(
+            vm,
+            float_class.clone(),
+            "floor",
+            Box::new(|vm, _args| {
+                let lhs = match &vm.getself()?.value {
+                    RValue::Float(f) => *f,
+                    RValue::Integer(i) => *i as f64,
+                    _ => return Err(mrubyedge::Error::TypeMismatch),
+                };
+                Ok(Rc::new(RObject::integer(lhs.floor() as i64)))
+            }),
+        );
+
+        // Float#ceil
+        mrb_define_cmethod(
+            vm,
+            float_class.clone(),
+            "ceil",
+            Box::new(|vm, _args| {
+                let lhs = match &vm.getself()?.value {
+                    RValue::Float(f) => *f,
+                    RValue::Integer(i) => *i as f64,
+                    _ => return Err(mrubyedge::Error::TypeMismatch),
+                };
+                Ok(Rc::new(RObject::integer(lhs.ceil() as i64)))
+            }),
+        );
+
+        // Float#round
+        mrb_define_cmethod(
+            vm,
+            float_class,
+            "round",
+            Box::new(|vm, _args| {
+                let lhs = match &vm.getself()?.value {
+                    RValue::Float(f) => *f,
+                    RValue::Integer(i) => *i as f64,
+                    _ => return Err(mrubyedge::Error::TypeMismatch),
+                };
+                Ok(Rc::new(RObject::integer(lhs.round() as i64)))
+            }),
+        );
+    }
+
+    if let Some(int_class) = vm.builtin_class_table.get("Integer").cloned() {
+        // Integer#% (with Float rhs support and proper modulo)
+        mrb_define_cmethod(
+            vm,
+            int_class.clone(),
+            "%",
+            Box::new(|vm, args| {
+                if args.is_empty() {
+                    return Err(mrubyedge::Error::ArgumentError(
+                        "wrong number of arguments (given 0, expected 1)".to_string(),
+                    ));
+                }
+                let lhs: i64 = vm.getself()?.as_ref().try_into()?;
+                match &args[0].value {
+                    RValue::Integer(rhs) => {
+                        if *rhs == 0 {
+                            return Err(mrubyedge::Error::ZeroDivisionError);
+                        }
+                        let rem = lhs % *rhs;
+                        let res = if (rem > 0 && *rhs < 0) || (rem < 0 && *rhs > 0) {
+                            rem + *rhs
+                        } else {
+                            rem
+                        };
+                        Ok(Rc::new(RObject::integer(res)))
+                    }
+                    RValue::Float(rhs) => {
+                        if *rhs == 0.0 {
+                            return Err(mrubyedge::Error::ZeroDivisionError);
+                        }
+                        let lhs_f = lhs as f64;
+                        let res = lhs_f - *rhs * (lhs_f / *rhs).floor();
+                        Ok(Rc::new(RObject::float(res)))
+                    }
+                    _ => Err(mrubyedge::Error::TypeMismatch),
+                }
+            }),
+        );
+
+        // Integer#modulo
+        mrb_define_cmethod(
+            vm,
+            int_class.clone(),
+            "modulo",
+            Box::new(|vm, args| {
+                if args.is_empty() {
+                    return Err(mrubyedge::Error::ArgumentError(
+                        "wrong number of arguments (given 0, expected 1)".to_string(),
+                    ));
+                }
+                let lhs: i64 = vm.getself()?.as_ref().try_into()?;
+                match &args[0].value {
+                    RValue::Integer(rhs) => {
+                        if *rhs == 0 {
+                            return Err(mrubyedge::Error::ZeroDivisionError);
+                        }
+                        let rem = lhs % *rhs;
+                        let res = if (rem > 0 && *rhs < 0) || (rem < 0 && *rhs > 0) {
+                            rem + *rhs
+                        } else {
+                            rem
+                        };
+                        Ok(Rc::new(RObject::integer(res)))
+                    }
+                    RValue::Float(rhs) => {
+                        if *rhs == 0.0 {
+                            return Err(mrubyedge::Error::ZeroDivisionError);
+                        }
+                        let lhs_f = lhs as f64;
+                        let res = lhs_f - *rhs * (lhs_f / *rhs).floor();
+                        Ok(Rc::new(RObject::float(res)))
+                    }
+                    _ => Err(mrubyedge::Error::TypeMismatch),
+                }
+            }),
+        );
+
+        // Integer#floor / ceil / round
+        mrb_define_cmethod(
+            vm,
+            int_class.clone(),
+            "floor",
+            Box::new(|vm, _args| vm.getself()),
+        );
+        mrb_define_cmethod(
+            vm,
+            int_class.clone(),
+            "ceil",
+            Box::new(|vm, _args| vm.getself()),
+        );
+        mrb_define_cmethod(
+            vm,
+            int_class,
+            "round",
+            Box::new(|vm, _args| vm.getself()),
+        );
+    }
+}
+
+/// Math モジュールおよび数学関数（Math.sin, Math::PI, top-level sin 等）を登録する
+fn register_math_api(vm: &mut VM) {
+    let math_mod = vm.define_module("Math", None);
+    let math_obj = vm.consts.get("Math").unwrap().clone();
+    let obj_class = vm.object_class.clone();
+
+    // 定数: Math::PI, Math::E
+    let pi_val = Rc::new(RObject::float(std::f64::consts::PI));
+    math_mod.consts.borrow_mut().insert("PI".to_string(), pi_val.clone());
+
+    let e_val = Rc::new(RObject::float(std::f64::consts::E));
+    math_mod.consts.borrow_mut().insert("E".to_string(), e_val.clone());
+
+    macro_rules! def_math {
+        ($name:literal, $f:expr) => {
+            mrb_define_singleton_cmethod(vm, math_obj.clone(), $name, Box::new($f));
+            mrb_define_module_cmethod(vm, math_mod.clone(), $name, Box::new($f));
+            mrb_define_cmethod(vm, obj_class.clone(), $name, Box::new($f));
+        };
+    }
+
+    def_math!("sin", |_vm, args| {
+        let x = get_math_f64_arg(args, 0, "sin")?;
+        Ok(Rc::new(RObject::float(x.sin())))
+    });
+
+    def_math!("cos", |_vm, args| {
+        let x = get_math_f64_arg(args, 0, "cos")?;
+        Ok(Rc::new(RObject::float(x.cos())))
+    });
+
+    def_math!("tan", |_vm, args| {
+        let x = get_math_f64_arg(args, 0, "tan")?;
+        Ok(Rc::new(RObject::float(x.tan())))
+    });
+
+    def_math!("asin", |_vm, args| {
+        let x = get_math_f64_arg(args, 0, "asin")?;
+        if !(-1.0..=1.0).contains(&x) {
+            return Err(mrubyedge::Error::RangeError(
+                "Numerical argument is out of domain - asin".to_string(),
+            ));
+        }
+        Ok(Rc::new(RObject::float(x.asin())))
+    });
+
+    def_math!("acos", |_vm, args| {
+        let x = get_math_f64_arg(args, 0, "acos")?;
+        if !(-1.0..=1.0).contains(&x) {
+            return Err(mrubyedge::Error::RangeError(
+                "Numerical argument is out of domain - acos".to_string(),
+            ));
+        }
+        Ok(Rc::new(RObject::float(x.acos())))
+    });
+
+    def_math!("atan", |_vm, args| {
+        let x = get_math_f64_arg(args, 0, "atan")?;
+        Ok(Rc::new(RObject::float(x.atan())))
+    });
+
+    def_math!("atan2", |_vm, args| {
+        let y = get_math_f64_arg(args, 0, "atan2")?;
+        let x = get_math_f64_arg(args, 1, "atan2")?;
+        Ok(Rc::new(RObject::float(y.atan2(x))))
+    });
+
+    def_math!("sqrt", |_vm, args| {
+        let x = get_math_f64_arg(args, 0, "sqrt")?;
+        if x < 0.0 {
+            return Err(mrubyedge::Error::RangeError(
+                "Numerical argument is out of domain - sqrt".to_string(),
+            ));
+        }
+        Ok(Rc::new(RObject::float(x.sqrt())))
+    });
+
+    def_math!("cbrt", |_vm, args| {
+        let x = get_math_f64_arg(args, 0, "cbrt")?;
+        Ok(Rc::new(RObject::float(x.cbrt())))
+    });
+
+    def_math!("exp", |_vm, args| {
+        let x = get_math_f64_arg(args, 0, "exp")?;
+        Ok(Rc::new(RObject::float(x.exp())))
+    });
+
+    def_math!("log", |_vm, args| {
+        let x = get_math_f64_arg(args, 0, "log")?;
+        if x <= 0.0 {
+            return Err(mrubyedge::Error::RangeError(
+                "Numerical argument is out of domain - log".to_string(),
+            ));
+        }
+        if args.len() >= 2 {
+            let base = get_math_f64_arg(args, 1, "log")?;
+            if base <= 0.0 || (base - 1.0).abs() < f64::EPSILON {
+                return Err(mrubyedge::Error::RangeError(
+                    "Numerical argument is out of domain - log".to_string(),
+                ));
+            }
+            Ok(Rc::new(RObject::float(x.log(base))))
+        } else {
+            Ok(Rc::new(RObject::float(x.ln())))
+        }
+    });
+
+    def_math!("log2", |_vm, args| {
+        let x = get_math_f64_arg(args, 0, "log2")?;
+        if x <= 0.0 {
+            return Err(mrubyedge::Error::RangeError(
+                "Numerical argument is out of domain - log2".to_string(),
+            ));
+        }
+        Ok(Rc::new(RObject::float(x.log2())))
+    });
+
+    def_math!("log10", |_vm, args| {
+        let x = get_math_f64_arg(args, 0, "log10")?;
+        if x <= 0.0 {
+            return Err(mrubyedge::Error::RangeError(
+                "Numerical argument is out of domain - log10".to_string(),
+            ));
+        }
+        Ok(Rc::new(RObject::float(x.log10())))
+    });
+
+    def_math!("hypot", |_vm, args| {
+        let x = get_math_f64_arg(args, 0, "hypot")?;
+        let y = get_math_f64_arg(args, 1, "hypot")?;
+        Ok(Rc::new(RObject::float(x.hypot(y))))
+    });
+}
+
+fn mrb_sprintf(_vm: &mut VM, args: &[Rc<RObject>]) -> Result<Rc<RObject>, mrubyedge::Error> {
+    if args.is_empty() {
+        return Err(mrubyedge::Error::ArgumentError(
+            "too few arguments for sprintf/format".to_string(),
+        ));
+    }
+    let fmt_str: String = match &args[0].value {
+        RValue::String(bytes, _) => String::from_utf8_lossy(&bytes.borrow()).to_string(),
+        _ => args[0].as_ref().try_into().map_err(|_| mrubyedge::Error::TypeMismatch)?,
+    };
+
+    let mut out = String::new();
+    let mut chars = fmt_str.chars().peekable();
+    let mut arg_idx = 1;
+
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            out.push(ch);
+            continue;
+        }
+
+        if chars.peek() == Some(&'%') {
+            chars.next();
+            out.push('%');
+            continue;
+        }
+
+        // Flags
+        let mut zero_pad = false;
+        let mut left_align = false;
+        let mut plus_sign = false;
+        let mut space_sign = false;
+
+        while let Some(&c) = chars.peek() {
+            match c {
+                '0' => {
+                    zero_pad = true;
+                    chars.next();
+                }
+                '-' => {
+                    left_align = true;
+                    chars.next();
+                }
+                '+' => {
+                    plus_sign = true;
+                    chars.next();
+                }
+                ' ' => {
+                    space_sign = true;
+                    chars.next();
+                }
+                _ => break,
+            }
+        }
+        if left_align {
+            zero_pad = false;
+        }
+
+        // Width
+        let mut width: Option<usize> = None;
+        if let Some(&c) = chars.peek() {
+            if c.is_ascii_digit() {
+                let mut w = 0;
+                while let Some(&c) = chars.peek() {
+                    if c.is_ascii_digit() {
+                        w = w * 10 + (c as usize - '0' as usize);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                width = Some(w);
+            }
+        }
+
+        // Precision
+        let mut precision: Option<usize> = None;
+        if chars.peek() == Some(&'.') {
+            chars.next();
+            let mut p = 0;
+            while let Some(&c) = chars.peek() {
+                if c.is_ascii_digit() {
+                    p = p * 10 + (c as usize - '0' as usize);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            precision = Some(p);
+        }
+
+        let spec = match chars.next() {
+            Some(c) => c,
+            None => {
+                out.push('%');
+                break;
+            }
+        };
+
+        let arg = args.get(arg_idx);
+        arg_idx += 1;
+
+        match spec {
+            'd' | 'i' | 'u' => {
+                let num: i64 = match arg {
+                    Some(a) => match &a.value {
+                        RValue::Integer(i) => *i,
+                        RValue::Float(f) => *f as i64,
+                        _ => i64::try_from(a.as_ref()).unwrap_or(0),
+                    },
+                    None => 0,
+                };
+                let is_neg = num < 0;
+                let abs_num = num.unsigned_abs();
+                let num_str = abs_num.to_string();
+                let sign = if is_neg {
+                    "-"
+                } else if plus_sign {
+                    "+"
+                } else if space_sign {
+                    " "
+                } else {
+                    ""
+                };
+
+                let w = width.unwrap_or(0);
+                if zero_pad {
+                    let total_len = sign.len() + num_str.len();
+                    out.push_str(sign);
+                    if total_len < w {
+                        for _ in 0..(w - total_len) {
+                            out.push('0');
+                        }
+                    }
+                    out.push_str(&num_str);
+                } else {
+                    let full_val = format!("{}{}", sign, num_str);
+                    if full_val.len() < w {
+                        let pad = w - full_val.len();
+                        if left_align {
+                            out.push_str(&full_val);
+                            for _ in 0..pad {
+                                out.push(' ');
+                            }
+                        } else {
+                            for _ in 0..pad {
+                                out.push(' ');
+                            }
+                            out.push_str(&full_val);
+                        }
+                    } else {
+                        out.push_str(&full_val);
+                    }
+                }
+            }
+            'x' | 'X' => {
+                let num: i64 = match arg {
+                    Some(a) => match &a.value {
+                        RValue::Integer(i) => *i,
+                        RValue::Float(f) => *f as i64,
+                        _ => i64::try_from(a.as_ref()).unwrap_or(0),
+                    },
+                    None => 0,
+                };
+                let num_str = if spec == 'x' {
+                    format!("{:x}", num as u64)
+                } else {
+                    format!("{:X}", num as u64)
+                };
+                let w = width.unwrap_or(0);
+                if num_str.len() < w {
+                    let pad = w - num_str.len();
+                    let pad_char = if zero_pad { '0' } else { ' ' };
+                    if left_align {
+                        out.push_str(&num_str);
+                        for _ in 0..pad {
+                            out.push(' ');
+                        }
+                    } else {
+                        for _ in 0..pad {
+                            out.push(pad_char);
+                        }
+                        out.push_str(&num_str);
+                    }
+                } else {
+                    out.push_str(&num_str);
+                }
+            }
+            'f' => {
+                let num: f64 = match arg {
+                    Some(a) => match &a.value {
+                        RValue::Float(f) => *f,
+                        RValue::Integer(i) => *i as f64,
+                        _ => f64::try_from(a.as_ref()).unwrap_or(0.0),
+                    },
+                    None => 0.0,
+                };
+                let prec = precision.unwrap_or(6);
+                let num_str = format!("{:.*}", prec, num);
+                let w = width.unwrap_or(0);
+                if num_str.len() < w {
+                    let pad = w - num_str.len();
+                    let pad_char = if zero_pad { '0' } else { ' ' };
+                    if left_align {
+                        out.push_str(&num_str);
+                        for _ in 0..pad {
+                            out.push(' ');
+                        }
+                    } else {
+                        for _ in 0..pad {
+                            out.push(pad_char);
+                        }
+                        out.push_str(&num_str);
+                    }
+                } else {
+                    out.push_str(&num_str);
+                }
+            }
+            's' => {
+                let s = match arg {
+                    Some(a) => match &a.value {
+                        RValue::String(bytes, _) => {
+                            String::from_utf8_lossy(&bytes.borrow()).to_string()
+                        }
+                        RValue::Symbol(sym) => sym.name.clone(),
+                        RValue::Integer(i) => i.to_string(),
+                        RValue::Float(f) => f.to_string(),
+                        RValue::Bool(b) => b.to_string(),
+                        RValue::Nil => "".to_string(),
+                        _ => a.as_ref().try_into().unwrap_or_default(),
+                    },
+                    None => "".to_string(),
+                };
+                let w = width.unwrap_or(0);
+                if s.len() < w {
+                    let pad = w - s.len();
+                    if left_align {
+                        out.push_str(&s);
+                        for _ in 0..pad {
+                            out.push(' ');
+                        }
+                    } else {
+                        for _ in 0..pad {
+                            out.push(' ');
+                        }
+                        out.push_str(&s);
+                    }
+                } else {
+                    out.push_str(&s);
+                }
+            }
+            _ => {
+                out.push('%');
+                out.push(spec);
+            }
+        }
+    }
+
+    Ok(Rc::new(RObject::string(out)))
+}
+
+fn register_string_format_extensions(vm: &mut VM) {
+    let obj_class = vm.object_class.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "sprintf",
+        Box::new(mrb_sprintf),
+    );
+    mrb_define_cmethod(
+        vm,
+        obj_class,
+        "format",
+        Box::new(mrb_sprintf),
+    );
+
+    if let Some(str_class) = vm.builtin_class_table.get("String").cloned() {
+        mrb_define_cmethod(
+            vm,
+            str_class,
+            "%",
+            Box::new(|vm, args| {
+                if args.is_empty() {
+                    return Err(mrubyedge::Error::ArgumentError(
+                        "wrong number of arguments (given 0, expected 1)".to_string(),
+                    ));
+                }
+                let fmt_obj = vm.getself()?;
+                let mut sprintf_args = vec![fmt_obj];
+                if let RValue::Array(ary) = &args[0].value {
+                    sprintf_args.extend(ary.borrow().iter().cloned());
+                } else {
+                    sprintf_args.push(args[0].clone());
+                }
+                mrb_sprintf(vm, &sprintf_args)
+            }),
+        );
+    }
+}
+
+/// rand(max), rand(Range), rand() の拡張（Range対応）
+fn mrb_engine_rand(_vm: &mut VM, args: &[Rc<RObject>]) -> Result<Rc<RObject>, mrubyedge::Error> {
+    if args.is_empty() {
+        let val: f32 = ::macroquad::rand::gen_range(0.0, 1.0);
+        return Ok(Rc::new(RObject::float(val as f64)));
+    }
+    match &args[0].value {
+        RValue::Integer(max) => {
+            if *max <= 0 {
+                return Err(mrubyedge::Error::ArgumentError("max must be positive".to_string()));
+            }
+            let val = ::macroquad::rand::gen_range(0, *max as i32);
+            Ok(Rc::new(RObject::integer(val as i64)))
+        }
+        RValue::Float(max) => {
+            if *max <= 0.0 {
+                return Err(mrubyedge::Error::ArgumentError("max must be positive".to_string()));
+            }
+            let val = ::macroquad::rand::gen_range(0.0, *max as f32);
+            Ok(Rc::new(RObject::float(val as f64)))
+        }
+        RValue::Range(start, end, exclusive) => {
+            match (&start.value, &end.value) {
+                (RValue::Integer(beg), RValue::Integer(last)) => {
+                    let end_exclusive = if *exclusive { *last } else { *last + 1 };
+                    if end_exclusive <= *beg {
+                        return Err(mrubyedge::Error::ArgumentError("invalid range".to_string()));
+                    }
+                    let val = ::macroquad::rand::gen_range(*beg as i32, end_exclusive as i32);
+                    Ok(Rc::new(RObject::integer(val as i64)))
+                }
+                _ => {
+                    let beg_f = match &start.value {
+                        RValue::Float(f) => *f,
+                        RValue::Integer(i) => *i as f64,
+                        _ => return Err(mrubyedge::Error::ArgumentError("invalid range".to_string())),
+                    };
+                    let last_f = match &end.value {
+                        RValue::Float(f) => *f,
+                        RValue::Integer(i) => *i as f64,
+                        _ => return Err(mrubyedge::Error::ArgumentError("invalid range".to_string())),
+                    };
+                    if last_f <= beg_f {
+                        return Err(mrubyedge::Error::ArgumentError("invalid range".to_string()));
+                    }
+                    let val = ::macroquad::rand::gen_range(beg_f as f32, last_f as f32);
+                    Ok(Rc::new(RObject::float(val as f64)))
+                }
+            }
+        }
+        _ => Err(mrubyedge::Error::ArgumentError("argument must be a number or range".to_string())),
+    }
+}
+
+fn register_rand_extension(vm: &mut VM) {
+    let obj_class = vm.object_class.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class,
+        "rand",
+        Box::new(mrb_engine_rand),
+    );
+
+    if let Some(random_obj) = vm.consts.get("Random").cloned() {
+        mrb_define_singleton_cmethod(
+            vm,
+            random_obj,
+            "rand",
+            Box::new(mrb_engine_rand),
+        );
+    }
+}
+
 fn register_engine_api(
     vm: &mut VM,
     sprites: Rc<RefCell<HashMap<i32, SpriteData>>>,
@@ -2866,6 +3597,10 @@ fn register_engine_api(
     restart_requested: Rc<RefCell<bool>>,
     headless: bool,
 ) {
+    register_numeric_extensions(vm);
+    register_math_api(vm);
+    register_string_format_extensions(vm);
+    register_rand_extension(vm);
     let obj_class = vm.object_class.clone();
 
     // restart / reset: ゲームの先頭からのリスタートを要求する

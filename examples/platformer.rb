@@ -517,8 +517,8 @@ def draw
       spr(boss_spr, e[:x], e[:y], e[:vx] > 0)
       # ボスのHPバー
       hp_w = (e[:hp].to_f / e[:max_hp] * 32).to_i
-      rectfill(e[:x], e[:y] - 8, 32, 4, 0)
-      rectfill(e[:x], e[:y] - 8, hp_w, 4, 8)
+      rectfill(e[:x], e[:y] - 8.0, 32, 4, 0)
+      rectfill(e[:x], e[:y] - 8.0, hp_w, 4, 8)
     elsif e[:shell]
       # 甲羅スプライト (blt でパレットスワップ描画！)
       blt(e[:x], e[:y], 0, 224, 0, 16, 16, 0, 1.0, e[:pal])
