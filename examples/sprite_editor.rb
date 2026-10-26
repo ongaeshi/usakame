@@ -138,8 +138,7 @@ def perform_undo
   return if $is_read_only
   return if $undo_stack.empty?
   sel_x, sel_y, saved_grid = $undo_stack.pop
-  $sel_x = sel_x
-  $sel_y = sel_y
+  set_selection(sel_x, sel_y)
   set_canvas_pixels(sel_x, sel_y, saved_grid)
   sfx(:click)
   notify("UNDO")
@@ -152,10 +151,36 @@ $is_read_only = is_resource_read_only(load_source) || is_resource_read_only($sav
 # パレット管理
 $current_pal = 0
 $available_palettes = [0]
-pals = load_resource_palettes(load_source)
-if pals && !pals.empty?
-  $available_palettes = pals
-  $current_pal = pals[0] || 0
+$sprite_palettes = {}
+
+def sync_sprite_default_palette
+  cur_spr_id = ($sel_x / 16) + ($sel_y / 16) * 16
+  def_pal = $sprite_palettes ? $sprite_palettes[cur_spr_id] : nil
+  if def_pal
+    if $current_pal != def_pal
+      $current_pal = def_pal
+      notify("PALETTE: P#{$current_pal} (AUTO)")
+    end
+  end
+end
+
+def reload_palettes(source)
+  pals = load_resource_palettes(source)
+  if pals && !pals.empty?
+    $available_palettes = pals
+    $current_pal = pals[0] unless $available_palettes.include?($current_pal)
+  end
+  $sprite_palettes = load_resource_sprite_palettes(source) || {}
+  sync_sprite_default_palette
+end
+
+def set_selection(gx, gy)
+  if $sel_x != gx || $sel_y != gy
+    $sel_x = gx
+    $sel_y = gy
+    sfx(:cursor)
+    sync_sprite_default_palette
+  end
 end
 
 def cycle_palette(dir)
@@ -170,6 +195,8 @@ def cycle_palette(dir)
   sfx(:click)
   notify("PALETTE: #{$current_pal}")
 end
+
+reload_palettes(load_source)
 
 if $is_read_only
   # テクスチャ（PNG参照）から読み込んだ場合：リードオンリーモードなので減色処理は不要！
@@ -242,11 +269,7 @@ def switch_bank(new_bank)
     notify("SWITCHED TO BANK #{$current_bank}")
   end
 
-  pals = load_resource_palettes(load_source)
-  if pals && !pals.empty?
-    $available_palettes = pals
-    $current_pal = pals[0] unless $available_palettes.include?($current_pal)
-  end
+  reload_palettes(load_source)
 end
 
 # ------------------------------------------------------------------------------
@@ -433,10 +456,13 @@ def update
   # 矢印キーで 32x32 シフト
   if btn(:ctrl)
     # Ctrl+矢印で選択エリア移動 (16px刻み)
-    $sel_x = [$sel_x - 16, 0].max if btnp(0)
-    $sel_x = [$sel_x + 16, 224].min if btnp(1)
-    $sel_y = [$sel_y - 16, 0].max if btnp(2)
-    $sel_y = [$sel_y + 16, 224].min if btnp(3)
+    nx = $sel_x
+    ny = $sel_y
+    nx = [nx - 16, 0].max if btnp(0)
+    nx = [nx + 16, 224].min if btnp(1)
+    ny = [ny - 16, 0].max if btnp(2)
+    ny = [ny + 16, 224].min if btnp(3)
+    set_selection(nx, ny)
   else
     shift_canvas(-1, 0) if btnp(0) # left
     shift_canvas(1, 0)  if btnp(1) # right
@@ -472,11 +498,7 @@ def update
     gy = ((my - $minimap_y) / 8) * 16
     gx = [[gx, 0].max, 224].min
     gy = [[gy, 0].max, 224].min
-    if $sel_x != gx || $sel_y != gy
-      $sel_x = gx
-      $sel_y = gy
-      sfx(:cursor)
-    end
+    set_selection(gx, gy)
   end
 
   # --- ボタンクリック判定 (mouse_l / mouse_r) ---

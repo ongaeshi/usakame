@@ -3499,6 +3499,63 @@ fn register_engine_api(
         }),
     );
 
+    // load_resource_sprite_palettes(path): ターゲットファイル内の全スプライトのパレット割り当て { sprite_id => palette_id } を返す
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "load_resource_sprite_palettes",
+        Box::new(move |_vm, args| {
+            let path_str = args
+                .first()
+                .and_then(|v| String::try_from(v.as_ref()).ok())
+                .unwrap_or_default();
+            let p = std::path::Path::new(&path_str);
+            let base_dir = p.parent();
+            let tail = if p.extension().and_then(|s| s.to_str()) == Some("rb") {
+                cli::compile_ruby_script_file(p)
+                    .map(|(_, t, _)| t)
+                    .unwrap_or_default()
+            } else if p.is_file() {
+                let content = std::fs::read_to_string(p).unwrap_or_default();
+                if p.extension().and_then(|s| s.to_str()) == Some("map") {
+                    let spr_path = p.with_extension("spr");
+                    if spr_path.is_file() {
+                        let spr_content = std::fs::read_to_string(&spr_path).unwrap_or_default();
+                        format!("{}\n{}", content, spr_content)
+                    } else {
+                        content
+                    }
+                } else {
+                    content
+                }
+            } else {
+                String::new()
+            };
+
+            let (sprites, _, _) = parse_tail_resources_full(&tail, base_dir);
+            let mut hash = mrubyedge::yamrb::value::RHash::default();
+            for (id, sp) in &sprites {
+                let slot_x = *id as usize % 16;
+                let slot_y = *id as usize / 16;
+                let tiles_w = (sp.width as usize + 15) / 16;
+                let tiles_h = (sp.height as usize + 15) / 16;
+                for ty in slot_y..slot_y + tiles_h {
+                    for tx in slot_x..slot_x + tiles_w {
+                        if tx < 16 && ty < 16 {
+                            let tile_id = (ty * 16 + tx) as i64;
+                            let key = Rc::new(RObject::integer(tile_id));
+                            let val = Rc::new(RObject::integer(sp.palette_id as i64));
+                            if let Ok(hkey) = key.as_hash_key() {
+                                hash.insert(hkey, (key, val));
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(Rc::new(RObject::hash(hash)))
+        }),
+    );
+
     // load_bank(bank_id, path_or_source, src_bank_id = nil):
     // 外部ファイル（PNG画像、.spr、.rb、.map等の定義）から減色処理を行わずにフルカラーRGBAのまま直接バンクへロードする。
     let banks_for_load_bank = banks.clone();

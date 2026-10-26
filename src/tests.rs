@@ -3258,6 +3258,19 @@ fn test_sprite_editor_palette_switching() {
     assert!(runtime.palettes.borrow().contains_key(&1));
     assert!(runtime.palettes.borrow().contains_key(&2));
     assert!(runtime.palettes.borrow().contains_key(&3));
+
+    // load_resource_sprite_palettes と自動切り替え動作の検証スクリプト
+    let test_script = r#"
+pals = load_resource_sprite_palettes("examples/platformer.rb")
+# Sprite 8 (32x32) は pal:3
+# 占有タイル 8, 9, 24, 25 が全て pal:3 にマッピングされていること
+raise "Sprite 8 palette mapping failed" unless pals[8] == 3
+raise "Sprite 9 palette mapping failed" unless pals[9] == 3
+raise "Sprite 24 palette mapping failed" unless pals[24] == 3
+raise "Sprite 25 palette mapping failed" unless pals[25] == 3
+"#;
+    let (t, m) = cli::compile_ruby_script_str_with_filename(test_script, Some("test_pals.rb")).unwrap();
+    let _rt = GameRuntime::new(&t, &m, true).expect("Sprite palette mapping test should pass");
 }
 
 
