@@ -3785,12 +3785,13 @@ fn register_engine_api(
         );
         let banks_for_headless_blt = banks.clone();
         let state_for_headless_blt = draw_state.clone();
+        let palettes_for_headless_blt = palettes.clone();
         mrb_define_cmethod(
             vm,
             obj_class.clone(),
             "blt",
             Box::new(move |_vm, args| {
-                let state = *state_for_headless_blt.borrow();
+                let mut state = *state_for_headless_blt.borrow();
                 if state.is_clip_empty() {
                     return Ok(Rc::new(RObject::nil()));
                 }
@@ -3803,6 +3804,19 @@ fn register_engine_api(
                 let raw_h = arg_f32(args, 6, 16.0);
                 let rotate = arg_f32(args, 7, 0.0);
                 let scale = arg_f32(args, 8, 1.0);
+                let pal_arg = args.get(9);
+
+                if let Some(arg) = pal_arg && !arg.is_nil() {
+                    let pid = match &arg.value {
+                        RValue::Integer(v) => *v as i32,
+                        RValue::Float(v) => *v as i32,
+                        _ => 0,
+                    };
+                    if let Some(target_pal) = palettes_for_headless_blt.borrow().get(&pid) {
+                        state.palette_rgba = *target_pal;
+                    }
+                }
+
                 if raw_w == 0.0 || raw_h == 0.0 || scale <= 0.0 {
                     return Ok(Rc::new(RObject::nil()));
                 }
@@ -4469,15 +4483,16 @@ fn register_engine_api(
         }),
     );
 
-    // blt(x, y, bank, u, v, w, h, rotate = 0, scale = 1.0): ピクセル矩形転送
+    // blt(x, y, bank, u, v, w, h, rotate = 0, scale = 1.0, pal = nil): ピクセル矩形転送
     let banks_for_blt = banks.clone();
     let state_for_blt = draw_state.clone();
+    let palettes_for_blt = palettes.clone();
     mrb_define_cmethod(
         vm,
         obj_class.clone(),
         "blt",
         Box::new(move |_vm, args| {
-            let state = *state_for_blt.borrow();
+            let mut state = *state_for_blt.borrow();
             if state.is_clip_empty() {
                 return Ok(Rc::new(RObject::nil()));
             }
@@ -4490,6 +4505,18 @@ fn register_engine_api(
             let raw_h = arg_f32(args, 6, 16.0);
             let rotate = arg_f32(args, 7, 0.0);
             let scale = arg_f32(args, 8, 1.0);
+            let pal_arg = args.get(9);
+
+            if let Some(arg) = pal_arg && !arg.is_nil() {
+                let pid = match &arg.value {
+                    RValue::Integer(v) => *v as i32,
+                    RValue::Float(v) => *v as i32,
+                    _ => 0,
+                };
+                if let Some(target_pal) = palettes_for_blt.borrow().get(&pid) {
+                    state.palette_rgba = *target_pal;
+                }
+            }
 
             if raw_w == 0.0 || raw_h == 0.0 || scale <= 0.0 {
                 return Ok(Rc::new(RObject::nil()));

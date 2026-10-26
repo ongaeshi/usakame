@@ -3087,3 +3087,36 @@ __END__
     assert_eq!(ds.palette_rgba[0], [0, 17, 34, 255]);
 }
 
+#[test]
+fn test_ruby_blt_palette_override() {
+    let script = r##"
+def update
+end
+
+def draw
+  # パレット指定なしで blt
+  blt(0, 0, 0, 0, 0, 16, 16)
+
+  # パレット1（上書き）を指定して blt
+  blt(16, 0, 0, 0, 0, 16, 16, 0, 1.0, 1)
+end
+
+__END__
+@PALETTE 1
+3: #FF1122
+
+@SPRITE 0
+...3...
+"##;
+
+    let (tail, mrb) = cli::compile_ruby_script_str_with_filename(script, Some("test.rb")).expect("compile should succeed");
+    let mut rt = GameRuntime::new(&tail, &mrb, true).expect("Runtime creation should succeed");
+
+    // パレット1が登録されているか確認
+    assert!(rt.palettes.borrow().contains_key(&1));
+    assert_eq!(rt.palettes.borrow()[&1][3], [255, 17, 34, 255]);
+
+    // draw 実行
+    rt.call_draw();
+}
+
