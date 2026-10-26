@@ -72,7 +72,7 @@ def init_stage
   # マップをクリア
   MAP_WIDTH.times do |cx|
     MAP_HEIGHT.times do |cy|
-      mset(cx, cy, 0)
+      mset(cx, cy, -1)
     end
   end
 
@@ -273,7 +273,7 @@ def update
         # 人参またはコインを出現
         $items << { x: hit_cx * 16.0, y: (hit_cy - 1) * 16.0, vx: 0.8, vy: -2.0, type: :carrot, active: true }
       elsif tile == 34 && $p[:is_super] # スーパーうさぎならレンガ破壊！
-        mset(hit_cx, hit_cy, 0)
+        mset(hit_cx, hit_cy, -1)
         sfx(:explosion)
         spawn_stars(hit_cx * 16.0 + 8.0, hit_cy * 16.0 + 8.0, 8, 9)
       else
