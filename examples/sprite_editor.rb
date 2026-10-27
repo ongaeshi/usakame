@@ -32,6 +32,7 @@ show_mouse(true)
 # ------------------------------------------------------------------------------
 BANK_SIZE = 256
 CANVAS_GRID = 32
+CHECKER_PALETTE = 99
 
 COLOR_NAMES = [
   "BLACK", "DARK-BLUE", "PURPLE", "DARK-GREEN",
@@ -714,15 +715,17 @@ def draw
   rectfill($canvas_x - 2, $canvas_y - 2, CANVAS_GRID * $cell_size + 4, CANVAS_GRID * $cell_size + 4, 1)
   rect($canvas_x - 2, $canvas_y - 2, CANVAS_GRID * $cell_size + 4, CANVAS_GRID * $cell_size + 4, 5)
 
-  # 背景市松模様: 黒ベースに偶数マスのみ描画 (8x8 = 64 回で極小負荷)
+  # 背景市松模様: @PALETTE 99 (Aseprite / EDGE 風ミディアムグレー市松模様) で描画
+  pal_bank(CHECKER_PALETTE)
   rectfill($canvas_x, $canvas_y, 192, 192, 0)
   8.times do |cy|
     8.times do |cx|
       if (cx + cy) % 2 == 1
-        rectfill($canvas_x + cx * 24, $canvas_y + cy * 24, 24, 24, 5)
+        rectfill($canvas_x + cx * 24, $canvas_y + cy * 24, 24, 24, 1)
       end
     end
   end
+  pal_bank(0)
 
   # バンクテクスチャから 32x32 を 6倍拡大描画 (左上基準 blt で 192x192 ぴったり描画)
   blt($canvas_x, $canvas_y, $current_bank, $sel_x, $sel_y, 32, 32, 0, 6.0, $current_pal)
@@ -783,22 +786,41 @@ def draw
   # 4. 中央ペイン: プレビュー & パレット
   print_text("PREVIEW", 220, 27, 6)
 
-  preview_bg = case $bg_mode
-               when 0 then 0
-               when 1 then 1
-               when 2 then 7
-               else 5
-               end
-
+  if $bg_mode == 3
+    # 市松模様背景 (Aseprite / EDGE 風ミディアムグレー)
+    pal_bank(CHECKER_PALETTE)
+    rectfill(219, 37, 18, 18, 0)
+    2.times do |cy|
+      2.times do |cx|
+        rectfill(220 + cx * 8, 38 + cy * 8, 8, 8, 1) if (cx + cy) % 2 == 1
+      end
+    end
+    rectfill(241, 29, 34, 34, 0)
+    4.times do |cy|
+      4.times do |cx|
+        rectfill(242 + cx * 8, 30 + cy * 8, 8, 8, 1) if (cx + cy) % 2 == 1
+      end
+    end
+    pal_bank(0)
+  else
+    preview_bg = case $bg_mode
+                 when 0 then 0
+                 when 1 then 1
+                 when 2 then 7
+                 else 0
+                 end
+    # 1x プレビュー (16x16, x: 220, y: 38)
+    rectfill(219, 37, 18, 18, preview_bg)
+    # 2x プレビュー (32x32, x: 242, y: 30)
+    rectfill(241, 29, 34, 34, preview_bg)
+  end
   # 1x プレビュー (16x16, x: 220, y: 38)
-  rectfill(219, 37, 18, 18, preview_bg)
   rect(219, 37, 18, 18, 5)
   anim_off_x = $anim_playing ? (($anim_frame % 4) * 16) : 0
   draw_u = ($sel_x + anim_off_x) % BANK_SIZE
   blt(220, 38, $current_bank, draw_u, $sel_y, 16, 16, 0, 1.0, $current_pal)
 
   # 2x プレビュー (32x32, x: 242, y: 30)
-  rectfill(241, 29, 34, 34, preview_bg)
   rect(241, 29, 34, 34, 5)
   blt(242, 30, $current_bank, $sel_x, $sel_y, 32, 32, 0, 1.0, $current_pal)
 
@@ -946,3 +968,15 @@ def draw
     print_text("... (truncated)", 40, 58 + 16 * 10, 5) if b64.size > 16 * 64
   end
 end
+
+__END__
+
+# ==============================================================================
+# スプライトエディタ用 特殊パレット
+# ==============================================================================
+# @PALETTE 99: 市松模様背景用 (Aseprite / EDGE 風ミディアムグレー)
+# PICO-8 の 0(黒 #000000), 5(暗灰 #5F574F), 6(明灰 #C2C3C7), 7(白 #FFF1E8)
+# と衝突しない純粋な無彩色グレー（彩度0）
+@PALETTE 99
+0: #606060
+1: #808080
