@@ -767,6 +767,11 @@ def update
           sfx(:click)
           notify("SNAP: #{$grid_snap == 1 ? 'FREE' : "#{$grid_snap}PX"}")
         end
+      # [SPR] スプライトエディタ起動 (x: 520..568)
+      elsif mx >= 520 && mx <= 568
+        spawn_editor("spr", $target_path) if respond_to?(:spawn_editor)
+        sfx(:click)
+        notify("OPENED SPRITE EDITOR")
       end
     end
 
@@ -1091,6 +1096,12 @@ def draw
 
   print_text("CAM:(#{$cam_x},#{$cam_y})", 274, 5, 6)
   print_text("TARGET: #{$save_path}", 360, 5, 11)
+
+  # [SPR] スプライトエディタ起動ボタン
+  rectfill(520, 3, 48, 12, 12)
+  rect(520, 3, 48, 12, 7)
+  print_text("SPRITE", 526, 5, 7)
+
   print_text("FPS:#{fps}", 580, 5, 10)
 
   # --- 2. メインタイルマップキャンバス (352x320) ---

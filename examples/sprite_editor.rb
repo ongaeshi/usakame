@@ -516,8 +516,8 @@ def update
         save_to_target
       elsif mx >= 395 && mx <= 430 # [EXP]
         export_all
-      elsif mx >= 435 && mx <= 475 # [CODE]
-        $show_code_modal = true
+      elsif mx >= 435 && mx <= 475 # [MAP]
+        spawn_editor("map", $target_path) if respond_to?(:spawn_editor)
         sfx(:click)
       end
     end
@@ -706,10 +706,10 @@ def draw
   rect(395, 4, 35, 16, 6)
   print_text("EXP", 403, 8, 7)
 
-  # [CODE] ボタン
-  rectfill(435, 4, 38, 16, 2)
-  rect(435, 4, 38, 16, 6)
-  print_text("CODE", 441, 8, 7)
+  # [MAP] ボタン (タイルマップエディタを起動)
+  rectfill(435, 4, 38, 16, 3)
+  rect(435, 4, 38, 16, 11)
+  print_text("MAP", 445, 8, 7)
 
   # 2. キャンバス描画 (32x32, 6px/cell -> 192x192)
   rectfill($canvas_x - 2, $canvas_y - 2, CANVAS_GRID * $cell_size + 4, CANVAS_GRID * $cell_size + 4, 1)

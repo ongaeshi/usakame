@@ -11,14 +11,52 @@ use crate::bundle::{pack_bundle, read_bundle_from_current_exe, strip_bundle_from
 const WEB_INDEX_HTML: &str = include_str!("../web/index.html");
 const WEB_MQ_JS_BUNDLE: &str = include_str!("../web/mq_js_bundle.js");
 
+pub const EMBEDDED_SPRITE_EDITOR: &str = include_str!("../examples/sprite_editor.rb");
+pub const EMBEDDED_TILEMAP_EDITOR: &str = include_str!("../examples/tilemap_editor.rb");
+pub const EMBEDDED_API_MD: &str = include_str!("../docs/api.md");
+pub const EMBEDDED_MRUBYEDGE_API_MD: &str = include_str!("../docs/mrubyedge_api.md");
+pub const EMBEDDED_EXAMPLES_ARCHIVE: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/examples_archive.bin"));
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorKind {
+    Sprite,
+    Tilemap,
+    All,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewProjectOptions {
+    pub project_dir: PathBuf,
+    pub minimal: bool,
+    pub split: bool,
+    pub with_refs: bool,
+    pub template: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliAction {
+    /// `uk new <dir> [--minimal] [--split] [--with-refs] [-t <template>]` (新規プロジェクト作成)
+    New(NewProjectOptions),
+    /// `uk examples [dest_dir]` (同梱サンプルコード群の展開)
+    Examples { dest_dir: PathBuf },
+    /// `uk edit [spr|map|all] [script.rb]` (内蔵スプライト/タイルマップエディタ起動)
+    Edit {
+        kind: EditorKind,
+        target_path: PathBuf,
+    },
     /// `uk run <script.rb> [args...]` (ホットリロード付きネイティブ実行)
     Run {
         script_path: PathBuf,
         script_args: Vec<String>,
         screenshot_path: Option<PathBuf>,
         screenshot_frames: u32,
+    },
+    /// `uk run_with_edit [script.rb]` / `uk run --edit [script.rb]` (ゲームとエディタを同時起動)
+    RunWithEdit {
+        script_path: PathBuf,
+        script_args: Vec<String>,
+        editor_kind: EditorKind,
     },
     /// 単一バイナリ（末尾にバンドル埋め込み済み）の直接起動、または埋め込みデモ起動
     RunEmbedded {
@@ -62,8 +100,19 @@ pub fn print_help() {
 uk - Usakame Retro Game Engine CLI
 
 USAGE:
-    uk run [script.rb] [--screenshot <out.png>] [--frames <N>] [-- args...]
-                                        Run script natively with live hot-reload (default: game.rb)
+    uk new <dir> [options]              Create a new Usakame game project
+        --minimal                       Generate minimal files only (skip AGENTS.md & docs/)
+        --split                         Separate resources into game.spr, game.map, game.sfx
+        --with-refs                     Extract sample games into refs/examples/ for AI/reference
+        -t, --template <name>           Template: default, minimal, split
+    uk init [dir] [options]             Initialize Usakame project in current or specified directory
+    uk run [script.rb] [options]        Run script natively with live hot-reload (default: game.rb)
+        -e, --edit[=spr|map|all]        Launch editor(s) alongside the running game
+        -s, --screenshot <out.png>      Auto-save screenshot and exit
+        --frames <N>                    Frame count before auto-screenshot (default: 10)
+    uk run_with_edit [script.rb]        Run game and editors simultaneously with live sync
+    uk edit [spr|map|all] [script.rb]   Launch built-in Sprite / Tilemap Editor (default: spr)
+    uk examples [dest_dir]              Extract bundled example scripts (default: ./examples)
     uk build [script.rb] [-o <output>]  Build a standalone single binary from script
     uk browser [script.rb] [-p <port>]  Run script in the browser with live hot-reload
     uk pack [script.rb] [-o <output>]   Pack external resources into single standalone script
@@ -120,6 +169,19 @@ where
     match rest[0].as_str() {
         "help" | "--help" | "-h" => Ok(CliAction::Help),
         "version" | "--version" | "-V" => Ok(CliAction::Version),
+        "new" => parse_new_args(&rest[1..], false),
+        "init" => parse_new_args(&rest[1..], true),
+        "examples" | "copy_examples" => {
+            let dest_dir = rest
+                .get(1)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("examples"));
+            Ok(CliAction::Examples { dest_dir })
+        }
+        "edit" => parse_edit_args(&rest[1..], EditorKind::Sprite),
+        "spr" => parse_edit_args(&rest[1..], EditorKind::Sprite),
+        "map" => parse_edit_args(&rest[1..], EditorKind::Tilemap),
+        "run_with_edit" => parse_run_with_edit_args(&rest[1..]),
         "run" => parse_run_args(&rest[1..]),
         "build" => {
             let mut script_path: Option<PathBuf> = None;
@@ -298,15 +360,198 @@ where
     }
 }
 
+fn parse_new_args(args: &[String], is_init: bool) -> Result<CliAction, String> {
+    let mut project_dir: Option<PathBuf> = None;
+    let mut minimal = false;
+    let mut split = false;
+    let mut with_refs = false;
+    let mut template = "default".to_string();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--minimal" | "--no-ai" => {
+                minimal = true;
+            }
+            "--split" => {
+                split = true;
+            }
+            "--with-refs" | "--refs" => {
+                with_refs = true;
+            }
+            "-t" | "--template" => {
+                i += 1;
+                let t = args
+                    .get(i)
+                    .ok_or_else(|| "Missing argument for -t / --template".to_string())?;
+                template = t.to_string();
+                if template == "split" {
+                    split = true;
+                }
+            }
+            arg if arg.starts_with('-') => {
+                return Err(format!("Unknown option for `uk new`: {}", arg));
+            }
+            arg => {
+                if project_dir.is_none() {
+                    project_dir = Some(PathBuf::from(arg));
+                } else {
+                    return Err(format!("Unexpected extra argument for `uk new`: {}", arg));
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let project_dir = match project_dir {
+        Some(d) => d,
+        None if is_init => PathBuf::from("."),
+        None => {
+            return Err(
+                "Missing project directory. Usage: `uk new <project_dir> [--minimal] [--split] [--with-refs]`"
+                    .to_string(),
+            );
+        }
+    };
+
+    Ok(CliAction::New(NewProjectOptions {
+        project_dir,
+        minimal,
+        split,
+        with_refs,
+        template,
+    }))
+}
+
+fn parse_editor_kind_token(s: &str) -> Option<EditorKind> {
+    match s.to_ascii_lowercase().as_str() {
+        "spr" | "sprite" | "sprites" => Some(EditorKind::Sprite),
+        "map" | "tilemap" => Some(EditorKind::Tilemap),
+        "all" | "both" => Some(EditorKind::All),
+        _ => None,
+    }
+}
+
+fn parse_edit_args(args: &[String], default_kind: EditorKind) -> Result<CliAction, String> {
+    let mut kind = default_kind;
+    let mut kind_specified = false;
+    let mut target_path: Option<PathBuf> = None;
+
+    for arg in args {
+        match arg.as_str() {
+            "--all" | "-a" => {
+                kind = EditorKind::All;
+                kind_specified = true;
+            }
+            "--spr" | "--sprite" => {
+                kind = EditorKind::Sprite;
+                kind_specified = true;
+            }
+            "--map" | "--tilemap" => {
+                kind = EditorKind::Tilemap;
+                kind_specified = true;
+            }
+            s if s.starts_with('-') => {
+                return Err(format!("Unknown option for `uk edit`: {}", s));
+            }
+            s => {
+                if !kind_specified
+                    && target_path.is_none()
+                    && let Some(parsed_kind) = parse_editor_kind_token(s)
+                {
+                    kind = parsed_kind;
+                    kind_specified = true;
+                } else if target_path.is_none() {
+                    target_path = Some(PathBuf::from(s));
+                } else {
+                    return Err(format!("Unexpected extra argument for `uk edit`: {}", s));
+                }
+            }
+        }
+    }
+
+    Ok(CliAction::Edit {
+        kind,
+        target_path: target_path.unwrap_or_else(|| PathBuf::from("game.rb")),
+    })
+}
+
+fn parse_run_with_edit_args(args: &[String]) -> Result<CliAction, String> {
+    let mut script_path: Option<PathBuf> = None;
+    let mut script_args = Vec::new();
+    let mut editor_kind = EditorKind::All;
+    let mut kind_specified = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--spr" | "--sprite" => {
+                editor_kind = EditorKind::Sprite;
+                kind_specified = true;
+            }
+            "--map" | "--tilemap" => {
+                editor_kind = EditorKind::Tilemap;
+                kind_specified = true;
+            }
+            "--all" | "-a" => {
+                editor_kind = EditorKind::All;
+                kind_specified = true;
+            }
+            "--" => {
+                i += 1;
+                while i < args.len() {
+                    script_args.push(args[i].clone());
+                    i += 1;
+                }
+                break;
+            }
+            arg if arg.starts_with('-') => {
+                return Err(format!("Unknown option for `uk run_with_edit`: {}", arg));
+            }
+            arg => {
+                if !kind_specified
+                    && script_path.is_none()
+                    && let Some(parsed_kind) = parse_editor_kind_token(arg)
+                {
+                    editor_kind = parsed_kind;
+                    kind_specified = true;
+                } else if script_path.is_none() {
+                    script_path = Some(PathBuf::from(arg));
+                } else {
+                    script_args.push(arg.to_string());
+                }
+            }
+        }
+        i += 1;
+    }
+
+    Ok(CliAction::RunWithEdit {
+        script_path: script_path.unwrap_or_else(|| PathBuf::from("game.rb")),
+        script_args,
+        editor_kind,
+    })
+}
+
 fn parse_run_args(args: &[String]) -> Result<CliAction, String> {
     let mut script_path: Option<PathBuf> = None;
     let mut script_args = Vec::new();
     let mut screenshot_path: Option<PathBuf> = None;
     let mut screenshot_frames: u32 = 10;
+    let mut with_edit: Option<EditorKind> = None;
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--edit" | "-e" => {
+                with_edit = Some(EditorKind::All);
+            }
+            arg if arg.starts_with("--edit=") => {
+                let val = &arg["--edit=".len()..];
+                let kind = parse_editor_kind_token(val).ok_or_else(|| {
+                    format!("Invalid editor kind `{}` (expected spr, map, or all)", val)
+                })?;
+                with_edit = Some(kind);
+            }
             "--screenshot" | "-s" => {
                 i += 1;
                 let s = args
@@ -345,8 +590,17 @@ fn parse_run_args(args: &[String]) -> Result<CliAction, String> {
         i += 1;
     }
 
+    let script_path = script_path.unwrap_or_else(|| PathBuf::from("game.rb"));
+    if let Some(editor_kind) = with_edit {
+        return Ok(CliAction::RunWithEdit {
+            script_path,
+            script_args,
+            editor_kind,
+        });
+    }
+
     Ok(CliAction::Run {
-        script_path: script_path.unwrap_or_else(|| PathBuf::from("game.rb")),
+        script_path,
         script_args,
         screenshot_path,
         screenshot_frames,
@@ -911,4 +1165,540 @@ fn open_url_in_browser(url: &str) {
     {
         let _ = Command::new("xdg-open").arg(url).spawn();
     }
+}
+
+/// 圧縮済みの `examples_archive.bin` バイト列を展開し、`(ファイル名, 内容)` のリストを返す。
+pub fn unpack_examples_archive(compressed: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let mut decoder = flate2::read::ZlibDecoder::new(compressed);
+    let mut raw = Vec::new();
+    decoder
+        .read_to_end(&mut raw)
+        .map_err(|e| format!("Failed to decompress examples archive: {}", e))?;
+
+    if raw.len() < 4 {
+        return Err("Invalid examples archive (too short)".to_string());
+    }
+    let count = u32::from_le_bytes(raw[0..4].try_into().unwrap()) as usize;
+    let mut pos = 4;
+    let mut entries = Vec::with_capacity(count);
+
+    for _ in 0..count {
+        if pos + 4 > raw.len() {
+            return Err("Corrupted examples archive (unexpected EOF reading name len)".to_string());
+        }
+        let name_len = u32::from_le_bytes(raw[pos..pos + 4].try_into().unwrap()) as usize;
+        pos += 4;
+        if pos + name_len > raw.len() {
+            return Err("Corrupted examples archive (unexpected EOF reading name)".to_string());
+        }
+        let name = String::from_utf8(raw[pos..pos + name_len].to_vec())
+            .map_err(|e| format!("Invalid UTF-8 filename in archive: {}", e))?;
+        pos += name_len;
+
+        if pos + 4 > raw.len() {
+            return Err("Corrupted examples archive (unexpected EOF reading data len)".to_string());
+        }
+        let data_len = u32::from_le_bytes(raw[pos..pos + 4].try_into().unwrap()) as usize;
+        pos += 4;
+        if pos + data_len > raw.len() {
+            return Err("Corrupted examples archive (unexpected EOF reading data)".to_string());
+        }
+        let data = raw[pos..pos + data_len].to_vec();
+        pos += data_len;
+
+        entries.push((name, data));
+    }
+
+    Ok(entries)
+}
+
+/// 指定ディレクトリに同梱の `examples/` ファイルをすべて展開する。
+pub fn extract_examples_to_dir(dest_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let entries = unpack_examples_archive(EMBEDDED_EXAMPLES_ARCHIVE)?;
+    fs::create_dir_all(dest_dir).map_err(|e| {
+        format!(
+            "Failed to create directory `{}`: {}",
+            dest_dir.display(),
+            e
+        )
+    })?;
+
+    let mut written = Vec::with_capacity(entries.len());
+    for (name, bytes) in entries {
+        let out_path = dest_dir.join(&name);
+        fs::write(&out_path, &bytes)
+            .map_err(|e| format!("Failed to write `{}`: {}", out_path.display(), e))?;
+        written.push(out_path);
+    }
+    Ok(written)
+}
+
+/// `uk examples [dest_dir]` の実装
+pub fn cmd_examples(dest_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let written = extract_examples_to_dir(dest_dir)?;
+    println!(
+        "Extracted {} example files to `{}`!",
+        written.len(),
+        dest_dir.display()
+    );
+    println!("Try running an example:");
+    println!(
+        "  uk run {}/platformer.rb",
+        dest_dir.to_string_lossy().replace('\\', "/")
+    );
+    println!(
+        "  uk run {}/survivors.rb",
+        dest_dir.to_string_lossy().replace('\\', "/")
+    );
+    Ok(written)
+}
+
+const PROJECT_GITIGNORE: &str = "\
+# Usakame generated files
+/screenshots/
+/*_packed.rb
+/*.exe
+/*.wasm
+
+# AI / Reference files (untracked)
+/refs/
+";
+
+const TEMPLATE_MINIMAL_RB: &str = r#"# ==============================================================================
+# 🐰 {{PROJECT_TITLE}}
+# ==============================================================================
+
+config(
+  width: 256,
+  height: 256,
+  scale: 2,
+  title: "{{PROJECT_TITLE}}"
+)
+
+$frame = 0
+
+def update
+  $frame += 1
+end
+
+def draw
+  cls(1)
+  print_text("HELLO USAKAME!", 72, 110, 7)
+  spr("🐰", 120, 128 + (sin($frame * 0.1) * 4).to_i)
+end
+"#;
+
+const TEMPLATE_STARTER_CODE_RB: &str = r#"# ==============================================================================
+# 🐰 {{PROJECT_TITLE}}
+# ------------------------------------------------------------------------------
+# Run:            uk run game.rb
+# Run + Editors:  uk run_with_edit game.rb
+# Edit Sprites:   uk edit spr game.rb
+# Edit Tilemap:   uk edit map game.rb
+# Build EXE:      uk build game.rb
+# Web Browser:    uk browser game.rb
+# ==============================================================================
+
+config(
+  width: 256,
+  height: 256,
+  scale: 2,
+  title: "{{PROJECT_TITLE}}"
+)
+
+$px = 120.0
+$py = 120.0
+$facing_left = false
+$frame = 0
+
+def can_move_to?(nx, ny)
+  corners = [
+    [nx + 2, ny + 2],
+    [nx + 13, ny + 2],
+    [nx + 2, ny + 13],
+    [nx + 13, ny + 13]
+  ]
+  corners.each do |pt|
+    tx = (pt[0] / 16).to_i
+    ty = (pt[1] / 16).to_i
+    return false if tx < 0 || tx >= 16 || ty < 0 || ty >= 16
+    return false if mget(tx, ty) == 2
+  end
+  true
+end
+
+def update
+  $frame += 1
+
+  speed = 1.5
+  dx = 0.0
+  dy = 0.0
+
+  if btn(:left)
+    dx -= speed
+    $facing_left = true
+  end
+  if btn(:right)
+    dx += speed
+    $facing_left = false
+  end
+  dy -= speed if btn(:up)
+  dy += speed if btn(:down)
+
+  if dx != 0.0 && can_move_to?($px + dx, $py)
+    $px += dx
+  end
+  if dy != 0.0 && can_move_to?($px, $py + dy)
+    $py += dy
+  end
+
+  if btnp(:z) || btnp(:space)
+    sfx(0)
+  end
+end
+
+def draw
+  cls(1)
+
+  # Draw 16x16 tilemap
+  map(0, 0, 0, 0, 16, 16)
+
+  # Draw player sprite
+  moving = btn(:left) || btn(:right) || btn(:up) || btn(:down)
+  bob = (moving && ($frame / 6) % 2 == 1) ? -1 : 0
+  spr(0, $px, $py + bob, $facing_left, false)
+
+  # Header UI
+  rectfill(0, 0, 256, 14, 0)
+  print_text("{{PROJECT_TITLE}}", 6, 3, 7)
+  print_text("ARROWS:MOVE Z:ACT", 114, 3, 10)
+end
+"#;
+
+const TEMPLATE_STARTER_SPR: &str = "\
+@SPRITE 0
+....77....77....
+...7EE7..7EE7...
+...7EE7..7EE7...
+...7777..7777...
+...7777777777...
+..777777777777..
+.77707777770777.
+.77707777770777.
+.777777EE777777.
+..777777777777..
+...8888AA8888...
+..778888888877..
+..77.777777.77..
+....777..777....
+...777....777...
+................
+
+@SPRITE 1
+3333333333333333
+33B3333333333B33
+3333333333333333
+3333333B33333333
+3333333333333333
+3B33333333333333
+33333333333B3333
+3333333333333333
+3333B33333333333
+3333333333333333
+333333333B333333
+33333333333333B3
+33B3333333333333
+333333B333333333
+3333333333333333
+3333333333333333
+
+@SPRITE 2
+.....BBBBBB.....
+...BBBBBBBBBB...
+..BBBB3333BBBB..
+.BBBB33BB33BBBB.
+.BBB33BBBB33BBB.
+.BBB3BBBBBB3BBB.
+.BBBBBBBBBBBBBB.
+..BBBB3333BBBB..
+...BBBBBBBBBB...
+.....334433.....
+......4444......
+......4444......
+.....444444.....
+....33333333....
+...3333333333...
+................
+
+@SPRITE 3
+3333333333333333
+3333333333333333
+3333337733333333
+333337AA73333333
+3333337733333333
+333333BB33333333
+33333B33B3333333
+3333333333333333
+3333333333773333
+3333333337EE7333
+3333333333773333
+3333333333BB3333
+333333333B33B333
+3333333333333333
+3333333333333333
+3333333333333333
+";
+
+const TEMPLATE_STARTER_MAP: &str = "\
+@MAP 0 0
+2222222222222222
+2111111111111112
+2131111111111312
+2111111111111112
+2111221111221112
+2111111111111112
+2111111331111112
+2111111111111112
+2111111111111112
+2111111331111112
+2111111111111112
+2111221111221112
+2111111111111112
+2131111111111312
+2111111111111112
+2222222222222222
+";
+
+const TEMPLATE_STARTER_SFX: &str = "\
+@SFX 0
+square T180 L16 c5 e5 g5 c6
+";
+
+const PROJECT_AGENTS_MD: &str = r#"# AGENTS.md ({{PROJECT_TITLE}})
+
+このプロジェクトはレトロゲームエンジン **Usakame (`uk`)** で作成された Ruby ゲームプロジェクトです。
+AI エージェントがコードの生成・編集・デバッグを行う際は、以下のガイドラインを必ず遵守してください。
+
+---
+
+## 1. ドキュメント（編集前に必ず確認すること）
+
+Usakame のスクリプト実行環境は軽量 Ruby VM **mrubyedge** です。標準の CRuby とは利用できる組み込みメソッドが異なります。
+コードを記述する前に必ず以下のローカルドキュメントを参照してください。
+
+* **[docs/mrubyedge_api.md](docs/mrubyedge_api.md)**: mrubyedge で利用可能な Ruby 標準クラス・メソッド一覧、および未実装メソッドと代替コード集。
+* **[docs/api.md](docs/api.md)**: Usakame エンジン固有の描画・入力・タイルマップ・バンク・サウンド API（`cls`, `spr`, `blt`, `btn`, `map`, `sfx`, `music` 等）。
+* **`refs/examples/*.rb`**（存在する場合、または `uk examples refs/examples` でいつでも展開可能）: 実践的なサンプルゲーム群（アクション、サバイバー、RPG、エディタ等）。
+
+---
+
+## 2. ⚠️ Ruby コード作成・編集時の絶対ルール（最重要）
+
+以下のメソッドは **mrubyedge に存在しないため呼び出すと `NoMethodError` でクラッシュします**。必ず記載の代替パターンを使用してください。
+
+* ❌ `array.sample` → ⭕ **`array[rand(array.size)]`**
+* ❌ `array.shuffle` → ⭕ ランダムスワップ処理を自前で実装する
+* ❌ `array.reverse` → ⭕ インデックスを逆順に回す（`i = array.size - 1; while i >= 0 ...`）
+* ❌ `array.delete(item)` → ⭕ **`array.reject! { |x| x == item }`** または `delete_at(idx)`
+* ❌ `hash.key?(k)` / `include?` → ⭕ **`hash.has_key?(k)`**
+* ❌ `hash.dig(...)` → ⭕ `hash[a] && hash[a][b]`
+* ❌ `string.gsub` / `sub` → ⭕ `string.split(pat).join(rep)` 等で代替
+* ❌ `n.upto(m)` / `downto` → ⭕ **`(n..m).each`** または `while` ループ
+* ❌ `n.even?` / `odd?` → ⭕ **`n % 2 == 0`** / **`n % 2 != 0`**
+* ❌ `sleep(sec)` / `Time.now` → ⭕ ゲームループ（毎フレーム呼ばれる `update`）内のフレームカウンタ変数で制御
+* ❌ `require` / `load` / `eval` → ⭕ 単一スクリプト構成で記述する
+
+### タイルマップ API（`mget` / `mset` / `mdel`）のルール
+* **空マスの取得**: `mget(x, y)` は空マス・未設定セルに対して **`nil`** を返します（`-1` ではありません）。
+  * ⭕ `if mget(x, y)` でタイルが存在するか判定できます（0番タイルも真になります）。
+  * ❌ `if mget(x, y) > 0` や `if mget(x, y) != -1` と書かないこと。
+* **タイルの消去**: 消去には **`mdel(x, y)`** または **`mset(x, y, nil)`** を使用してください（`-1` を渡すと `ArgumentError` になります）。
+
+---
+
+## 3. 実行・テスト・AI による自動視覚検証コマンド
+
+* **ゲームの起動（ホットリロード対応）**:
+  ```bash
+  uk run game.rb
+  ```
+* **ゲームとエディタ（スプライト／タイルマップ）の同時起動**:
+  ```bash
+  uk run_with_edit game.rb
+  ```
+* **スプライトエディタ／タイルマップエディタ単体起動**:
+  ```bash
+  uk edit spr game.rb
+  uk edit map game.rb
+  ```
+* **🤖 AI エージェントによる自動動作確認 & スクリーンショット検証**:
+  以下のコマンドを実行すると、指定フレーム数だけゲームを実行して画面を PNG 保存し、自動で終了します（構文エラーや実行時エラーがあれば標準エラー出力に表示されます）：
+  ```bash
+  uk run game.rb --screenshot screenshots/check.png --frames 60
+  ```
+  コードを変更した後はこのコマンドでクラッシュがないか・描画が意図通りかを自律的に確認してください。
+* **リソース分離・結合・配布ビルド**:
+  ```bash
+  uk unpack game.rb        # __END__ リソースを .spr / .map / .sfx に分離
+  uk pack game.rb          # .spr / .map / .sfx を game.rb の __END__ に統合
+  uk build game.rb         # 単一実行ファイル (.exe) を生成
+  uk browser game.rb       # ブラウザ (WASM) でホットリロード実行
+  ```
+"#;
+
+/// `uk new <dir>` / `uk init [dir]` の実装
+pub fn cmd_new(opts: &NewProjectOptions) -> Result<Vec<PathBuf>, String> {
+    let dir = &opts.project_dir;
+    let game_rb_path = dir.join("game.rb");
+    if game_rb_path.exists() {
+        return Err(format!(
+            "`{}` already exists. Aborting so existing files are not overwritten.",
+            game_rb_path.display()
+        ));
+    }
+
+    fs::create_dir_all(dir)
+        .map_err(|e| format!("Failed to create directory `{}`: {}", dir.display(), e))?;
+
+    let project_title = dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty() && *s != ".")
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .and_then(|c| c.file_name().and_then(|s| s.to_str()).map(String::from))
+                .as_deref()
+                .map(|_| "Usakame Game")
+        })
+        .unwrap_or("Usakame Game")
+        .to_uppercase();
+
+    let mut created_files = Vec::new();
+
+    // 1. .gitignore
+    let gitignore_path = dir.join(".gitignore");
+    if !gitignore_path.exists() {
+        fs::write(&gitignore_path, PROJECT_GITIGNORE)
+            .map_err(|e| format!("Failed to write `{}`: {}", gitignore_path.display(), e))?;
+        created_files.push(gitignore_path);
+    }
+
+    // 2. game.rb (and .spr / .map / .sfx if split)
+    let tpl_lower = opts.template.to_ascii_lowercase();
+    let code_body = if tpl_lower == "minimal" || tpl_lower == "empty" {
+        TEMPLATE_MINIMAL_RB.replace("{{PROJECT_TITLE}}", &project_title)
+    } else {
+        TEMPLATE_STARTER_CODE_RB.replace("{{PROJECT_TITLE}}", &project_title)
+    };
+
+    if opts.split {
+        fs::write(&game_rb_path, &code_body)
+            .map_err(|e| format!("Failed to write `{}`: {}", game_rb_path.display(), e))?;
+        created_files.push(game_rb_path);
+
+        let spr_path = dir.join("game.spr");
+        fs::write(&spr_path, TEMPLATE_STARTER_SPR)
+            .map_err(|e| format!("Failed to write `{}`: {}", spr_path.display(), e))?;
+        created_files.push(spr_path);
+
+        let map_path = dir.join("game.map");
+        fs::write(&map_path, TEMPLATE_STARTER_MAP)
+            .map_err(|e| format!("Failed to write `{}`: {}", map_path.display(), e))?;
+        created_files.push(map_path);
+
+        let sfx_path = dir.join("game.sfx");
+        fs::write(&sfx_path, TEMPLATE_STARTER_SFX)
+            .map_err(|e| format!("Failed to write `{}`: {}", sfx_path.display(), e))?;
+        created_files.push(sfx_path);
+    } else if tpl_lower == "minimal" || tpl_lower == "empty" {
+        fs::write(&game_rb_path, &code_body)
+            .map_err(|e| format!("Failed to write `{}`: {}", game_rb_path.display(), e))?;
+        created_files.push(game_rb_path);
+    } else {
+        let full_game_rb = format!(
+            "{}\n__END__\n{}\n{}\n{}",
+            code_body.trim_end(),
+            TEMPLATE_STARTER_SPR.trim_end(),
+            TEMPLATE_STARTER_MAP.trim_end(),
+            TEMPLATE_STARTER_SFX
+        );
+        fs::write(&game_rb_path, full_game_rb)
+            .map_err(|e| format!("Failed to write `{}`: {}", game_rb_path.display(), e))?;
+        created_files.push(game_rb_path);
+    }
+
+    // 3. AI Agent Docs (default ON, skipped if --minimal)
+    if !opts.minimal {
+        let agents_md_path = dir.join("AGENTS.md");
+        let agents_content = PROJECT_AGENTS_MD.replace("{{PROJECT_TITLE}}", &project_title);
+        fs::write(&agents_md_path, agents_content)
+            .map_err(|e| format!("Failed to write `{}`: {}", agents_md_path.display(), e))?;
+        created_files.push(agents_md_path);
+
+        let docs_dir = dir.join("docs");
+        fs::create_dir_all(&docs_dir)
+            .map_err(|e| format!("Failed to create `{}`: {}", docs_dir.display(), e))?;
+
+        let api_md_path = docs_dir.join("api.md");
+        fs::write(&api_md_path, EMBEDDED_API_MD)
+            .map_err(|e| format!("Failed to write `{}`: {}", api_md_path.display(), e))?;
+        created_files.push(api_md_path);
+
+        let mruby_md_path = docs_dir.join("mrubyedge_api.md");
+        fs::write(&mruby_md_path, EMBEDDED_MRUBYEDGE_API_MD)
+            .map_err(|e| format!("Failed to write `{}`: {}", mruby_md_path.display(), e))?;
+        created_files.push(mruby_md_path);
+    }
+
+    // 4. Reference examples (--with-refs)
+    if opts.with_refs {
+        let refs_examples_dir = dir.join("refs").join("examples");
+        let extracted = extract_examples_to_dir(&refs_examples_dir)?;
+        created_files.extend(extracted);
+    }
+
+    println!("🐰 Created new Usakame project in `{}`!", dir.display());
+    for f in &created_files {
+        if !f.components().any(|c| c.as_os_str() == "refs") {
+            println!("  + {}", f.display());
+        }
+    }
+    if opts.with_refs {
+        println!(
+            "  + {}/refs/examples/* (bundled reference examples)",
+            dir.display()
+        );
+    }
+    println!("\nNext steps:");
+    if dir != Path::new(".") {
+        println!("  cd {}", dir.display());
+    }
+    println!("  uk run                 # Run the game with live hot-reload");
+    println!("  uk run_with_edit       # Run the game + Sprite & Tilemap Editors together");
+    println!("  uk edit                # Open Sprite Editor (or `uk edit map` for Tilemap)");
+
+    Ok(created_files)
+}
+
+/// エディタプロセスをバックグラウンド（子プロセス）で起動する
+pub fn spawn_editor_processes(kind: EditorKind, target_path: &Path) -> Vec<std::process::Child> {
+    let mut children = Vec::new();
+    let Ok(exe) = std::env::current_exe() else {
+        return children;
+    };
+    let target_str = target_path.to_string_lossy().to_string();
+
+    let kinds_to_spawn: &[&str] = match kind {
+        EditorKind::Sprite => &["spr"],
+        EditorKind::Tilemap => &["map"],
+        EditorKind::All => &["spr", "map"],
+    };
+
+    for k in kinds_to_spawn {
+        if let Ok(child) = Command::new(&exe).args(["edit", k, &target_str]).spawn() {
+            children.push(child);
+        }
+    }
+    children
 }

@@ -4655,6 +4655,43 @@ fn register_engine_api(
         }),
     );
 
+    // spawn_editor(kind = "spr", target_path = "game.rb"):
+    // スプライトエディタ ("spr") またはタイルマップエディタ ("map") を別プロセスで起動する。
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "spawn_editor",
+        Box::new(move |_vm, args| {
+            let kind = args
+                .first()
+                .and_then(|v| match &v.value {
+                    RValue::Symbol(sym) => Some(sym.name.clone()),
+                    _ => String::try_from(v.as_ref()).ok(),
+                })
+                .unwrap_or_else(|| "spr".to_string());
+            let target_path = args
+                .get(1)
+                .and_then(|v| String::try_from(v.as_ref()).ok())
+                .unwrap_or_else(|| "game.rb".to_string());
+
+            if headless {
+                return Ok(Rc::new(RObject::boolean(true)));
+            }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                if let Ok(exe) = std::env::current_exe() {
+                    let ok = std::process::Command::new(exe)
+                        .args(["edit", &kind, &target_path])
+                        .spawn()
+                        .is_ok();
+                    return Ok(Rc::new(RObject::boolean(ok)));
+                }
+            }
+            Ok(Rc::new(RObject::boolean(false)))
+        }),
+    );
+
     if headless {
         // ヘッドレステスト用スタブ登録 (図形ラスタライズ・カメラ・クリッピング・パレット変換および絵文字キャッシュ抽出も検証可能にする)
         let state_for_cls = draw_state.clone();
@@ -7479,8 +7516,12 @@ async fn run_native_with_hot_reload(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn run_embedded_game(tail_data: String, mrb_bytes: Vec<u8>) {
-    let mut runtime = match GameRuntime::new(&tail_data, &mrb_bytes, false) {
+async fn run_embedded_game_with_args(
+    tail_data: String,
+    mrb_bytes: Vec<u8>,
+    script_args: Vec<String>,
+) {
+    let mut runtime = match GameRuntime::new_with_args(&tail_data, &mrb_bytes, false, &script_args) {
         Ok(rt) => rt,
         Err(e) => {
             eprintln!("{}", e.full_message);
@@ -7504,7 +7545,7 @@ async fn run_embedded_game(tail_data: String, mrb_bytes: Vec<u8>) {
         }
 
         if is_restart_key_pressed() || runtime.is_restart_requested() {
-            match GameRuntime::new(&tail_data, &mrb_bytes, false) {
+            match GameRuntime::new_with_args(&tail_data, &mrb_bytes, false, &script_args) {
                 Ok(mut new_rt) => {
                     new_rt.preload_audio().await;
                     reload_banner_text = "RESTARTED".to_string();
@@ -7585,6 +7626,50 @@ fn main() {
         cli::CliAction::Version => {
             cli::print_version();
         }
+        cli::CliAction::New(opts) => {
+            if let Err(err) = cli::cmd_new(&opts) {
+                eprintln!("Error: {}", err);
+                std::process::exit(1);
+            }
+        }
+        cli::CliAction::Examples { dest_dir } => {
+            if let Err(err) = cli::cmd_examples(&dest_dir) {
+                eprintln!("Error: {}", err);
+                std::process::exit(1);
+            }
+        }
+        cli::CliAction::Edit { kind, target_path } => {
+            if kind == cli::EditorKind::All {
+                let _ = cli::spawn_editor_processes(cli::EditorKind::Tilemap, &target_path);
+            }
+            let (editor_src, editor_filename) = match kind {
+                cli::EditorKind::Sprite | cli::EditorKind::All => {
+                    (cli::EMBEDDED_SPRITE_EDITOR, "sprite_editor.rb")
+                }
+                cli::EditorKind::Tilemap => {
+                    (cli::EMBEDDED_TILEMAP_EDITOR, "tilemap_editor.rb")
+                }
+            };
+            let (tail_data, mrb_bytes) =
+                match cli::compile_ruby_script_str_with_filename(editor_src, Some(editor_filename)) {
+                    Ok(res) => res,
+                    Err(err) => {
+                        eprintln!("Failed to compile built-in editor: {}", err);
+                        std::process::exit(1);
+                    }
+                };
+            let parsed_cfg = parse_config_from_source(editor_src);
+            let title = format!("{} - {}", parsed_cfg.title, target_path.display());
+            let args = vec![target_path.to_string_lossy().to_string()];
+            macroquad::Window::from_config(
+                window_conf_with_title_and_size(
+                    &title,
+                    parsed_cfg.window_width(),
+                    parsed_cfg.window_height(),
+                ),
+                run_embedded_game_with_args(tail_data, mrb_bytes, args),
+            );
+        }
         cli::CliAction::Build {
             script_path,
             output_path,
@@ -7628,6 +7713,45 @@ fn main() {
                 eprintln!("Error: {}", err);
                 std::process::exit(1);
             }
+        }
+        cli::CliAction::RunWithEdit {
+            script_path,
+            script_args,
+            editor_kind,
+        } => {
+            let _editor_children = cli::spawn_editor_processes(editor_kind, &script_path);
+            let compile_res = cli::compile_ruby_script_file(&script_path);
+            let initial_error = match &compile_res {
+                Ok(_) => None,
+                Err(err) => {
+                    eprintln!("[uk run] Initial compilation error in `{}`:\n{}", script_path.display(), err);
+                    Some(ScriptError {
+                        title: "Syntax / Compilation Error".to_string(),
+                        backtrace: Vec::new(),
+                        full_message: err.clone(),
+                    })
+                }
+            };
+            let (initial_source, tail_data, mrb_bytes) = compile_res.unwrap_or_else(|_| (String::new(), String::new(), Vec::new()));
+            let parsed_cfg = parse_config_from_source(&initial_source);
+            let title = if parsed_cfg.title != "Usakame Retro Engine" {
+                parsed_cfg.title.clone()
+            } else {
+                format!("Usakame - {}", script_path.display())
+            };
+            macroquad::Window::from_config(
+                window_conf_with_title_and_size(&title, parsed_cfg.window_width(), parsed_cfg.window_height()),
+                run_native_with_hot_reload(
+                    script_path,
+                    script_args,
+                    initial_source,
+                    tail_data,
+                    mrb_bytes,
+                    initial_error,
+                    None,
+                    10,
+                ),
+            );
         }
         cli::CliAction::Run {
             script_path,
@@ -7675,7 +7799,7 @@ fn main() {
         } => {
             macroquad::Window::from_config(
                 window_conf_with_title(&title),
-                run_embedded_game(tail_data, mrb_bytes),
+                run_embedded_game_with_args(tail_data, mrb_bytes, Vec::new()),
             );
         }
     }

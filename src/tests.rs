@@ -3425,3 +3425,212 @@ fn test_mget_nil_and_mset_mdel_api() {
 
 
 
+
+#[test]
+fn test_cli_parse_new_edit_examples_and_run_with_edit() {
+    // 1. uk new <dir> (default)
+    let act_new = cli::parse_cli_args(["uk", "new", "my_game"].map(String::from)).unwrap();
+    assert_eq!(
+        act_new,
+        cli::CliAction::New(cli::NewProjectOptions {
+            project_dir: std::path::PathBuf::from("my_game"),
+            minimal: false,
+            split: false,
+            with_refs: false,
+            template: "default".to_string(),
+        })
+    );
+
+    // 2. uk new <dir> --minimal --split --with-refs -t minimal
+    let act_new_opts = cli::parse_cli_args(
+        ["uk", "new", "my_game", "--minimal", "--split", "--with-refs", "-t", "minimal"]
+            .map(String::from),
+    )
+    .unwrap();
+    assert_eq!(
+        act_new_opts,
+        cli::CliAction::New(cli::NewProjectOptions {
+            project_dir: std::path::PathBuf::from("my_game"),
+            minimal: true,
+            split: true,
+            with_refs: true,
+            template: "minimal".to_string(),
+        })
+    );
+
+    // 3. uk init (defaults to ".")
+    let act_init = cli::parse_cli_args(["uk", "init"].map(String::from)).unwrap();
+    assert_eq!(
+        act_init,
+        cli::CliAction::New(cli::NewProjectOptions {
+            project_dir: std::path::PathBuf::from("."),
+            minimal: false,
+            split: false,
+            with_refs: false,
+            template: "default".to_string(),
+        })
+    );
+
+    // 4. uk examples [dest]
+    let act_ex_default = cli::parse_cli_args(["uk", "examples"].map(String::from)).unwrap();
+    assert_eq!(
+        act_ex_default,
+        cli::CliAction::Examples {
+            dest_dir: std::path::PathBuf::from("examples"),
+        }
+    );
+    let act_ex_custom = cli::parse_cli_args(["uk", "examples", "refs/samples"].map(String::from)).unwrap();
+    assert_eq!(
+        act_ex_custom,
+        cli::CliAction::Examples {
+            dest_dir: std::path::PathBuf::from("refs/samples"),
+        }
+    );
+
+    // 5. uk edit [spr|map|all] [target.rb]
+    let act_edit_default = cli::parse_cli_args(["uk", "edit"].map(String::from)).unwrap();
+    assert_eq!(
+        act_edit_default,
+        cli::CliAction::Edit {
+            kind: cli::EditorKind::Sprite,
+            target_path: std::path::PathBuf::from("game.rb"),
+        }
+    );
+    let act_edit_map = cli::parse_cli_args(["uk", "edit", "map", "stage1.rb"].map(String::from)).unwrap();
+    assert_eq!(
+        act_edit_map,
+        cli::CliAction::Edit {
+            kind: cli::EditorKind::Tilemap,
+            target_path: std::path::PathBuf::from("stage1.rb"),
+        }
+    );
+    let act_edit_all = cli::parse_cli_args(["uk", "edit", "--all", "stage1.rb"].map(String::from)).unwrap();
+    assert_eq!(
+        act_edit_all,
+        cli::CliAction::Edit {
+            kind: cli::EditorKind::All,
+            target_path: std::path::PathBuf::from("stage1.rb"),
+        }
+    );
+
+    // 6. uk run_with_edit & uk run --edit
+    let act_rwe = cli::parse_cli_args(["uk", "run_with_edit", "my_app.rb"].map(String::from)).unwrap();
+    assert_eq!(
+        act_rwe,
+        cli::CliAction::RunWithEdit {
+            script_path: std::path::PathBuf::from("my_app.rb"),
+            script_args: Vec::new(),
+            editor_kind: cli::EditorKind::All,
+        }
+    );
+    let act_run_edit = cli::parse_cli_args(["uk", "run", "my_app.rb", "--edit=spr"].map(String::from)).unwrap();
+    assert_eq!(
+        act_run_edit,
+        cli::CliAction::RunWithEdit {
+            script_path: std::path::PathBuf::from("my_app.rb"),
+            script_args: Vec::new(),
+            editor_kind: cli::EditorKind::Sprite,
+        }
+    );
+}
+
+#[test]
+fn test_cmd_new_and_examples_archive_workflow() {
+    let base_temp = std::env::temp_dir().join("uk_test_new_project_workflow");
+    let _ = std::fs::remove_dir_all(&base_temp);
+    std::fs::create_dir_all(&base_temp).unwrap();
+
+    // 1. Default `uk new app_default` (AI docs ON, single-file starter template)
+    let dir_default = base_temp.join("app_default");
+    let opts_default = cli::NewProjectOptions {
+        project_dir: dir_default.clone(),
+        minimal: false,
+        split: false,
+        with_refs: false,
+        template: "default".to_string(),
+    };
+    cli::cmd_new(&opts_default).expect("cmd_new default should succeed");
+
+    assert!(dir_default.join(".gitignore").exists());
+    assert!(dir_default.join("game.rb").exists());
+    assert!(dir_default.join("AGENTS.md").exists());
+    assert!(dir_default.join("docs/api.md").exists());
+    assert!(dir_default.join("docs/mrubyedge_api.md").exists());
+
+    // Compile and run generated game.rb for 30 frames
+    let (_, tail_def, mrb_def) =
+        cli::compile_ruby_script_file(&dir_default.join("game.rb")).expect("Generated game.rb should compile");
+    let mut rt_def = GameRuntime::new(&tail_def, &mrb_def, true).expect("Generated game.rb should init");
+    for _ in 0..30 {
+        rt_def.call_update_result().expect("Generated update should succeed");
+        rt_def.call_draw_result().expect("Generated draw should succeed");
+    }
+
+    // Re-running cmd_new on existing directory with game.rb should error safely
+    assert!(cli::cmd_new(&opts_default).is_err());
+
+    // 2. `--minimal` mode (no AGENTS.md or docs/)
+    let dir_min = base_temp.join("app_minimal");
+    let opts_min = cli::NewProjectOptions {
+        project_dir: dir_min.clone(),
+        minimal: true,
+        split: false,
+        with_refs: false,
+        template: "minimal".to_string(),
+    };
+    cli::cmd_new(&opts_min).expect("cmd_new --minimal should succeed");
+    assert!(dir_min.join(".gitignore").exists());
+    assert!(dir_min.join("game.rb").exists());
+    assert!(!dir_min.join("AGENTS.md").exists());
+    assert!(!dir_min.join("docs").exists());
+
+    let (_, tail_min, mrb_min) =
+        cli::compile_ruby_script_file(&dir_min.join("game.rb")).expect("Minimal game.rb should compile");
+    let mut rt_min = GameRuntime::new(&tail_min, &mrb_min, true).expect("Minimal game.rb should init");
+    for _ in 0..10 {
+        rt_min.call_update_result().unwrap();
+        rt_min.call_draw_result().unwrap();
+    }
+
+    // 3. `--split --with-refs` mode
+    let dir_split = base_temp.join("app_split");
+    let opts_split = cli::NewProjectOptions {
+        project_dir: dir_split.clone(),
+        minimal: false,
+        split: true,
+        with_refs: true,
+        template: "default".to_string(),
+    };
+    cli::cmd_new(&opts_split).expect("cmd_new --split --with-refs should succeed");
+    assert!(dir_split.join("game.rb").exists());
+    assert!(dir_split.join("game.spr").exists());
+    assert!(dir_split.join("game.map").exists());
+    assert!(dir_split.join("game.sfx").exists());
+    assert!(dir_split.join("refs/examples/platformer.rb").exists());
+    assert!(dir_split.join("refs/examples/sprite_editor.rb").exists());
+    assert!(dir_split.join("refs/examples/tilemap_editor.rb").exists());
+
+    let (_, tail_split, mrb_split) =
+        cli::compile_ruby_script_file(&dir_split.join("game.rb")).expect("Split game.rb should compile");
+    assert!(tail_split.contains("@SPRITE 0"));
+    assert!(tail_split.contains("@MAP 0 0"));
+    assert!(tail_split.contains("@SFX 0"));
+    let mut rt_split = GameRuntime::new(&tail_split, &mrb_split, true).expect("Split game.rb should init");
+    for _ in 0..10 {
+        rt_split.call_update_result().unwrap();
+        rt_split.call_draw_result().unwrap();
+    }
+
+    // 4. Verify `spawn_editor` Ruby API works in headless mode
+    let spawn_script = r#"
+    $spawn_ok = spawn_editor("map", "game.rb")
+    "#;
+    let (t_sp, m_sp) = cli::compile_ruby_script_str_with_filename(spawn_script, Some("test_spawn.rb")).unwrap();
+    let rt_sp = GameRuntime::new(&t_sp, &m_sp, true).unwrap();
+    assert_eq!(
+        rt_sp.vm.globals.get("$spawn_ok").map(|o| o.as_ref().clone()),
+        Some(RObject::boolean(true))
+    );
+
+    let _ = std::fs::remove_dir_all(&base_temp);
+}

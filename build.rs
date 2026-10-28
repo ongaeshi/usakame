@@ -1,10 +1,17 @@
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
+
+use flate2::Compression;
+use flate2::write::ZlibEncoder;
 
 fn main() {
     println!("cargo:rerun-if-changed=game.rb");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=examples");
+    println!("cargo:rerun-if-changed=docs");
+    println!("cargo:rerun-if-changed=AGENTS.md");
 
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR not set");
     let dest_path = Path::new(&out_dir).join("game.mrb");
@@ -22,4 +29,44 @@ fn main() {
             .compile_to_file(&normalized, &dest_path)
             .expect("Failed to compile game.rb to bytecode in build.rs");
     }
+
+    build_examples_archive(Path::new("examples"), &Path::new(&out_dir).join("examples_archive.bin"));
 }
+
+fn build_examples_archive(examples_dir: &Path, archive_out_path: &Path) {
+    let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
+    if let Ok(read_dir) = fs::read_dir(examples_dir) {
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    println!("cargo:rerun-if-changed=examples/{}", name);
+                    if let Ok(bytes) = fs::read(&path) {
+                        entries.push((name.to_string(), bytes));
+                    }
+                }
+            }
+        }
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut raw_buf = Vec::new();
+    raw_buf.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    for (name, data) in &entries {
+        let name_bytes = name.as_bytes();
+        raw_buf.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+        raw_buf.extend_from_slice(name_bytes);
+        raw_buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        raw_buf.extend_from_slice(data);
+    }
+
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
+    encoder
+        .write_all(&raw_buf)
+        .expect("Failed to compress examples archive");
+    let compressed = encoder
+        .finish()
+        .expect("Failed to finish compressing examples archive");
+    fs::write(archive_out_path, compressed).expect("Failed to write examples_archive.bin");
+}
+

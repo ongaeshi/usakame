@@ -448,6 +448,7 @@ dependencies = [
 name = "usakame"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "macroquad",
  "mruby-compiler2-sys",
  "mrubyedge",
