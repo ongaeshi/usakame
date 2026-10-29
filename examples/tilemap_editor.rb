@@ -212,22 +212,34 @@ $save_path = $target_path
 tlen = $target_path.size
 if tlen >= 3
   suf = $target_path[tlen - 3, 3]
+  candidate_map = nil
   if suf == ".rb"
-    $save_path = $target_path[0, tlen - 3] + ".map"
+    candidate_map = $target_path[0, tlen - 3] + ".map"
+  end
+  # 既存の .map ファイルが存在する場合のみ .map を優先し、なければ .rb 直接保存
+  if candidate_map && read_file(candidate_map)
+    $save_path = candidate_map
   end
 end
 
 $spr_path = nil
 if tlen >= 3
   suf = $target_path[tlen - 3, 3]
+  candidate_spr = nil
   if suf == ".rb"
-    $spr_path = $target_path[0, tlen - 3] + ".spr"
+    candidate_spr = $target_path[0, tlen - 3] + ".spr"
   elsif suf == "map"
-    $spr_path = $target_path[0, tlen - 4] + ".spr"
+    candidate_spr = $target_path[0, tlen - 4] + ".spr"
+  end
+  if candidate_spr && read_file(candidate_spr)
+    $spr_path = candidate_spr
+  else
+    $spr_path = $target_path
   end
 end
 
 $last_spr_mtime = 0
+$last_map_mtime = file_mtime($save_path)
 
 def snap_floor(v, step)
   return v if step <= 1
@@ -540,7 +552,8 @@ end
 
 def save_map_file
   content = generate_map_text + "\n"
-  if save_file($save_path, content)
+  if save_resource_map($save_path, content)
+    $last_map_mtime = file_mtime($save_path)
     sfx(:powerup)
     notify("SAVED TO #{$save_path}")
     puts "[Tilemap Editor] Successfully saved map to #{$save_path}"
@@ -585,6 +598,21 @@ def update
     cur_mtime = file_mtime($spr_path)
     if cur_mtime > 0 && cur_mtime != $last_spr_mtime
       reload_custom_sprites
+    end
+  end
+
+  # 外部マップの更新チェック
+  if $save_path && ($notify_timer % 30 == 0)
+    cur_map_mtime = file_mtime($save_path)
+    if cur_map_mtime > 0 && cur_map_mtime != $last_map_mtime
+      $last_map_mtime = cur_map_mtime
+      loaded = load_resource_map($save_path, MAP_WIDTH, MAP_HEIGHT)
+      if loaded && loaded.size == MAP_WIDTH * MAP_HEIGHT
+        $map = loaded
+        sync_tilemap_to_engine
+        $minimap_dirty = true
+        notify("RELOADED MAP (EXTERNAL MODIFIED)")
+      end
     end
   end
 

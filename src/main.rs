@@ -4865,6 +4865,168 @@ fn register_engine_api(
         }),
     );
 
+    // save_resource_bank(path, bank_id = 0, format = nil):
+    // 指定ファイル（game.rb または .spr等）へ指定バンクのデータを非破壊パッチ保存する。
+    // format が "text" / :text の場合は @SPRITE テキスト形式。
+    // format が "b64" / :b64 / true の場合は @BANK <id> (Base64 PNG) 形式。
+    // format が nil / false の場合は自動判定:
+    //   - bank_id == 0: 既存ファイルに @BANK 0 がありかつ @SPRITE が無い場合は Base64 を維持、それ以外は @SPRITE テキスト形式。
+    //   - bank_id > 0: Base64 形式。
+    let banks_for_save_bank = banks.clone();
+    let emoji_for_save_bank = emoji_atlas.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "save_resource_bank",
+        Box::new(move |_vm, args| {
+            let path_str = args
+                .first()
+                .and_then(|v| String::try_from(v.as_ref()).ok())
+                .unwrap_or_default();
+            if path_str.is_empty() {
+                return Ok(Rc::new(RObject::boolean(false)));
+            }
+            let bank_id = arg_i32(args, 1, 0);
+            let format_arg = args.get(2).and_then(|v| match &v.value {
+                RValue::Symbol(s) => Some(s.name.clone()),
+                RValue::String(s, _) => String::from_utf8(s.borrow().clone()).ok(),
+                RValue::Bool(true) => Some("b64".to_string()),
+                _ => None,
+            });
+
+            let banks_ref = banks_for_save_bank.borrow();
+            let bank = match banks_ref.get(&bank_id) {
+                Some(b) => b,
+                None => return Ok(Rc::new(RObject::boolean(false))),
+            };
+
+            let current_content = std::fs::read_to_string(&path_str).unwrap_or_default();
+            let is_text_mode = match format_arg.as_deref() {
+                Some("text") => true,
+                Some("b64") => false,
+                _ => {
+                    if bank_id == 0 {
+                        let has_bank0 = current_content.lines().any(|l| l.trim().starts_with("@BANK 0"));
+                        let has_sprite = current_content.lines().any(|l| l.trim().starts_with("@SPRITE"));
+                        !(has_bank0 && !has_sprite)
+                    } else {
+                        false
+                    }
+                }
+            };
+
+            let new_content = if is_text_mode {
+                let pixels = bank.get_pixels();
+                let emoji_ref = emoji_for_save_bank.borrow();
+                let checker = |em: &str| -> Option<Vec<Option<u8>>> {
+                    emoji_ref.extract_sprite(em).map(|sp| {
+                        sp.rgba.chunks_exact(4).map(rgba_to_palette_opt).collect()
+                    })
+                };
+                bundle::patch_resource_sprites_as_text(
+                    &current_content,
+                    bank_id,
+                    &pixels,
+                    Some(&checker),
+                )
+            } else {
+                let b64 = match bank.to_base64_png() {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("[save_resource_bank] Base64 error: {}", e);
+                        return Ok(Rc::new(RObject::boolean(false)));
+                    }
+                };
+                bundle::patch_resource_bank_b64(&current_content, bank_id, &b64)
+            };
+
+            match std::fs::write(&path_str, new_content) {
+                Ok(()) => Ok(Rc::new(RObject::boolean(true))),
+                Err(e) => {
+                    eprintln!("[save_resource_bank] Failed to write `{}`: {}", path_str, e);
+                    Ok(Rc::new(RObject::boolean(false)))
+                }
+            }
+        }),
+    );
+
+    // save_resource_map(path, map_text): 指定ファイル（game.rb または .map）へ @MAP / @OBJECTS を非破壊保存する。
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "save_resource_map",
+        Box::new(|_vm, args| {
+            let path_str = args
+                .first()
+                .and_then(|v| String::try_from(v.as_ref()).ok())
+                .unwrap_or_default();
+            let map_text = args
+                .get(1)
+                .and_then(|v| String::try_from(v.as_ref()).ok())
+                .unwrap_or_default();
+            if path_str.is_empty() {
+                return Ok(Rc::new(RObject::boolean(false)));
+            }
+
+            let current_content = std::fs::read_to_string(&path_str).unwrap_or_default();
+            let new_content = bundle::patch_resource_map_and_objects(&current_content, &map_text);
+
+            match std::fs::write(&path_str, new_content) {
+                Ok(()) => Ok(Rc::new(RObject::boolean(true))),
+                Err(e) => {
+                    eprintln!("[save_resource_map] Failed to write `{}`: {}", path_str, e);
+                    Ok(Rc::new(RObject::boolean(false)))
+                }
+            }
+        }),
+    );
+
+    // export_bank_sprites_text(path_or_bank_id = 0, bank_id = 0):
+    // バンク内の非空スプライトを @SPRITE テキスト形式で生成して返す。
+    let banks_for_export = banks.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "export_bank_sprites_text",
+        Box::new(move |_vm, args| {
+            let (path_str, bank_id) = match args.first() {
+                Some(arg) => match &arg.value {
+                    RValue::Integer(id) => (None, *id as i32),
+                    RValue::String(s, _) => {
+                        let path = String::from_utf8(s.borrow().clone()).ok();
+                        let id = arg_i32(args, 1, 0);
+                        (path, id)
+                    }
+                    _ => (None, 0),
+                },
+                None => (None, 0),
+            };
+
+            let banks_ref = banks_for_export.borrow();
+            let pixels = if let Some(bank) = banks_ref.get(&bank_id) {
+                bank.get_pixels()
+            } else {
+                vec![None; BANK_PIXELS]
+            };
+
+            let current_content = path_str.and_then(|p| std::fs::read_to_string(p).ok());
+            let exported = if let Some(ref content) = current_content {
+                let dummy_emoji: Option<&fn(&str) -> Option<Vec<Option<u8>>>> = None;
+                let patched = bundle::patch_tail_sprites_as_text(content, bank_id, &pixels, dummy_emoji);
+                let blocks = bundle::parse_tail_blocks(&patched);
+                let sprite_blocks: Vec<_> = blocks
+                    .into_iter()
+                    .filter(|b| matches!(b, bundle::TailBlock::Sprite { .. }))
+                    .collect();
+                bundle::format_tail_blocks(&sprite_blocks)
+            } else {
+                bundle::export_bank_sprites_text_from_pixels(&pixels)
+            };
+
+            Ok(Rc::new(RObject::string(exported)))
+        }),
+    );
+
     // spawn_editor(kind = "spr", target_path = "game.rb"):
     // スプライトエディタ ("spr") またはタイルマップエディタ ("map") を別プロセスで起動する。
     mrb_define_cmethod(

@@ -4066,3 +4066,68 @@ end
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+fn test_save_resource_bank_and_map_non_destructive_in_ruby() {
+    let temp_dir = std::env::temp_dir().join(format!("usakame_test_save_res_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let script_path = temp_dir.join("test_save.rb");
+    let initial_content = r#"# Initial code comment
+$player_x = 10
+
+def update
+  # Set a pixel in bank 0
+  set_bank_pixel(0, 0, 0, 7)
+  # Save bank to self as text
+  save_resource_bank("SCRIPT_PATH_PLACEHOLDER", 0)
+  # Save map to self
+  save_resource_map("SCRIPT_PATH_PLACEHOLDER", "@MAP 0 0\n1 2\n3 4\n")
+end
+
+def draw
+end
+
+__END__
+# Sprite comments preserved
+@SPRITE 0
+0000000000000000
+0000000000000000
+0000000000000000
+0000000000000000
+0000000000000000
+0000000000000000
+0000000000000000
+0000000000000000
+0000000000000000
+0000000000000000
+0000000000000000
+0000000000000000
+0000000000000000
+0000000000000000
+0000000000000000
+0000000000000000
+"#;
+    let path_str = script_path.to_str().unwrap().replace('\\', "/");
+    let script_code = initial_content.replace("SCRIPT_PATH_PLACEHOLDER", &path_str);
+    std::fs::write(&script_path, &script_code).unwrap();
+
+    let res = verify_ruby_script_file_headless(&script_path, 2, false);
+    assert!(res.is_ok(), "Verification failed: {:?}", res);
+
+    let after_content = std::fs::read_to_string(&script_path).unwrap();
+    // Verify code comment is preserved
+    assert!(after_content.contains("# Initial code comment"));
+    assert!(after_content.contains("$player_x = 10"));
+    // Verify sprite comment is preserved
+    assert!(after_content.contains("# Sprite comments preserved"));
+    // Verify sprite 0 is updated as text (pixel (0,0) is '7')
+    assert!(after_content.contains("7000000000000000"));
+    // Verify map is patched
+    assert!(after_content.contains("@MAP 0 0"));
+    assert!(after_content.contains("1 2"));
+    // Verify it is NOT base64
+    assert!(!after_content.contains("@BANK 0"));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}

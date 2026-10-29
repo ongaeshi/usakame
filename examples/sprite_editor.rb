@@ -108,12 +108,18 @@ $save_path = $target_path
 tlen = $target_path.size
 if tlen >= 3
   suf = $target_path[tlen - 3, 3]
+  candidate_spr = nil
   if suf == ".rb"
-    $save_path = $target_path[0, tlen - 3] + ".spr"
+    candidate_spr = $target_path[0, tlen - 3] + ".spr"
   elsif suf == "map"
-    $save_path = $target_path[0, tlen - 4] + ".spr"
+    candidate_spr = $target_path[0, tlen - 4] + ".spr"
+  end
+  # 既存の .spr ファイルが存在する場合のみ .spr を優先し、なければ .rb 直接保存
+  if candidate_spr && read_file(candidate_spr)
+    $save_path = candidate_spr
   end
 end
+$last_target_mtime = file_mtime($save_path)
 
 def notify(msg)
   $notify_msg = msg
@@ -283,42 +289,8 @@ def save_to_target
     return
   end
 
-  b64 = bank_to_b64_png(get_bank_pixels($current_bank))
-  unless b64
-    sfx(:boom)
-    notify("ERROR: FAILED TO ENCODE PNG")
-    return
-  end
-
-  # 既存ファイルの読み込みとセクション更新
-  original_content = read_file($save_path) || ""
-  bank_header = "@BANK #{$current_bank}"
-  bank_block = "#{bank_header}\n#{b64}\n"
-
-  new_content = ""
-  if original_content.include?(bank_header)
-    # 既存の @BANK <id> セクションを置換
-    lines = original_content.split("\n")
-    in_target_bank = false
-    lines.each do |line|
-      if line.strip == bank_header
-        in_target_bank = true
-        new_content << bank_block
-      elsif in_target_bank && (line.start_with?("@") || line.start_with?("__END__"))
-        in_target_bank = false
-        new_content << line << "\n"
-      elsif !in_target_bank
-        new_content << line << "\n"
-      end
-    end
-  else
-    # 末尾に追記
-    new_content = original_content
-    new_content << "\n" unless new_content.empty? || new_content.end_with?("\n")
-    new_content << bank_block
-  end
-
-  if save_file($save_path, new_content)
+  if save_resource_bank($save_path, $current_bank)
+    $last_target_mtime = file_mtime($save_path)
     sfx(:powerup)
     notify("SAVED BANK #{$current_bank} TO #{$save_path}!")
   else
@@ -328,15 +300,14 @@ def save_to_target
 end
 
 def export_all
-  b64 = bank_to_b64_png(get_bank_pixels($current_bank))
+  text = export_bank_sprites_text($save_path, $current_bank)
   puts "\n# =================================================="
   puts "# 🐰 USAKAME BANK DATA (Bank #{$current_bank})"
   puts "# =================================================="
-  puts "@BANK #{$current_bank}"
-  puts b64
+  puts text
   puts "# ==================================================\n"
   sfx(:powerup)
-  notify("EXPORTED @BANK #{$current_bank} TO CONSOLE!")
+  notify("EXPORTED @SPRITE DATA TO CONSOLE!")
 end
 
 # 塗りつぶし (Flood Fill on 32x32 canvas - 高速 DFS & 部分更新)
@@ -435,6 +406,20 @@ end
 # 更新処理 (update)
 # ------------------------------------------------------------------------------
 def update
+  # --- 外部更新（ホットリロード）の検知 ---
+  if $save_path
+    cur_mtime = file_mtime($save_path)
+    if cur_mtime > 0 && cur_mtime != $last_target_mtime
+      $last_target_mtime = cur_mtime
+      loaded = load_resource_bank($save_path, $current_bank)
+      if loaded && loaded.size == BANK_SIZE * BANK_SIZE
+        update_bank($current_bank, loaded)
+        reload_palettes($save_path)
+        notify("RELOADED BANK #{$current_bank} (EXTERNAL MODIFIED)")
+      end
+    end
+  end
+
   mx = mouse_x
   my = mouse_y
 
@@ -957,15 +942,14 @@ def draw
   if $show_code_modal
     rectfill(30, 20, 420, 230, 0)
     rect(30, 20, 420, 230, 7)
-    print_text("--- BANK DATA PREVIEW (Click anywhere to close) ---", 40, 28, 10)
-    print_text("@BANK #{$current_bank}", 40, 44, 7)
-    b64 = bank_to_b64_png(get_bank_pixels($current_bank)) || ""
-    16.times do |i|
-      chunk = b64[i * 64, 64]
-      break if chunk.nil? || chunk.empty?
-      print_text(chunk, 40, 58 + i * 10, 6)
+    print_text("--- SPRITE DATA PREVIEW (Click anywhere to close) ---", 40, 28, 10)
+    preview_text = export_bank_sprites_text($save_path, $current_bank)
+    lines = preview_text ? preview_text.split("\n") : []
+    18.times do |i|
+      break if i >= lines.size
+      print_text(lines[i], 40, 44 + i * 10, 6)
     end
-    print_text("... (truncated)", 40, 58 + 16 * 10, 5) if b64.size > 16 * 64
+    print_text("... (truncated)", 40, 44 + 18 * 10, 5) if lines.size > 18
   end
 end
 

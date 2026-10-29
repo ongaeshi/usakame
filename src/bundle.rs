@@ -604,6 +604,600 @@ pub fn unpack_script_to_files(script_path: &Path) -> Result<Vec<PathBuf>, String
     Ok(generated)
 }
 
+pub fn col_to_hex_char(col: u8) -> char {
+    match col {
+        0..=9 => (b'0' + col) as char,
+        10..=15 => (b'A' + (col - 10)) as char,
+        _ => '.',
+    }
+}
+
+pub fn parse_dims_token(s: &str) -> Option<(u16, u16)> {
+    let lower = s.trim().to_ascii_lowercase();
+    let (w_str, h_str) = lower.split_once('x')?;
+    let w = w_str.trim().parse::<u16>().ok()?;
+    let h = h_str.trim().parse::<u16>().ok()?;
+    if w > 0 && h > 0 {
+        Some((w, h))
+    } else {
+        None
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TailBlock {
+    CommentOrBlank(String),
+    Sprite {
+        id: i32,
+        header: String,
+        dims: (u16, u16),
+        emoji: Option<String>,
+        lines: Vec<String>,
+    },
+    Bank {
+        id: i32,
+        header: String,
+        lines: Vec<String>,
+    },
+    Map {
+        header: String,
+        lines: Vec<String>,
+    },
+    Objects {
+        header: String,
+        lines: Vec<String>,
+    },
+    Other {
+        header: String,
+        lines: Vec<String>,
+    },
+}
+
+pub fn parse_tail_blocks(tail_data: &str) -> Vec<TailBlock> {
+    let mut blocks = Vec::new();
+    let mut current_block: Option<TailBlock> = None;
+    let mut pending_blanks = Vec::new();
+
+    for raw_line in tail_data.lines() {
+        let trimmed = raw_line.trim_end_matches(['\r', '\n']);
+        let stripped = trimmed.trim();
+
+        if stripped.starts_with('@') {
+            if let Some(block) = current_block.take() {
+                blocks.push(block);
+            }
+            for b in pending_blanks.drain(..) {
+                blocks.push(TailBlock::CommentOrBlank(b));
+            }
+
+            if let Some(rest) = stripped.strip_prefix("@SPRITE") {
+                let mut parts = rest.split_whitespace();
+                let mut id = 0;
+                let mut dims = (16, 16);
+                let mut emoji = None;
+                if let Some(first) = parts.next() {
+                    id = first.parse::<i32>().unwrap_or(0);
+                }
+                for tok in parts {
+                    if tok.starts_with('#') {
+                        break;
+                    }
+                    if let Some(d) = parse_dims_token(tok) {
+                        dims = d;
+                    } else if !tok.starts_with("pal:")
+                        && !tok.starts_with("p:")
+                        && !tok.starts_with("pal=")
+                        && !tok.starts_with("p=")
+                    {
+                        if emoji.is_none() && !tok.chars().all(|c| c.is_ascii_digit()) {
+                            emoji = Some(tok.to_string());
+                        }
+                    }
+                }
+                current_block = Some(TailBlock::Sprite {
+                    id,
+                    header: trimmed.to_string(),
+                    dims,
+                    emoji,
+                    lines: Vec::new(),
+                });
+            } else if let Some(rest) = stripped.strip_prefix("@BANK") {
+                let id = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|s| s.parse::<i32>().ok())
+                    .unwrap_or(0);
+                current_block = Some(TailBlock::Bank {
+                    id,
+                    header: trimmed.to_string(),
+                    lines: Vec::new(),
+                });
+            } else if stripped.starts_with("@MAP") {
+                current_block = Some(TailBlock::Map {
+                    header: trimmed.to_string(),
+                    lines: Vec::new(),
+                });
+            } else if stripped.starts_with("@OBJECTS") {
+                current_block = Some(TailBlock::Objects {
+                    header: trimmed.to_string(),
+                    lines: Vec::new(),
+                });
+            } else {
+                current_block = Some(TailBlock::Other {
+                    header: trimmed.to_string(),
+                    lines: Vec::new(),
+                });
+            }
+        } else if stripped.starts_with('#') {
+            if let Some(ref block) = current_block {
+                let should_close = match block {
+                    TailBlock::Sprite { .. } | TailBlock::Bank { .. } | TailBlock::Map { .. } => true,
+                    TailBlock::Objects { lines, .. } => !lines.is_empty(),
+                    TailBlock::Other { .. } => false,
+                    TailBlock::CommentOrBlank(_) => false,
+                };
+                if should_close {
+                    blocks.push(current_block.take().unwrap());
+                }
+            }
+            for b in pending_blanks.drain(..) {
+                blocks.push(TailBlock::CommentOrBlank(b));
+            }
+            if current_block.is_none() {
+                blocks.push(TailBlock::CommentOrBlank(trimmed.to_string()));
+            } else if let Some(ref mut block) = current_block {
+                match block {
+                    TailBlock::Objects { lines, .. } | TailBlock::Other { lines, .. } => {
+                        lines.push(trimmed.to_string());
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        } else if stripped.is_empty() {
+            if let Some(TailBlock::Sprite { lines, dims, .. }) = current_block.as_ref() {
+                if lines.len() >= dims.1 as usize {
+                    blocks.push(current_block.take().unwrap());
+                }
+            }
+            pending_blanks.push(trimmed.to_string());
+        } else {
+            if let Some(ref mut block) = current_block {
+                for b in pending_blanks.drain(..) {
+                    match block {
+                        TailBlock::Sprite { lines, .. }
+                        | TailBlock::Bank { lines, .. }
+                        | TailBlock::Map { lines, .. }
+                        | TailBlock::Objects { lines, .. }
+                        | TailBlock::Other { lines, .. } => {
+                            lines.push(b);
+                        }
+                        TailBlock::CommentOrBlank(_) => unreachable!(),
+                    }
+                }
+                match block {
+                    TailBlock::Sprite { lines, dims, .. } => {
+                        lines.push(trimmed.to_string());
+                        if lines.len() >= dims.1 as usize {
+                            blocks.push(current_block.take().unwrap());
+                        }
+                    }
+                    TailBlock::Bank { lines, .. }
+                    | TailBlock::Map { lines, .. }
+                    | TailBlock::Objects { lines, .. }
+                    | TailBlock::Other { lines, .. } => {
+                        lines.push(trimmed.to_string());
+                    }
+                    TailBlock::CommentOrBlank(_) => unreachable!(),
+                }
+            } else {
+                for b in pending_blanks.drain(..) {
+                    blocks.push(TailBlock::CommentOrBlank(b));
+                }
+                blocks.push(TailBlock::CommentOrBlank(trimmed.to_string()));
+            }
+        }
+    }
+
+    if let Some(block) = current_block {
+        blocks.push(block);
+    }
+    for b in pending_blanks.drain(..) {
+        blocks.push(TailBlock::CommentOrBlank(b));
+    }
+
+    blocks
+}
+
+pub fn format_tail_blocks(blocks: &[TailBlock]) -> String {
+    let mut out = String::new();
+    for block in blocks {
+        match block {
+            TailBlock::CommentOrBlank(line) => {
+                out.push_str(line);
+                out.push('\n');
+            }
+            TailBlock::Sprite { header, lines, .. }
+            | TailBlock::Bank { header, lines, .. }
+            | TailBlock::Map { header, lines }
+            | TailBlock::Objects { header, lines }
+            | TailBlock::Other { header, lines } => {
+                out.push_str(header);
+                out.push('\n');
+                for l in lines {
+                    out.push_str(l);
+                    out.push('\n');
+                }
+            }
+        }
+    }
+    out
+}
+
+pub fn patch_tail_sprites_as_text<F>(
+    tail_data: &str,
+    bank_id: i32,
+    bank_pixels: &[Option<u8>],
+    check_emoji: Option<&F>,
+) -> String
+where
+    F: Fn(&str) -> Option<Vec<Option<u8>>>,
+{
+    let mut blocks = parse_tail_blocks(tail_data);
+
+    if bank_id == 0 {
+        // Also remove any existing @BANK 0 block so that bank 0 is represented cleanly by @SPRITE
+        blocks.retain(|b| match b {
+            TailBlock::Bank { id, .. } if *id == 0 => false,
+            _ => true,
+        });
+
+        use std::collections::HashSet;
+        let mut occupied = HashSet::new();
+
+        for b in &blocks {
+            if let TailBlock::Sprite { id, dims, .. } = b {
+                if *id >= 0 && *id <= 255 {
+                    let slot_x = (*id as usize % 16) * 16;
+                    let slot_y = (*id as usize / 16) * 16;
+                    let w_tiles = (dims.0 as usize + 15) / 16;
+                    let h_tiles = (dims.1 as usize + 15) / 16;
+                    for ty in 0..h_tiles {
+                        for tx in 0..w_tiles {
+                            occupied.insert((slot_x / 16 + tx, slot_y / 16 + ty));
+                        }
+                    }
+                }
+            }
+        }
+
+        for b in &mut blocks {
+            if let TailBlock::Sprite {
+                id,
+                header,
+                dims,
+                emoji,
+                lines,
+            } = b
+            {
+                if *id >= 0 && *id <= 255 {
+                    let w = dims.0 as usize;
+                    let h = dims.1 as usize;
+                    let slot_x = (*id as usize % 16) * 16;
+                    let slot_y = (*id as usize / 16) * 16;
+
+                    let mut update_lines = true;
+                    if let Some(em) = emoji.as_ref() {
+                        if lines.is_empty() {
+                            if let Some(checker) = check_emoji {
+                                if let Some(expected) = checker(em) {
+                                    let mut matches = true;
+                                    for r in 0..16 {
+                                        for c in 0..16 {
+                                            let b_idx = (slot_y + r) * 256 + (slot_x + c);
+                                            let e_idx = r * 16 + c;
+                                            let b_px = bank_pixels.get(b_idx).copied().flatten();
+                                            let e_px = expected.get(e_idx).copied().flatten();
+                                            if b_px != e_px {
+                                                matches = false;
+                                                break;
+                                            }
+                                        }
+                                        if !matches {
+                                            break;
+                                        }
+                                    }
+                                    if matches {
+                                        update_lines = false;
+                                    }
+                                }
+                            } else {
+                                update_lines = false;
+                            }
+                        }
+                    }
+
+                    if update_lines {
+                        if let Some(em) = emoji.take() {
+                            *header = header.replace(&em, "").trim_end().to_string();
+                        }
+                        let mut new_lines = Vec::with_capacity(h);
+                        for r in 0..h {
+                            let mut row = String::with_capacity(w);
+                            for c in 0..w {
+                                let idx = (slot_y + r) * 256 + (slot_x + col_to_offset(c));
+                                match bank_pixels.get(idx).copied().flatten() {
+                                    Some(col) => row.push(col_to_hex_char(col)),
+                                    None => row.push('.'),
+                                }
+                            }
+                            new_lines.push(row);
+                        }
+                        *lines = new_lines;
+                    }
+                }
+            }
+        }
+
+        blocks.retain(|b| !matches!(b, TailBlock::Bank { id: 0, .. }));
+
+        for slot_id in 0..=255 {
+            let tx = slot_id % 16;
+            let ty = slot_id / 16;
+            if occupied.contains(&(tx, ty)) {
+                continue;
+            }
+            let slot_x = tx * 16;
+            let slot_y = ty * 16;
+            let mut has_pixel = false;
+            for r in 0..16 {
+                for c in 0..16 {
+                    let idx = (slot_y + r) * 256 + (slot_x + c);
+                    if bank_pixels.get(idx).copied().flatten().is_some() {
+                        has_pixel = true;
+                        break;
+                    }
+                }
+                if has_pixel {
+                    break;
+                }
+            }
+
+            if has_pixel {
+                let mut new_lines = Vec::with_capacity(16);
+                for r in 0..16 {
+                    let mut row = String::with_capacity(16);
+                    for c in 0..16 {
+                        let idx = (slot_y + r) * 256 + (slot_x + c);
+                        match bank_pixels.get(idx).copied().flatten() {
+                            Some(col) => row.push(col_to_hex_char(col)),
+                            None => row.push('.'),
+                        }
+                    }
+                    new_lines.push(row);
+                }
+                let new_block = TailBlock::Sprite {
+                    id: slot_id as i32,
+                    header: format!("@SPRITE {}", slot_id),
+                    dims: (16, 16),
+                    emoji: None,
+                    lines: new_lines,
+                };
+                let insert_idx = blocks
+                    .iter()
+                    .rposition(|b| matches!(b, TailBlock::Sprite { .. }))
+                    .map(|i| i + 1)
+                    .unwrap_or_else(|| {
+                        blocks
+                            .iter()
+                            .position(|b| {
+                                matches!(
+                                    b,
+                                    TailBlock::Map { .. }
+                                        | TailBlock::Objects { .. }
+                                        | TailBlock::Other { .. }
+                                )
+                            })
+                            .unwrap_or(blocks.len())
+                    });
+                blocks.insert(insert_idx, TailBlock::CommentOrBlank(String::new()));
+                blocks.insert(insert_idx + 1, new_block);
+                occupied.insert((tx, ty));
+            }
+        }
+    }
+
+    format_tail_blocks(&blocks)
+}
+
+#[inline(always)]
+fn col_to_offset(c: usize) -> usize {
+    c
+}
+
+pub fn patch_resource_sprites_as_text<F>(
+    full_source: &str,
+    bank_id: i32,
+    bank_pixels: &[Option<u8>],
+    check_emoji: Option<&F>,
+) -> String
+where
+    F: Fn(&str) -> Option<Vec<Option<u8>>>,
+{
+    let has_end = full_source.lines().any(|l| {
+        let t = l.trim_end_matches(['\r', '\n']).trim();
+        t == "__END__"
+            || (t.starts_with("__END__") && t[7..].chars().all(|c| c.is_whitespace() || c == '#'))
+    });
+
+    if has_end {
+        let (code_part, tail_part) = split_ruby_source_and_tail(full_source);
+        let patched_tail = patch_tail_sprites_as_text(tail_part, bank_id, bank_pixels, check_emoji);
+        let trimmed_code = code_part.trim_end();
+        format!("{}\n\n__END__\n{}", trimmed_code, patched_tail.trim_start())
+    } else {
+        let has_directive = full_source.lines().any(|l| l.trim().starts_with('@'));
+        if has_directive {
+            patch_tail_sprites_as_text(full_source, bank_id, bank_pixels, check_emoji)
+        } else {
+            let patched_tail = patch_tail_sprites_as_text("", bank_id, bank_pixels, check_emoji);
+            let trimmed_code = full_source.trim_end();
+            if patched_tail.trim().is_empty() {
+                full_source.to_string()
+            } else {
+                format!("{}\n\n__END__\n{}", trimmed_code, patched_tail.trim_start())
+            }
+        }
+    }
+}
+
+pub fn patch_tail_map_and_objects(tail_data: &str, map_and_objects_text: &str) -> String {
+    let mut blocks = parse_tail_blocks(tail_data);
+    let new_blocks = parse_tail_blocks(map_and_objects_text);
+
+    let first_idx = blocks
+        .iter()
+        .position(|b| matches!(b, TailBlock::Map { .. } | TailBlock::Objects { .. }));
+
+    blocks.retain(|b| !matches!(b, TailBlock::Map { .. } | TailBlock::Objects { .. }));
+
+    let insert_idx = first_idx.unwrap_or_else(|| {
+        blocks
+            .iter()
+            .rposition(|b| matches!(b, TailBlock::Sprite { .. } | TailBlock::Bank { .. }))
+            .map(|i| i + 1)
+            .unwrap_or(blocks.len())
+    });
+
+    let mut to_insert = Vec::new();
+    if insert_idx > 0
+        && !matches!(
+            blocks.get(insert_idx.saturating_sub(1)),
+            Some(TailBlock::CommentOrBlank(s)) if s.is_empty()
+        )
+    {
+        to_insert.push(TailBlock::CommentOrBlank(String::new()));
+    }
+    for nb in new_blocks {
+        to_insert.push(nb);
+    }
+
+    blocks.splice(insert_idx..insert_idx, to_insert);
+    format_tail_blocks(&blocks)
+}
+
+pub fn patch_resource_map_and_objects(full_source: &str, map_and_objects_text: &str) -> String {
+    let has_end = full_source.lines().any(|l| {
+        let t = l.trim_end_matches(['\r', '\n']).trim();
+        t == "__END__"
+            || (t.starts_with("__END__") && t[7..].chars().all(|c| c.is_whitespace() || c == '#'))
+    });
+
+    if has_end {
+        let (code_part, tail_part) = split_ruby_source_and_tail(full_source);
+        let patched_tail = patch_tail_map_and_objects(tail_part, map_and_objects_text);
+        let trimmed_code = code_part.trim_end();
+        format!("{}\n\n__END__\n{}", trimmed_code, patched_tail.trim_start())
+    } else {
+        let has_directive = full_source.lines().any(|l| l.trim().starts_with('@'));
+        if has_directive {
+            patch_tail_map_and_objects(full_source, map_and_objects_text)
+        } else {
+            let patched_tail = patch_tail_map_and_objects("", map_and_objects_text);
+            let trimmed_code = full_source.trim_end();
+            format!("{}\n\n__END__\n{}", trimmed_code, patched_tail.trim_start())
+        }
+    }
+}
+
+pub fn patch_tail_bank_b64(tail_data: &str, bank_id: i32, b64: &str) -> String {
+    let mut blocks = parse_tail_blocks(tail_data);
+    let mut found = false;
+    for b in &mut blocks {
+        if let TailBlock::Bank { id, header, lines } = b {
+            if *id == bank_id {
+                *header = format!("@BANK {}", bank_id);
+                *lines = vec![b64.to_string()];
+                found = true;
+                break;
+            }
+        }
+    }
+    if !found {
+        let new_block = TailBlock::Bank {
+            id: bank_id,
+            header: format!("@BANK {}", bank_id),
+            lines: vec![b64.to_string()],
+        };
+        blocks.push(TailBlock::CommentOrBlank(String::new()));
+        blocks.push(new_block);
+    }
+    format_tail_blocks(&blocks)
+}
+
+pub fn patch_resource_bank_b64(full_source: &str, bank_id: i32, b64: &str) -> String {
+    let has_end = full_source.lines().any(|l| {
+        let t = l.trim_end_matches(['\r', '\n']).trim();
+        t == "__END__"
+            || (t.starts_with("__END__") && t[7..].chars().all(|c| c.is_whitespace() || c == '#'))
+    });
+
+    if has_end {
+        let (code_part, tail_part) = split_ruby_source_and_tail(full_source);
+        let patched_tail = patch_tail_bank_b64(tail_part, bank_id, b64);
+        let trimmed_code = code_part.trim_end();
+        format!("{}\n\n__END__\n{}", trimmed_code, patched_tail.trim_start())
+    } else {
+        let has_directive = full_source.lines().any(|l| l.trim().starts_with('@'));
+        if has_directive {
+            patch_tail_bank_b64(full_source, bank_id, b64)
+        } else {
+            let patched_tail = patch_tail_bank_b64("", bank_id, b64);
+            let trimmed_code = full_source.trim_end();
+            format!("{}\n\n__END__\n{}", trimmed_code, patched_tail.trim_start())
+        }
+    }
+}
+
+pub fn export_bank_sprites_text_from_pixels(bank_pixels: &[Option<u8>]) -> String {
+    let mut out = String::new();
+    for slot_id in 0..=255 {
+        let tx = slot_id % 16;
+        let ty = slot_id / 16;
+        let slot_x = tx * 16;
+        let slot_y = ty * 16;
+        let mut has_pixel = false;
+        for r in 0..16 {
+            for c in 0..16 {
+                let idx = (slot_y + r) * 256 + (slot_x + c);
+                if bank_pixels.get(idx).copied().flatten().is_some() {
+                    has_pixel = true;
+                    break;
+                }
+            }
+            if has_pixel {
+                break;
+            }
+        }
+        if has_pixel {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&format!("# {}\n@SPRITE {}\n", slot_id, slot_id));
+            for r in 0..16 {
+                for c in 0..16 {
+                    let idx = (slot_y + r) * 256 + (slot_x + c);
+                    match bank_pixels.get(idx).copied().flatten() {
+                        Some(col) => out.push(col_to_hex_char(col)),
+                        None => out.push('.'),
+                    }
+                }
+                out.push('\n');
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -682,6 +1276,144 @@ c2 e2 g2
         assert!(inlined.contains("@MAP"));
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_patch_resource_sprites_as_text_preserves_code_and_comments() {
+        let original = r#"# Game Code
+def update
+end
+
+__END__
+# Sprite header section
+# 0: Hero Bunny
+@SPRITE 0 pal:1 # Inline comment
+....77....77....
+...7EE7..7EE7...
+................
+................
+................
+................
+................
+................
+................
+................
+................
+................
+................
+................
+................
+................
+
+# 1: Turtle
+@SPRITE 1
+................
+.....BBBBBB.....
+................
+................
+................
+................
+................
+................
+................
+................
+................
+................
+................
+................
+................
+................
+
+# Stage map
+@MAP 0 0
+0 1
+"#;
+
+        // Create a 256x256 bank buffer
+        let mut pixels = vec![None; 256 * 256];
+        // Modify Sprite 0 (0,0): put color 8 (Red) in top-left
+        pixels[0] = Some(8);
+        // Leave Sprite 1 (16,0): put color 11 (B) in top-left
+        pixels[16] = Some(11);
+        // Add a new dot in Sprite 2 (32,0): color 10
+        pixels[32] = Some(10);
+
+        let dummy_checker = |_: &str| None;
+        let patched = patch_resource_sprites_as_text(original, 0, &pixels, Some(&dummy_checker));
+
+        // Must preserve Ruby code part
+        assert!(patched.contains("# Game Code\ndef update\nend"));
+        // Must preserve comments
+        assert!(patched.contains("# Sprite header section"));
+        assert!(patched.contains("# 0: Hero Bunny"));
+        assert!(patched.contains("@SPRITE 0 pal:1 # Inline comment"));
+        // Sprite 0 first line should now start with '8'
+        assert!(patched.contains("8..............."));
+        // Sprite 1 should preserve comment
+        assert!(patched.contains("# 1: Turtle"));
+        assert!(patched.contains("B..............."));
+        // Sprite 2 should be newly added!
+        assert!(patched.contains("@SPRITE 2"));
+        assert!(patched.contains("A..............."));
+        // Stage map should be preserved!
+        assert!(patched.contains("# Stage map"));
+        assert!(patched.contains("@MAP 0 0\n0 1"));
+    }
+
+    #[test]
+    fn test_patch_resource_map_and_objects() {
+        let original = r#"def update
+end
+
+__END__
+# Sprite section
+@SPRITE 0
+................
+................
+................
+................
+................
+................
+................
+................
+................
+................
+................
+................
+................
+................
+................
+................
+
+# Map section
+@MAP 0 0
+0 0 0
+0 0 0
+
+@OBJECTS
+player 10 20
+
+# SFX section
+@SFX 0
+c4 e4 g4
+"#;
+
+        let new_map = r#"@MAP 0 0
+1 1 1
+1 1 1
+
+@OBJECTS
+# type x y
+player 50 60
+"#;
+
+        let patched = patch_resource_map_and_objects(original, new_map);
+        assert!(patched.contains("def update\nend"));
+        assert!(patched.contains("@SPRITE 0"));
+        assert!(patched.contains("1 1 1\n1 1 1"));
+        assert!(patched.contains("player 50 60"));
+        assert!(patched.contains("# SFX section"));
+        assert!(patched.contains("@SFX 0\nc4 e4 g4"));
     }
 }
 
