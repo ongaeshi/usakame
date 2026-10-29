@@ -12,7 +12,23 @@
 | **うさかめアドベンチャー** | [`platformer.rb`](platformer.rb) | 2D横スクロールアクション。可変サイズスプライト（人参で16x32に変身、巨大32x32ボス）、パレット置換、外部背景画像連携（[`platformer_bg.png`](platformer_bg.png)）。 |
 | **Rabbit Knight** | [`rabbit_knight.rb`](rabbit_knight.rb) | 見下ろし型アクションRPG。剣撃アクション、HP・ハートUI、敵AI（スライム／コウモリ）、外部マップ（[`rabbit_knight.map`](rabbit_knight.map)）。 |
 | **うさかめサバイバー** | [`survivors.rb`](survivors.rb) | 全方位弾幕・サバイバー系アクション。大量の敵群AI、レベルアップ＆武器強化選択UI、パーティクルエフェクト。 |
+| **弾幕シューティング** | [`shooter.rb`](shooter.rb) | 縦スクロール弾幕STG。多重スクロール星空、ホーミング＆拡散ショット、敵編隊パターン、ボスラッシュ（多段階フェーズ・回転弾幕）。 |
+| **落ち物連鎖パズル** | [`puzzle.rb`](puzzle.rb) | フルーツ連鎖パズル。ペア落下・回転、重力落下、Flood-fill による3個以上連結判定、連鎖（Chain）コンボ演出。 |
+| **デッキ構築ローグライト** | [`card_roguelite.rb`](card_roguelite.rb) | Slay the Spire 風カードバトル。手札ドロー・捨て札・山札循環、マナコスト、シールドブロック、敵の行動予兆（Intent）システム、マウス操作。 |
+| **ワンボタンランナー** | [`flappy_runner.rb`](flappy_runner.rb) | 1ボタン障害物ジャンプ＆フラップ滑空エンドレスランナー。地形パイプ生成、コイン収集、スコア・ハイスコア、死亡リトライ。 |
 | **Tiny Dungeon** | [`tiny_dungeon.rb`](tiny_dungeon.rb) | ダンジョン探索アクション。外部スプライト（[`tiny_dungeon.spr`](tiny_dungeon.spr)）とタイルマップ（[`tiny_dungeon.map`](tiny_dungeon.map)）の連携。 |
+
+---
+
+## 💡 クックブック & 実践ユーティリティ (Cookbooks & Utils)
+
+AI コード生成や高度なゲーム制作で頻出する、mrubyedge に最適化された実装パターン集です。
+
+| サンプル名 | ファイル | 概要・収録テクニック |
+|:---|:---|:---|
+| **パーティクル・ジューシー演出** | [`particles.rb`](particles.rb) | 画面シェイク（振動減衰）、ヒットストップ、ダメージポップアップ（跳ね上がり）、リング衝撃波、火花・爆発、イージング関数。 |
+| **シーン遷移 & 会話UI** | [`scene_ui.rb`](scene_ui.rb) | ステートマシン画面遷移、ブラインドワイプ暗転演出、RPG風タイプライター会話ダイアログ、コマンドバトル選択UI。 |
+| **プロシージャル生成 & アルゴリズム** | [`procgen_utils.rb`](procgen_utils.rb) | Fisher-Yates 配列シャッフル、重み付きランダム抽選、穴掘り法迷路自動生成、幅優先探索（BFS）による最短経路探索。 |
 
 ---
 

@@ -74,7 +74,7 @@ uk edit map game.rb
 uk new myapp --split          # game.rb と game.spr / game.map / game.sfx を分離して作成
 uk new myapp --with-refs      # refs/examples/ に全サンプルコードを展開（AIのお手本にも最適）
 uk new myapp --minimal        # AGENTS.md や docs/ を省略し最小構成で作成
-uk new myapp -t platformer    # ジャンル別テンプレートから作成 (default, minimal, platformer, rpg, survivors, dungeon)
+uk new myapp -t platformer    # ジャンル別テンプレートから作成 (platformer, shooter, puzzle, card, runner, rpg, survivors, dungeon)
 
 # 5. 🤖 初手 LLM プロトタイプ自動生成（自動コンパイル＆60フレーム実行検証・自己修復機能付き）
 # 環境変数 GEMINI_API_KEY (または OPENAI_API_KEY / ANTHROPIC_API_KEY) を設定して実行:

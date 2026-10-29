@@ -3900,6 +3900,44 @@ square c4 e4 g4
     rt_rpg.call_update_result().unwrap();
     rt_rpg.call_draw_result().unwrap();
 
+    // 3. `uk new my_shooter -t shooter`
+    let dir_shooter = base_temp.join("my_shooter");
+    let opts_shooter = cli::NewProjectOptions {
+        project_dir: dir_shooter.clone(),
+        minimal: true,
+        split: false,
+        with_refs: false,
+        template: "shooter".to_string(),
+        prompt: None,
+        model: None,
+        api_key: None,
+    };
+    cli::cmd_new(&opts_shooter).expect("cmd_new -t shooter should succeed");
+    assert!(dir_shooter.join("game.rb").exists());
+    let (_, tail_stg, mrb_stg) = cli::compile_ruby_script_file(&dir_shooter.join("game.rb")).unwrap();
+    let mut rt_stg = GameRuntime::new(&tail_stg, &mrb_stg, true).unwrap();
+    rt_stg.call_update_result().unwrap();
+    rt_stg.call_draw_result().unwrap();
+
+    // 4. `uk new my_puzzle -t puzzle`
+    let dir_puzzle = base_temp.join("my_puzzle");
+    let opts_puzzle = cli::NewProjectOptions {
+        project_dir: dir_puzzle.clone(),
+        minimal: true,
+        split: false,
+        with_refs: false,
+        template: "puzzle".to_string(),
+        prompt: None,
+        model: None,
+        api_key: None,
+    };
+    cli::cmd_new(&opts_puzzle).expect("cmd_new -t puzzle should succeed");
+    assert!(dir_puzzle.join("game.rb").exists());
+    let (_, tail_puz, mrb_puz) = cli::compile_ruby_script_file(&dir_puzzle.join("game.rb")).unwrap();
+    let mut rt_puz = GameRuntime::new(&tail_puz, &mrb_puz, true).unwrap();
+    rt_puz.call_update_result().unwrap();
+    rt_puz.call_draw_result().unwrap();
+
     let _ = std::fs::remove_dir_all(&base_temp);
 }
 
