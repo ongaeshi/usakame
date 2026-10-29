@@ -80,13 +80,16 @@ uk new myapp -t platformer    # ジャンル別テンプレートから作成 (d
 # 環境変数 GEMINI_API_KEY (または OPENAI_API_KEY / ANTHROPIC_API_KEY) を設定して実行:
 uk new moon_rabbit -p "うさぎが月面で餅をつきながら隕石を避けるアクションゲーム"
 
-# 6. 内蔵サンプル集を任意のフォルダに展開（Pyxel の copy_examples 相当）
+# 6. 🤖 高速ヘッドレス検証（構文＆60フレーム実行チェック）
+uk check game.rb
+
+# 7. 内蔵サンプル集を任意のフォルダに展開（Pyxel の copy_examples 相当）
 uk examples ./examples
 
-# 7. ブラウザで実行（Server-Sent Events による自動ライブリロード対応）
+# 8. ブラウザで実行（Server-Sent Events による自動ライブリロード対応）
 uk browser game.rb
 
-# 8. 配布用単一バイナリのビルド
+# 9. 配布用単一バイナリのビルド
 uk build game.rb -o my_game.exe
 ```
 

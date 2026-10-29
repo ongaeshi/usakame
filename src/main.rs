@@ -7618,13 +7618,32 @@ pub fn verify_ruby_script_headless(full_source: &str, frames: u32) -> Result<(),
     let (tail_data, mrb_bytes) =
         cli::compile_ruby_script_str_with_filename(full_source, Some("game.rb"))?;
     let mut runtime = GameRuntime::new(&tail_data, &mrb_bytes, true).map_err(|e| e.full_message)?;
-    for _ in 0..frames {
+    for frame in 1..=frames {
         runtime
             .call_update_result()
-            .map_err(|e| e.full_message)?;
+            .map_err(|e| format!("Runtime error at frame {} in `update`: {}", frame, e.full_message))?;
         runtime
             .call_draw_result()
-            .map_err(|e| e.full_message)?;
+            .map_err(|e| format!("Runtime error at frame {} in `draw`: {}", frame, e.full_message))?;
+    }
+    Ok(())
+}
+
+/// 指定ファイルから外部リソース等を含めて読み込み、構文エラーや実行時例外が発生しないかを検証する。
+#[cfg(not(target_arch = "wasm32"))]
+pub fn verify_ruby_script_file_headless(path: &Path, frames: u32) -> Result<(), String> {
+    if !path.exists() {
+        return Err(format!("Target script '{}' not found.", path.display()));
+    }
+    let (_source, tail_data, mrb_bytes) = cli::compile_ruby_script_file(path)?;
+    let mut runtime = GameRuntime::new(&tail_data, &mrb_bytes, true).map_err(|e| e.full_message)?;
+    for frame in 1..=frames {
+        runtime
+            .call_update_result()
+            .map_err(|e| format!("Runtime error at frame {} in `update`: {}", frame, e.full_message))?;
+        runtime
+            .call_draw_result()
+            .map_err(|e| format!("Runtime error at frame {} in `draw`: {}", frame, e.full_message))?;
     }
     Ok(())
 }
@@ -7705,6 +7724,25 @@ fn main() {
                 ),
                 run_embedded_game_with_args(tail_data, mrb_bytes, args),
             );
+        }
+        cli::CliAction::Check { script_path, frames } => {
+            match verify_ruby_script_file_headless(&script_path, frames) {
+                Ok(()) => {
+                    println!(
+                        "✓ [uk check] '{}': Syntax and {} frame(s) headless execution verified successfully.",
+                        script_path.display(),
+                        frames
+                    );
+                }
+                Err(err) => {
+                    eprintln!(
+                        "✗ [uk check] Verification failed for '{}':\n{}",
+                        script_path.display(),
+                        err
+                    );
+                    std::process::exit(1);
+                }
+            }
         }
         cli::CliAction::Build {
             script_path,

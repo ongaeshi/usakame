@@ -51,11 +51,18 @@ Ruby コードを生成・修正する前に、必ず以下のドキュメント
 
 ## 3. テストと動作確認
 
+* **ヘッドレス構文・実行チェック（推奨）**:
+  GUI ウィンドウを開かずにコンパイルエラーおよび 60 フレーム分の実行時エラー（`NoMethodError` 等）を即座に確認できます。
+  ```powershell
+  cargo run --bin uk -- check game.rb
+  # または
+  cargo run --bin uk -- check examples/<sample>.rb
+  ```
 * Rust コアのテスト:
   ```powershell
   cargo test
   ```
-* スクリプトの実行確認:
+* スクリプトの GUI 実行確認:
   ```powershell
   cargo run --bin uk -- run game.rb
   # または

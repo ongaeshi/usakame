@@ -3902,3 +3902,88 @@ square c4 e4 g4
 
     let _ = std::fs::remove_dir_all(&base_temp);
 }
+
+
+#[test]
+fn test_cmd_check_cli_parsing_and_headless_verification() {
+    // 1. CLI parsing verification
+    let act1 = cli::parse_cli_args(vec!["uk".to_string(), "check".to_string()]).unwrap();
+    assert_eq!(
+        act1,
+        cli::CliAction::Check {
+            script_path: std::path::PathBuf::from("game.rb"),
+            frames: 60,
+        }
+    );
+
+    let act2 = cli::parse_cli_args(vec![
+        "uk".to_string(),
+        "check".to_string(),
+        "custom.rb".to_string(),
+        "--frames".to_string(),
+        "100".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(
+        act2,
+        cli::CliAction::Check {
+            script_path: std::path::PathBuf::from("custom.rb"),
+            frames: 100,
+        }
+    );
+
+    // 2. Headless verification tests
+    let temp_dir = std::env::temp_dir().join(format!("uk_check_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    // Valid script
+    let valid_path = temp_dir.join("valid.rb");
+    std::fs::write(
+        &valid_path,
+        r#"def update
+  @x ||= 0
+  @x += 1
+end
+
+def draw
+  cls(0)
+  rect(10, 10, 20, 20, 7)
+end
+"#,
+    )
+    .unwrap();
+    assert!(verify_ruby_script_file_headless(&valid_path, 30).is_ok());
+
+    // Non-existent script
+    let missing_path = temp_dir.join("missing.rb");
+    let missing_res = verify_ruby_script_file_headless(&missing_path, 30);
+    assert!(missing_res.is_err());
+    assert!(missing_res.unwrap_err().contains("not found"));
+
+    // Syntax error script
+    let syntax_err_path = temp_dir.join("syntax_err.rb");
+    std::fs::write(&syntax_err_path, "def update\n  if true\nend").unwrap();
+    let syntax_res = verify_ruby_script_file_headless(&syntax_err_path, 30);
+    assert!(syntax_res.is_err());
+
+    // Runtime error script (e.g. calling .sample which does not exist in mrubyedge)
+    let runtime_err_path = temp_dir.join("runtime_err.rb");
+    std::fs::write(
+        &runtime_err_path,
+        r#"def update
+  arr = [1, 2, 3]
+  arr.sample
+end
+def draw
+end
+"#,
+    )
+    .unwrap();
+    let runtime_res = verify_ruby_script_file_headless(&runtime_err_path, 30);
+    assert!(runtime_res.is_err());
+    let err_msg = runtime_res.unwrap_err();
+    assert!(err_msg.contains("Runtime error at frame 1"));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}

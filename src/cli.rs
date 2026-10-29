@@ -98,6 +98,11 @@ pub enum CliAction {
     },
     /// `uk unpack [script.rb]` (`__END__` から外部リソース .spr, .map, .sfx を抽出)
     Unpack { script_path: PathBuf },
+    /// `uk check [script.rb] [--frames <N>]` (ヘッドレス構文・実行検証)
+    Check {
+        script_path: PathBuf,
+        frames: u32,
+    },
     /// ヘルプ表示
     Help,
     /// バージョン表示
@@ -127,6 +132,8 @@ USAGE:
     uk run_with_edit [script.rb]        Run game and editors simultaneously with live sync
     uk edit [spr|map|all] [script.rb]   Launch built-in Sprite / Tilemap Editor (default: spr)
     uk examples [dest_dir]              Extract bundled example scripts (default: ./examples)
+    uk check [script.rb] [options]      Headless syntax and runtime verification (default: game.rb)
+        -f, --frames <N>                Simulated frame count to verify (default: 60)
     uk build [script.rb] [-o <output>]  Build a standalone single binary from script
     uk browser [script.rb] [-p <port>]  Run script in the browser with live hot-reload
     uk pack [script.rb] [-o <output>]   Pack external resources into single standalone script
@@ -198,6 +205,7 @@ where
         "map" => parse_edit_args(&rest[1..], EditorKind::Tilemap),
         "run_with_edit" => parse_run_with_edit_args(&rest[1..]),
         "run" => parse_run_args(&rest[1..]),
+        "check" => parse_check_args(&rest[1..]),
         "build" => {
             let mut script_path: Option<PathBuf> = None;
             let mut output_path: Option<PathBuf> = None;
@@ -709,6 +717,42 @@ fn parse_run_args(args: &[String]) -> Result<CliAction, String> {
         script_args,
         screenshot_path,
         screenshot_frames,
+    })
+}
+
+fn parse_check_args(args: &[String]) -> Result<CliAction, String> {
+    let mut script_path: Option<PathBuf> = None;
+    let mut frames: u32 = 60;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-f" | "--frames" => {
+                i += 1;
+                let f = args
+                    .get(i)
+                    .ok_or_else(|| "Missing argument for -f / --frames".to_string())?;
+                frames = f
+                    .parse::<u32>()
+                    .map_err(|_| format!("Invalid frame count: {}", f))?;
+            }
+            arg if arg.starts_with('-') => {
+                return Err(format!("Unknown option for `uk check`: {}", arg));
+            }
+            arg => {
+                if script_path.is_none() {
+                    script_path = Some(PathBuf::from(arg));
+                } else {
+                    return Err(format!("Unexpected extra argument for `uk check`: {}", arg));
+                }
+            }
+        }
+        i += 1;
+    }
+
+    Ok(CliAction::Check {
+        script_path: script_path.unwrap_or_else(|| PathBuf::from("game.rb")),
+        frames,
     })
 }
 
@@ -1623,6 +1667,14 @@ Usakame のスクリプト実行環境は軽量 Ruby VM **mrubyedge** です。�
 
 ## 3. 実行・テスト・AI による自動視覚検証コマンド
 
+* **🤖 高速ヘッドレス検証（構文 & 60フレーム実行チェック、推奨）**:
+  GUI ウィンドウを開かずに一瞬（0.1秒未満）で構文エラーや実行時例外（`NoMethodError` 等）を検証できます：
+  ```bash
+  uk check game.rb
+  # または特定フレーム数を指定
+  uk check game.rb --frames 120
+  ```
+  コードを生成・編集した直後は、まずこのコマンドを実行してクラッシュしないことを確認してください。
 * **ゲームの起動（ホットリロード対応）**:
   ```bash
   uk run game.rb
@@ -1637,7 +1689,7 @@ Usakame のスクリプト実行環境は軽量 Ruby VM **mrubyedge** です。�
   uk edit map game.rb
   ```
 * **🤖 AI エージェントによる自動動作確認 & スクリーンショット検証**:
-  以下のコマンドを実行すると、指定フレーム数だけゲームを実行して画面を PNG 保存し、自動で終了します（構文エラーや実行時エラーがあれば標準エラー出力に表示されます）：
+  画面の描画結果を画像として自律確認したい場合は、以下を実行すると指定フレーム後に PNG を保存して自動終了します（構文エラーや実行時エラーがあれば標準エラー出力に表示されます）：
   ```bash
   uk run game.rb --screenshot screenshots/check.png --frames 60
   ```
