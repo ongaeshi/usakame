@@ -14,7 +14,7 @@
 | **うさかめサバイバー** | [`survivors.rb`](survivors.rb) | 全方位弾幕・サバイバー系アクション。大量の敵群AI、レベルアップ＆武器強化選択UI、パーティクルエフェクト。 |
 | **弾幕シューティング** | [`shooter.rb`](shooter.rb) | 縦スクロール弾幕STG。多重スクロール星空、ホーミング＆拡散ショット、敵編隊パターン、ボスラッシュ（多段階フェーズ・回転弾幕）。 |
 | **落ち物連鎖パズル** | [`puzzle.rb`](puzzle.rb) | フルーツ連鎖パズル。ペア落下・回転、重力落下、Flood-fill による3個以上連結判定、連鎖（Chain）コンボ演出。 |
-| **デッキ構築ローグライト** | [`card_roguelite.rb`](card_roguelite.rb) | Slay the Spire 風カードバトル。手札ドロー・捨て札・山札循環、マナコスト、シールドブロック、敵の行動予兆（Intent）システム、マウス操作。 |
+| **デッキ構築ローグライト** | [`card_roguelite.rb`](card_roguelite.rb) | デッキ構築型カードバトル。手札ドロー・捨て札・山札循環、マナコスト、シールドブロック、敵の行動予兆（Intent）システム、マウス操作。 |
 | **ワンボタンランナー** | [`flappy_runner.rb`](flappy_runner.rb) | 1ボタン障害物ジャンプ＆フラップ滑空エンドレスランナー。地形パイプ生成、コイン収集、スコア・ハイスコア、死亡リトライ。 |
 | **Tiny Dungeon** | [`tiny_dungeon.rb`](tiny_dungeon.rb) | ダンジョン探索アクション。外部スプライト（[`tiny_dungeon.spr`](tiny_dungeon.spr)）とタイルマップ（[`tiny_dungeon.map`](tiny_dungeon.map)）の連携。 |
 
