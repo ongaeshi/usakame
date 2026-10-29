@@ -80,8 +80,9 @@ uk new myapp -t platformer    # ジャンル別テンプレートから作成 (d
 # 環境変数 GEMINI_API_KEY (または OPENAI_API_KEY / ANTHROPIC_API_KEY) を設定して実行:
 uk new moon_rabbit -p "うさぎが月面で餅をつきながら隕石を避けるアクションゲーム"
 
-# 6. 🤖 高速ヘッドレス検証（構文＆60フレーム実行チェック）
+# 6. 🤖 高速ヘッドレス検証（構文＆60フレーム実行チェック、ガチャキー擬似連打対応）
 uk check game.rb
+uk check game.rb -g --frames 120   # -g (--gacha) で方向キー・パッドボタンを擬似連打してテスト
 
 # 7. 内蔵サンプル集を任意のフォルダに展開（Pyxel の copy_examples 相当）
 uk examples ./examples

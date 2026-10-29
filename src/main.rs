@@ -1777,6 +1777,209 @@ pub enum ButtonId {
     Key(KeyCode),
 }
 
+impl ButtonId {
+    pub fn as_name(&self) -> &'static str {
+        match self {
+            ButtonId::Left => "left",
+            ButtonId::Right => "right",
+            ButtonId::Up => "up",
+            ButtonId::Down => "down",
+            ButtonId::A => "btn_a",
+            ButtonId::B => "btn_b",
+            ButtonId::MouseLeft => "mouse_l",
+            ButtonId::MouseRight => "mouse_r",
+            ButtonId::MouseMiddle => "mouse_m",
+            ButtonId::Key(_) => "key",
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct InputState {
+    pub override_enabled: bool,
+    pub current_down: Vec<ButtonId>,
+    pub prev_down: Vec<ButtonId>,
+}
+
+impl InputState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set_frame_buttons(&mut self, buttons: Vec<ButtonId>) {
+        self.override_enabled = true;
+        self.prev_down = std::mem::replace(&mut self.current_down, buttons);
+    }
+
+    pub fn is_down(&self, btn: ButtonId) -> bool {
+        self.current_down.contains(&btn)
+            || match btn {
+                ButtonId::Left => {
+                    self.current_down.contains(&ButtonId::Key(KeyCode::Left))
+                        || self.current_down.contains(&ButtonId::Key(KeyCode::A))
+                }
+                ButtonId::Right => {
+                    self.current_down.contains(&ButtonId::Key(KeyCode::Right))
+                        || self.current_down.contains(&ButtonId::Key(KeyCode::D))
+                }
+                ButtonId::Up => {
+                    self.current_down.contains(&ButtonId::Key(KeyCode::Up))
+                        || self.current_down.contains(&ButtonId::Key(KeyCode::W))
+                }
+                ButtonId::Down => {
+                    self.current_down.contains(&ButtonId::Key(KeyCode::Down))
+                        || self.current_down.contains(&ButtonId::Key(KeyCode::S))
+                }
+                ButtonId::A => {
+                    self.current_down.contains(&ButtonId::Key(KeyCode::Z))
+                        || self.current_down.contains(&ButtonId::Key(KeyCode::Space))
+                }
+                ButtonId::B => {
+                    self.current_down.contains(&ButtonId::Key(KeyCode::X))
+                        || self.current_down.contains(&ButtonId::Key(KeyCode::Enter))
+                }
+                ButtonId::Key(KeyCode::Left) | ButtonId::Key(KeyCode::A) => {
+                    self.current_down.contains(&ButtonId::Left)
+                }
+                ButtonId::Key(KeyCode::Right) | ButtonId::Key(KeyCode::D) => {
+                    self.current_down.contains(&ButtonId::Right)
+                }
+                ButtonId::Key(KeyCode::Up) | ButtonId::Key(KeyCode::W) => {
+                    self.current_down.contains(&ButtonId::Up)
+                }
+                ButtonId::Key(KeyCode::Down) | ButtonId::Key(KeyCode::S) => {
+                    self.current_down.contains(&ButtonId::Down)
+                }
+                ButtonId::Key(KeyCode::Z) | ButtonId::Key(KeyCode::Space) => {
+                    self.current_down.contains(&ButtonId::A)
+                }
+                ButtonId::Key(KeyCode::X) | ButtonId::Key(KeyCode::Enter) => {
+                    self.current_down.contains(&ButtonId::B)
+                }
+                _ => false,
+            }
+    }
+
+    pub fn is_pressed(&self, btn: ButtonId) -> bool {
+        let is_now = self.is_down(btn);
+        let was_before = self.prev_down.contains(&btn)
+            || match btn {
+                ButtonId::Left => {
+                    self.prev_down.contains(&ButtonId::Key(KeyCode::Left))
+                        || self.prev_down.contains(&ButtonId::Key(KeyCode::A))
+                }
+                ButtonId::Right => {
+                    self.prev_down.contains(&ButtonId::Key(KeyCode::Right))
+                        || self.prev_down.contains(&ButtonId::Key(KeyCode::D))
+                }
+                ButtonId::Up => {
+                    self.prev_down.contains(&ButtonId::Key(KeyCode::Up))
+                        || self.prev_down.contains(&ButtonId::Key(KeyCode::W))
+                }
+                ButtonId::Down => {
+                    self.prev_down.contains(&ButtonId::Key(KeyCode::Down))
+                        || self.prev_down.contains(&ButtonId::Key(KeyCode::S))
+                }
+                ButtonId::A => {
+                    self.prev_down.contains(&ButtonId::Key(KeyCode::Z))
+                        || self.prev_down.contains(&ButtonId::Key(KeyCode::Space))
+                }
+                ButtonId::B => {
+                    self.prev_down.contains(&ButtonId::Key(KeyCode::X))
+                        || self.prev_down.contains(&ButtonId::Key(KeyCode::Enter))
+                }
+                ButtonId::Key(KeyCode::Left) | ButtonId::Key(KeyCode::A) => {
+                    self.prev_down.contains(&ButtonId::Left)
+                }
+                ButtonId::Key(KeyCode::Right) | ButtonId::Key(KeyCode::D) => {
+                    self.prev_down.contains(&ButtonId::Right)
+                }
+                ButtonId::Key(KeyCode::Up) | ButtonId::Key(KeyCode::W) => {
+                    self.prev_down.contains(&ButtonId::Up)
+                }
+                ButtonId::Key(KeyCode::Down) | ButtonId::Key(KeyCode::S) => {
+                    self.prev_down.contains(&ButtonId::Down)
+                }
+                ButtonId::Key(KeyCode::Z) | ButtonId::Key(KeyCode::Space) => {
+                    self.prev_down.contains(&ButtonId::A)
+                }
+                ButtonId::Key(KeyCode::X) | ButtonId::Key(KeyCode::Enter) => {
+                    self.prev_down.contains(&ButtonId::B)
+                }
+                _ => false,
+            };
+        is_now && !was_before
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct InputFuzzer {
+    state: u64,
+}
+
+impl InputFuzzer {
+    pub fn new(seed: u64) -> Self {
+        Self {
+            state: if seed == 0 {
+                0x853c49e6748fea9b
+            } else {
+                seed
+            },
+        }
+    }
+
+    fn next_u32(&mut self) -> u32 {
+        self.state ^= self.state >> 12;
+        self.state ^= self.state << 25;
+        self.state ^= self.state >> 27;
+        (self.state.wrapping_mul(0x2545F4914F6CDD1D) >> 32) as u32
+    }
+
+    /// ガチャキーモードの入力フレームを生成する。
+    /// 方向キー（ニュートラル / 左右 / 上下 / 斜め）とパッドボタン（A, B）を擬似的に連打・押しっぱなしにする。
+    pub fn next_frame(&mut self) -> Vec<ButtonId> {
+        let mut buttons = Vec::new();
+
+        // 1. 方向キー (ニュートラル: 35%, 左右移動: 35%, 上下: 18%, 斜め入力: 12%)
+        let dir_val = self.next_u32() % 100;
+        match dir_val {
+            0..=34 => {} // ニュートラル
+            35..=51 => buttons.push(ButtonId::Left),
+            52..=69 => buttons.push(ButtonId::Right),
+            70..=78 => buttons.push(ButtonId::Up),
+            79..=87 => buttons.push(ButtonId::Down),
+            88..=90 => {
+                buttons.push(ButtonId::Up);
+                buttons.push(ButtonId::Left);
+            }
+            91..=93 => {
+                buttons.push(ButtonId::Up);
+                buttons.push(ButtonId::Right);
+            }
+            94..=96 => {
+                buttons.push(ButtonId::Down);
+                buttons.push(ButtonId::Left);
+            }
+            _ => {
+                buttons.push(ButtonId::Down);
+                buttons.push(ButtonId::Right);
+            }
+        }
+
+        // 2. パッドボタン A (ジャンプ / 決定 / 攻撃) 連打・トリガー (50%)
+        if (self.next_u32() % 100) < 50 {
+            buttons.push(ButtonId::A);
+        }
+
+        // 3. パッドボタン B (ダッシュ / サブ攻撃 / キャンセル) 連打 (35%)
+        if (self.next_u32() % 100) < 35 {
+            buttons.push(ButtonId::B);
+        }
+
+        buttons
+    }
+}
+
 pub fn parse_button_name(name: &str) -> Option<ButtonId> {
     let lower = name.to_lowercase();
     match lower.as_str() {
@@ -3608,6 +3811,7 @@ fn register_engine_api(
     draw_state: Rc<RefCell<DrawState>>,
     config: Rc<RefCell<AppConfig>>,
     restart_requested: Rc<RefCell<bool>>,
+    input_state: Rc<RefCell<InputState>>,
     headless: bool,
 ) {
     register_numeric_extensions(vm);
@@ -5330,17 +5534,43 @@ fn register_engine_api(
                 Ok(Rc::new(RObject::nil()))
             }),
         );
+        let input_state_for_btn = input_state.clone();
         mrb_define_cmethod(
             vm,
             obj_class.clone(),
             "btn",
-            Box::new(|_vm, _args| Ok(Rc::new(RObject::boolean(false)))),
+            Box::new(move |_vm, args| {
+                let pressed = parse_button_arg(args, 0)
+                    .map(|b| {
+                        let st = input_state_for_btn.borrow();
+                        if st.override_enabled {
+                            st.is_down(b)
+                        } else {
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
+                Ok(Rc::new(RObject::boolean(pressed)))
+            }),
         );
+        let input_state_for_btnp = input_state.clone();
         mrb_define_cmethod(
             vm,
             obj_class.clone(),
             "btnp",
-            Box::new(|_vm, _args| Ok(Rc::new(RObject::boolean(false)))),
+            Box::new(move |_vm, args| {
+                let pressed = parse_button_arg(args, 0)
+                    .map(|b| {
+                        let st = input_state_for_btnp.borrow();
+                        if st.override_enabled {
+                            st.is_pressed(b)
+                        } else {
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
+                Ok(Rc::new(RObject::boolean(pressed)))
+            }),
         );
         mrb_define_cmethod(
             vm,
@@ -6110,26 +6340,42 @@ fn register_engine_api(
     );
 
     // btn(id_or_sym): ボタン入力判定（キーボード: 0..5 または :left, :right, :up, :down, :z, :x / マウス: 6..8 または :mouse_l, :mouse_r, :mouse_m）
+    let input_state_for_btn = input_state.clone();
     mrb_define_cmethod(
         vm,
         obj_class.clone(),
         "btn",
-        Box::new(|_vm, args| {
+        Box::new(move |_vm, args| {
             let pressed = parse_button_arg(args, 0)
-                .map(is_button_down)
+                .map(|b| {
+                    let st = input_state_for_btn.borrow();
+                    if st.override_enabled {
+                        st.is_down(b)
+                    } else {
+                        is_button_down(b)
+                    }
+                })
                 .unwrap_or(false);
             Ok(Rc::new(RObject::boolean(pressed)))
         }),
     );
 
     // btnp(id_or_sym): ボタンがこのフレームで押された瞬間か判定
+    let input_state_for_btnp = input_state.clone();
     mrb_define_cmethod(
         vm,
         obj_class.clone(),
         "btnp",
-        Box::new(|_vm, args| {
+        Box::new(move |_vm, args| {
             let pressed = parse_button_arg(args, 0)
-                .map(is_button_pressed)
+                .map(|b| {
+                    let st = input_state_for_btnp.borrow();
+                    if st.override_enabled {
+                        st.is_pressed(b)
+                    } else {
+                        is_button_pressed(b)
+                    }
+                })
                 .unwrap_or(false);
             Ok(Rc::new(RObject::boolean(pressed)))
         }),
@@ -6584,6 +6830,7 @@ pub struct GameRuntime {
     pub sound_bank: Rc<RefCell<sound::SoundBank>>,
     pub config: Rc<RefCell<AppConfig>>,
     pub restart_requested: Rc<RefCell<bool>>,
+    pub input_state: Rc<RefCell<InputState>>,
     pub script_args: Vec<String>,
     initial_globals: HashMap<String, Rc<RObject>>,
     initial_tail_map: Tilemap,
@@ -6646,6 +6893,7 @@ impl GameRuntime {
         )));
         let config = Rc::new(RefCell::new(AppConfig::default()));
         let restart_requested = Rc::new(RefCell::new(false));
+        let input_state = Rc::new(RefCell::new(InputState::new()));
 
         register_engine_api(
             &mut vm,
@@ -6662,6 +6910,7 @@ impl GameRuntime {
             draw_state.clone(),
             config.clone(),
             restart_requested.clone(),
+            input_state.clone(),
             headless,
         );
         register_sound_api(&mut vm, sound_bank.clone());
@@ -6710,6 +6959,7 @@ impl GameRuntime {
             sound_bank,
             config,
             restart_requested,
+            input_state,
             script_args: script_args.to_vec(),
             initial_globals,
             initial_tail_map,
@@ -6804,6 +7054,7 @@ impl GameRuntime {
             self.draw_state.clone(),
             self.config.clone(),
             self.restart_requested.clone(),
+            self.input_state.clone(),
             self.headless,
         );
         register_sound_api(&mut new_vm, self.sound_bank.clone());
@@ -6867,6 +7118,7 @@ impl GameRuntime {
             self.draw_state.clone(),
             self.config.clone(),
             self.restart_requested.clone(),
+            self.input_state.clone(),
             self.headless,
         );
 
@@ -7616,16 +7868,51 @@ async fn run_embedded_game_with_args(
 }
 
 /// Ruby スクリプト文字列をコンパイルし、ヘッドレス環境で指定フレーム数だけ `update` / `draw` を実行して
-/// 構文エラーや `NoMethodError` 等の実行時例外が発生しないかを検証する。
+/// 構文エラーや `NoMethodError` 等の実行時例外が発生しないかを検証する（デフォルトでガチャキー入力検証を含む）。
 #[cfg(not(target_arch = "wasm32"))]
 pub fn verify_ruby_script_headless(full_source: &str, frames: u32) -> Result<(), String> {
+    verify_ruby_script_headless_ex(full_source, frames, true)
+}
+
+/// ガチャキー（擬似ボタン連打）の有効・無効を指定可能なヘッドレス検証。
+#[cfg(not(target_arch = "wasm32"))]
+pub fn verify_ruby_script_headless_ex(
+    full_source: &str,
+    frames: u32,
+    gacha: bool,
+) -> Result<(), String> {
     let (tail_data, mrb_bytes) =
         cli::compile_ruby_script_str_with_filename(full_source, Some("game.rb"))?;
     let mut runtime = GameRuntime::new(&tail_data, &mrb_bytes, true).map_err(|e| e.full_message)?;
+    let mut fuzzer = InputFuzzer::new(0xdeadbeef);
     for frame in 1..=frames {
+        let input_desc = if gacha {
+            let btns = fuzzer.next_frame();
+            let desc = format!(
+                "[{}]",
+                btns.iter()
+                    .map(|b| b.as_name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            runtime.input_state.borrow_mut().set_frame_buttons(btns);
+            desc
+        } else {
+            "[]".to_string()
+        };
+
         runtime
             .call_update_result()
-            .map_err(|e| format!("Runtime error at frame {} in `update`: {}", frame, e.full_message))?;
+            .map_err(|e| {
+                if gacha {
+                    format!(
+                        "Runtime error at frame {} in `update` (inputs: {}): {}",
+                        frame, input_desc, e.full_message
+                    )
+                } else {
+                    format!("Runtime error at frame {} in `update`: {}", frame, e.full_message)
+                }
+            })?;
         runtime
             .call_draw_result()
             .map_err(|e| format!("Runtime error at frame {} in `draw`: {}", frame, e.full_message))?;
@@ -7635,16 +7922,45 @@ pub fn verify_ruby_script_headless(full_source: &str, frames: u32) -> Result<(),
 
 /// 指定ファイルから外部リソース等を含めて読み込み、構文エラーや実行時例外が発生しないかを検証する。
 #[cfg(not(target_arch = "wasm32"))]
-pub fn verify_ruby_script_file_headless(path: &Path, frames: u32) -> Result<(), String> {
+pub fn verify_ruby_script_file_headless(
+    path: &Path,
+    frames: u32,
+    gacha: bool,
+) -> Result<(), String> {
     if !path.exists() {
         return Err(format!("Target script '{}' not found.", path.display()));
     }
     let (_source, tail_data, mrb_bytes) = cli::compile_ruby_script_file(path)?;
     let mut runtime = GameRuntime::new(&tail_data, &mrb_bytes, true).map_err(|e| e.full_message)?;
+    let mut fuzzer = InputFuzzer::new(0xdeadbeef);
     for frame in 1..=frames {
+        let input_desc = if gacha {
+            let btns = fuzzer.next_frame();
+            let desc = format!(
+                "[{}]",
+                btns.iter()
+                    .map(|b| b.as_name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            runtime.input_state.borrow_mut().set_frame_buttons(btns);
+            desc
+        } else {
+            "[]".to_string()
+        };
+
         runtime
             .call_update_result()
-            .map_err(|e| format!("Runtime error at frame {} in `update`: {}", frame, e.full_message))?;
+            .map_err(|e| {
+                if gacha {
+                    format!(
+                        "Runtime error at frame {} in `update` (inputs: {}): {}",
+                        frame, input_desc, e.full_message
+                    )
+                } else {
+                    format!("Runtime error at frame {} in `update`: {}", frame, e.full_message)
+                }
+            })?;
         runtime
             .call_draw_result()
             .map_err(|e| format!("Runtime error at frame {} in `draw`: {}", frame, e.full_message))?;
@@ -7729,13 +8045,19 @@ fn main() {
                 run_embedded_game_with_args(tail_data, mrb_bytes, args),
             );
         }
-        cli::CliAction::Check { script_path, frames } => {
-            match verify_ruby_script_file_headless(&script_path, frames) {
+        cli::CliAction::Check {
+            script_path,
+            frames,
+            gacha,
+        } => {
+            match verify_ruby_script_file_headless(&script_path, frames, gacha) {
                 Ok(()) => {
+                    let mode_str = if gacha { " (gacha-key mash mode)" } else { "" };
                     println!(
-                        "✓ [uk check] '{}': Syntax and {} frame(s) headless execution verified successfully.",
+                        "✓ [uk check] '{}': Syntax and {} frame(s) headless execution verified successfully{}.",
                         script_path.display(),
-                        frames
+                        frames,
+                        mode_str
                     );
                 }
                 Err(err) => {

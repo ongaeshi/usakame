@@ -98,10 +98,11 @@ pub enum CliAction {
     },
     /// `uk unpack [script.rb]` (`__END__` から外部リソース .spr, .map, .sfx を抽出)
     Unpack { script_path: PathBuf },
-    /// `uk check [script.rb] [--frames <N>]` (ヘッドレス構文・実行検証)
+    /// `uk check [script.rb] [--frames <N>] [--gacha]` (ヘッドレス構文・実行検証)
     Check {
         script_path: PathBuf,
         frames: u32,
+        gacha: bool,
     },
     /// ヘルプ表示
     Help,
@@ -134,6 +135,7 @@ USAGE:
     uk examples [dest_dir]              Extract bundled example scripts (default: ./examples)
     uk check [script.rb] [options]      Headless syntax and runtime verification (default: game.rb)
         -f, --frames <N>                Simulated frame count to verify (default: 60)
+        -g, --gacha, --mash             Enable random button mashing (d-pad & action keys)
     uk build [script.rb] [-o <output>]  Build a standalone single binary from script
     uk browser [script.rb] [-p <port>]  Run script in the browser with live hot-reload
     uk pack [script.rb] [-o <output>]   Pack external resources into single standalone script
@@ -723,6 +725,7 @@ fn parse_run_args(args: &[String]) -> Result<CliAction, String> {
 fn parse_check_args(args: &[String]) -> Result<CliAction, String> {
     let mut script_path: Option<PathBuf> = None;
     let mut frames: u32 = 60;
+    let mut gacha: bool = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -735,6 +738,9 @@ fn parse_check_args(args: &[String]) -> Result<CliAction, String> {
                 frames = f
                     .parse::<u32>()
                     .map_err(|_| format!("Invalid frame count: {}", f))?;
+            }
+            "-g" | "--gacha" | "--mash" | "--fuzz" => {
+                gacha = true;
             }
             arg if arg.starts_with('-') => {
                 return Err(format!("Unknown option for `uk check`: {}", arg));
@@ -753,6 +759,7 @@ fn parse_check_args(args: &[String]) -> Result<CliAction, String> {
     Ok(CliAction::Check {
         script_path: script_path.unwrap_or_else(|| PathBuf::from("game.rb")),
         frames,
+        gacha,
     })
 }
 
@@ -1671,8 +1678,8 @@ Usakame のスクリプト実行環境は軽量 Ruby VM **mrubyedge** です。�
   GUI ウィンドウを開かずに一瞬（0.1秒未満）で構文エラーや実行時例外（`NoMethodError` 等）を検証できます：
   ```bash
   uk check game.rb
-  # または特定フレーム数を指定
-  uk check game.rb --frames 120
+  # ガチャキーモード（方向キー・パッドボタンの擬似連打テスト）
+  uk check game.rb -g --frames 120
   ```
   コードを生成・編集した直後は、まずこのコマンドを実行してクラッシュしないことを確認してください。
 * **ゲームの起動（ホットリロード対応）**:

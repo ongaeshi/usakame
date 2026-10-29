@@ -3913,6 +3913,7 @@ fn test_cmd_check_cli_parsing_and_headless_verification() {
         cli::CliAction::Check {
             script_path: std::path::PathBuf::from("game.rb"),
             frames: 60,
+            gacha: false,
         }
     );
 
@@ -3922,6 +3923,7 @@ fn test_cmd_check_cli_parsing_and_headless_verification() {
         "custom.rb".to_string(),
         "--frames".to_string(),
         "100".to_string(),
+        "-g".to_string(),
     ])
     .unwrap();
     assert_eq!(
@@ -3929,6 +3931,22 @@ fn test_cmd_check_cli_parsing_and_headless_verification() {
         cli::CliAction::Check {
             script_path: std::path::PathBuf::from("custom.rb"),
             frames: 100,
+            gacha: true,
+        }
+    );
+
+    let act3 = cli::parse_cli_args(vec![
+        "uk".to_string(),
+        "check".to_string(),
+        "--mash".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(
+        act3,
+        cli::CliAction::Check {
+            script_path: std::path::PathBuf::from("game.rb"),
+            frames: 60,
+            gacha: true,
         }
     );
 
@@ -3953,18 +3971,18 @@ end
 "#,
     )
     .unwrap();
-    assert!(verify_ruby_script_file_headless(&valid_path, 30).is_ok());
+    assert!(verify_ruby_script_file_headless(&valid_path, 30, false).is_ok());
 
     // Non-existent script
     let missing_path = temp_dir.join("missing.rb");
-    let missing_res = verify_ruby_script_file_headless(&missing_path, 30);
+    let missing_res = verify_ruby_script_file_headless(&missing_path, 30, false);
     assert!(missing_res.is_err());
     assert!(missing_res.unwrap_err().contains("not found"));
 
     // Syntax error script
     let syntax_err_path = temp_dir.join("syntax_err.rb");
     std::fs::write(&syntax_err_path, "def update\n  if true\nend").unwrap();
-    let syntax_res = verify_ruby_script_file_headless(&syntax_err_path, 30);
+    let syntax_res = verify_ruby_script_file_headless(&syntax_err_path, 30, false);
     assert!(syntax_res.is_err());
 
     // Runtime error script (e.g. calling .sample which does not exist in mrubyedge)
@@ -3980,10 +3998,33 @@ end
 "#,
     )
     .unwrap();
-    let runtime_res = verify_ruby_script_file_headless(&runtime_err_path, 30);
+    let runtime_res = verify_ruby_script_file_headless(&runtime_err_path, 30, false);
     assert!(runtime_res.is_err());
     let err_msg = runtime_res.unwrap_err();
     assert!(err_msg.contains("Runtime error at frame 1"));
+
+    // 3. Gacha key mode test: script that only crashes when a button is pressed
+    let gacha_test_path = temp_dir.join("gacha_test.rb");
+    std::fs::write(
+        &gacha_test_path,
+        r#"def update
+  if btn(:left) || btn(:btn_a) || btn(4)
+    [1, 2].sample
+  end
+end
+def draw
+end
+"#,
+    )
+    .unwrap();
+    // Without gacha, it succeeds because buttons are never pressed
+    assert!(verify_ruby_script_file_headless(&gacha_test_path, 30, false).is_ok());
+    // With gacha, it will hit the button press and catch the crash!
+    let gacha_res = verify_ruby_script_file_headless(&gacha_test_path, 60, true);
+    assert!(gacha_res.is_err());
+    let gacha_err = gacha_res.unwrap_err();
+    assert!(gacha_err.contains("inputs:"));
+    assert!(gacha_err.contains("NoMethodError"));
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }

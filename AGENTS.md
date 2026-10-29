@@ -52,11 +52,13 @@ Ruby コードを生成・修正する前に、必ず以下のドキュメント
 ## 3. テストと動作確認
 
 * **ヘッドレス構文・実行チェック（推奨）**:
-  GUI ウィンドウを開かずにコンパイルエラーおよび 60 フレーム分の実行時エラー（`NoMethodError` 等）を即座に確認できます。
+  GUI ウィンドウを開かずにコンパイルエラーおよび 60 フレーム分の実行時エラー（`NoMethodError` 等）を即座に確認できます。`-g` オプション（ガチャキーモード）を付けると、方向キーやパッドボタンを擬似的に連打しながら移動・アクション処理の例外も自己検証できます。
   ```powershell
   cargo run --bin uk -- check game.rb
-  # または
-  cargo run --bin uk -- check examples/<sample>.rb
+  # ガチャキーモード（方向キー・パッドボタン擬似連打）
+  cargo run --bin uk -- check game.rb -g --frames 120
+  # またはサンプルコードの検証
+  cargo run --bin uk -- check examples/<sample>.rb -g
   ```
 * Rust コアのテスト:
   ```powershell
