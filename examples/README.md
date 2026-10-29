@@ -10,7 +10,7 @@
 | サンプル名 | ファイル | 概要・学べるポイント |
 |:---|:---|:---|
 | **うさかめアドベンチャー** | [`platformer.rb`](platformer.rb) | 2D横スクロールアクション。可変サイズスプライト（人参で16x32に変身、巨大32x32ボス）、パレット置換、外部背景画像連携（[`platformer_bg.png`](platformer_bg.png)）。 |
-| **Rabbit Knight** | [`rabbit_knight.rb`](rabbit_knight.rb) | 見下ろし型アクションRPG。剣撃アクション、HP・ハートUI、敵AI（スライム／コウモリ）、外部マップ（[`rabbit_knight.map`](rabbit_knight.map)）。 |
+| **Rabbit Knight** | [`rabbit_knight.rb`](rabbit_knight.rb) | 見下ろし型アクションRPG。剣撃アクション、HP・ハートUI、敵AI（スライム／コウモリ）、オブジェクト配置（@OBJECTS）。 |
 | **うさかめサバイバー** | [`survivors.rb`](survivors.rb) | 全方位弾幕・サバイバー系アクション。大量の敵群AI、レベルアップ＆武器強化選択UI、パーティクルエフェクト。 |
 | **弾幕シューティング** | [`shooter.rb`](shooter.rb) | 縦スクロール弾幕STG。多重スクロール星空、ホーミング＆拡散ショット、敵編隊パターン、ボスラッシュ（多段階フェーズ・回転弾幕）。 |
 | **落ち物連鎖パズル** | [`puzzle.rb`](puzzle.rb) | フルーツ連鎖パズル。ペア落下・回転、重力落下、Flood-fill による3個以上連結判定、連鎖（Chain）コンボ演出。 |
@@ -53,7 +53,7 @@ AI コード生成や高度なゲーム制作で頻出する、mrubyedge に最�
 | **パレット切り替え** | [`pal.rb`](pal.rb) | `pal()` による色置換、`palt()` による透過色指定。 |
 | **カメラ & クリップ** | [`camera_clip.rb`](camera_clip.rb) | `camera()` による視点追従と `clip()` による描画範囲制限。 |
 | **解像度切り替え** | [`resolution.rb`](resolution.rb) | `config()` による画面サイズ・スケール指定。 |
-| **プリミティブ・物理** | [`oval.rb`](oval.rb), [`big_ball.rb`](big_ball.rb), [`duck.rb`](duck.rb) | 楕円描画、ボール跳ね返り物理、アニメーション。 |
+| **楕円・プリミティブ** | [`oval.rb`](oval.rb) | `oval()` / `ovalfill()` による楕円描画デモ。 |
 
 ---
 
