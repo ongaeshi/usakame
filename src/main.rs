@@ -7883,41 +7883,58 @@ pub fn verify_ruby_script_headless_ex(
 ) -> Result<(), String> {
     let (tail_data, mrb_bytes) =
         cli::compile_ruby_script_str_with_filename(full_source, Some("game.rb"))?;
-    let mut runtime = GameRuntime::new(&tail_data, &mrb_bytes, true).map_err(|e| e.full_message)?;
-    let mut fuzzer = InputFuzzer::new(0xdeadbeef);
-    for frame in 1..=frames {
-        let input_desc = if gacha {
-            let btns = fuzzer.next_frame();
-            let desc = format!(
-                "[{}]",
-                btns.iter()
-                    .map(|b| b.as_name())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-            runtime.input_state.borrow_mut().set_frame_buttons(btns);
-            desc
-        } else {
-            "[]".to_string()
-        };
 
-        runtime
-            .call_update_result()
-            .map_err(|e| {
-                if gacha {
-                    format!(
-                        "Runtime error at frame {} in `update` (inputs: {}): {}",
-                        frame, input_desc, e.full_message
-                    )
-                } else {
-                    format!("Runtime error at frame {} in `update`: {}", frame, e.full_message)
-                }
-            })?;
-        runtime
-            .call_draw_result()
-            .map_err(|e| format!("Runtime error at frame {} in `draw`: {}", frame, e.full_message))?;
+    let run_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), String> {
+        let mut runtime = GameRuntime::new(&tail_data, &mrb_bytes, true).map_err(|e| e.full_message)?;
+        let mut fuzzer = InputFuzzer::new(0xdeadbeef);
+        for frame in 1..=frames {
+            let input_desc = if gacha {
+                let btns = fuzzer.next_frame();
+                let desc = format!(
+                    "[{}]",
+                    btns.iter()
+                        .map(|b| b.as_name())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                runtime.input_state.borrow_mut().set_frame_buttons(btns);
+                desc
+            } else {
+                "[]".to_string()
+            };
+
+            runtime
+                .call_update_result()
+                .map_err(|e| {
+                    if gacha {
+                        format!(
+                            "Runtime error at frame {} in `update` (inputs: {}): {}",
+                            frame, input_desc, e.full_message
+                        )
+                    } else {
+                        format!("Runtime error at frame {} in `update`: {}", frame, e.full_message)
+                    }
+                })?;
+            runtime
+                .call_draw_result()
+                .map_err(|e| format!("Runtime error at frame {} in `draw`: {}", frame, e.full_message))?;
+        }
+        Ok(())
+    }));
+
+    match run_res {
+        Ok(inner_res) => inner_res,
+        Err(payload) => {
+            let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "Internal VM panic occurred during verification".to_string()
+            };
+            Err(format!("Runtime panic in mrubyedge VM: {}", msg))
+        }
     }
-    Ok(())
 }
 
 /// 指定ファイルから外部リソース等を含めて読み込み、構文エラーや実行時例外が発生しないかを検証する。

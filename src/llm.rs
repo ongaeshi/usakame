@@ -269,7 +269,7 @@ pub fn resolve_llm_provider(
 
     // 1. 明示的にモデル名からプロバイダが判別できる場合、または対応する環境変数を確認
     if let Some(key) = explicit_api_key.filter(|k| !k.is_empty()) {
-        let m = model_opt.unwrap_or("gemini-2.5-flash").to_string();
+        let m = model_opt.unwrap_or("gemini-3.8-flash").to_string();
         if m.starts_with("gpt-") || m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4") {
             return Ok(LlmProvider::OpenAi {
                 api_key: key.to_string(),
@@ -293,7 +293,7 @@ pub fn resolve_llm_provider(
     {
         return Ok(LlmProvider::Gemini {
             api_key: key.trim().to_string(),
-            model: model_opt.unwrap_or("gemini-2.5-flash").to_string(),
+            model: model_opt.unwrap_or("gemini-3.8-flash").to_string(),
         });
     }
 
@@ -371,6 +371,7 @@ Your job is to output a complete, self-contained, playable Usakame Ruby script (
    - NEVER use `Time.now` or `sleep` -> Use a frame counter `$frame += 1` inside `update` (60 FPS)
    - NEVER use `require`, `load`, or `eval`
    - NEVER use `Struct.new` or `attr_accessor` if simple Hashes (`{{ x: 10, y: 20, vx: 1.0 }}`) or global state variables work cleanly. (Hashes with symbol keys are fast, idiomatic, and hot-reload friendly in Usakame!)
+   - Arithmetic on Floats: NEVER subtract or add an integer literal to a float variable using `-=` or `+=` (e.g. `f -= 1` will crash with `subi supports only integer` in mrubyedge). ALWAYS use float literals: `f -= 1.0` or `f = f - 1.0`.
 3. Tilemap (`mget` / `mset` / `mdel`) rules:
    - `mget(x, y)` returns `nil` for empty cells (NOT `-1`!).
    - Check if a tile exists with `if mget(x, y)`.
@@ -617,7 +618,7 @@ where
                     );
                     conversation.push(("model".to_string(), raw_response));
                     let fix_prompt = format!(
-                        "The generated `game.rb` failed verification with the following error in Usakame (mrubyedge):\n\n```\n{}\n```\n\nPlease fix this error and output the complete, corrected `game.rb` script. Remember all mrubyedge method restrictions (no `.sample`, `.shuffle`, `.reverse`, `.delete(val)`, `Hash#key?`, `String#gsub`, `upto`/`downto`, `even?`/`odd?`, and `mget` returns `nil` for empty cells).",
+                        "The generated `game.rb` failed verification with the following error in Usakame (mrubyedge):\n\n```\n{}\n```\n\nPlease fix this error and output the complete, corrected `game.rb` script. Remember all mrubyedge restrictions (no `.sample`, `.shuffle`, `.reverse`, `.delete(val)`, `Hash#key?`, `String#gsub`, `upto`/`downto`, `even?`/`odd?`, use float literals like `f -= 1.0` instead of `f -= 1` for float variables, and `mget` returns `nil` for empty cells).",
                         verify_err
                     );
                     conversation.push(("user".to_string(), fix_prompt));

@@ -122,7 +122,7 @@ USAGE:
         --with-refs                     Extract sample games into refs/examples/ for AI/reference
         -t, --template <name>           Template: default, minimal, split, platformer, shooter, puzzle, card, runner, rpg, survivors, dungeon
         -p, --prompt <text>             Generate initial game.rb from prompt via LLM API (with auto self-check)
-        -m, --model <name>              LLM model name (default: gemini-2.5-flash)
+        -m, --model <name>              LLM model name (default: gemini-3.8-flash)
         --api-key <key>                 LLM API key (or set GEMINI_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY)
     uk init [dir] [options]             Initialize Usakame project in current or specified directory
     uk generate <prompt> [-o <file>]    Generate or overwrite script from prompt via LLM API
