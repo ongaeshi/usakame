@@ -33,6 +33,22 @@ fn main() {
     build_examples_archive(Path::new("examples"), &Path::new(&out_dir).join("examples_archive.bin"));
 }
 
+fn is_valid_example_entry(name: &str) -> bool {
+    // 隠しファイル、バックアップ、一時ファイル、システムファイルを除外
+    if name.starts_with('.')
+        || name.ends_with('~')
+        || name.ends_with(".bak")
+        || name.ends_with(".tmp")
+        || name.eq_ignore_ascii_case("Thumbs.db")
+        || name.eq_ignore_ascii_case(".DS_Store")
+    {
+        return false;
+    }
+    // 配布・参照に必要なファイル拡張子のみを厳選同梱
+    let valid_exts = [".rb", ".spr", ".map", ".sfx", ".png", ".wav", ".ogg", ".md"];
+    valid_exts.iter().any(|ext| name.ends_with(ext))
+}
+
 fn build_examples_archive(examples_dir: &Path, archive_out_path: &Path) {
     let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
     if let Ok(read_dir) = fs::read_dir(examples_dir) {
@@ -40,9 +56,11 @@ fn build_examples_archive(examples_dir: &Path, archive_out_path: &Path) {
             let path = entry.path();
             if path.is_file() {
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    println!("cargo:rerun-if-changed=examples/{}", name);
-                    if let Ok(bytes) = fs::read(&path) {
-                        entries.push((name.to_string(), bytes));
+                    if is_valid_example_entry(name) {
+                        println!("cargo:rerun-if-changed=examples/{}", name);
+                        if let Ok(bytes) = fs::read(&path) {
+                            entries.push((name.to_string(), bytes));
+                        }
                     }
                 }
             }

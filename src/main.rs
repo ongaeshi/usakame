@@ -4395,7 +4395,9 @@ fn register_engine_api(
                 && p.is_file()
             {
                 if let Ok(bank) = BankData::from_file_or_base64(bank_id, &path_str, None) {
-                    bank.build_texture();
+                    if !headless {
+                        bank.build_texture();
+                    }
                     let mut banks_mut = banks_for_load_bank.borrow_mut();
                     banks_mut.insert(bank_id, bank);
                     return Ok(Rc::new(RObject::boolean(true)));
@@ -4444,7 +4446,9 @@ fn register_engine_api(
             if let Some(src_bank) = source_bank {
                 let mut loaded_bank = src_bank.clone();
                 loaded_bank.id = bank_id;
-                loaded_bank.build_texture();
+                if !headless {
+                    loaded_bank.build_texture();
+                }
                 let mut banks_mut = banks_for_load_bank.borrow_mut();
                 banks_mut.insert(bank_id, loaded_bank);
                 Ok(Rc::new(RObject::boolean(true)))
