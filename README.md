@@ -55,21 +55,38 @@ cargo build --release
 # 生成された target/release/uk を PATH の通った場所に配置
 ```
 
-### 実行
+### 新規プロジェクトの作成 (`uk new`) & 実行
 ```bash
-# サウンドデモの実行（上下キーでSE選択、Zで再生、XでBGM再生）
-uk run examples/sound.rb
+# 1. 新規プロジェクトを作成（AIエージェント連携用の AGENTS.md & docs/ も自動生成）
+uk new myapp
+cd myapp
 
-# うさぎ剣士の四方向歩行 & タイルマップ壁衝突デモ
-uk run examples/rabbit_knight.rb
+# 2. ゲームを実行（ホットリロード対応）
+uk run
 
-# サバイバルアクションゲーム「USAKAME SURVIVORS」の実行
-uk run game.rb
+# 3. ゲームと内蔵エディタ（スプライト＆タイルマップ）を同時起動してリアルタイム編集
+uk run_with_edit
+# または単体でエディタを起動:
+uk edit spr game.rb
+uk edit map game.rb
 
-# ブラウザで実行（Server-Sent Events による自動ライブリロード対応）
+# 4. オプション付きプロジェクト作成
+uk new myapp --split          # game.rb と game.spr / game.map / game.sfx を分離して作成
+uk new myapp --with-refs      # refs/examples/ に全サンプルコードを展開（AIのお手本にも最適）
+uk new myapp --minimal        # AGENTS.md や docs/ を省略し最小構成で作成
+uk new myapp -t platformer    # ジャンル別テンプレートから作成 (default, minimal, platformer, rpg, survivors, dungeon)
+
+# 5. 🤖 初手 LLM プロトタイプ自動生成（自動コンパイル＆60フレーム実行検証・自己修復機能付き）
+# 環境変数 GEMINI_API_KEY (または OPENAI_API_KEY / ANTHROPIC_API_KEY) を設定して実行:
+uk new moon_rabbit -p "うさぎが月面で餅をつきながら隕石を避けるアクションゲーム"
+
+# 6. 内蔵サンプル集を任意のフォルダに展開（Pyxel の copy_examples 相当）
+uk examples ./examples
+
+# 7. ブラウザで実行（Server-Sent Events による自動ライブリロード対応）
 uk browser game.rb
 
-# 配布用単一バイナリのビルド
+# 8. 配布用単一バイナリのビルド
 uk build game.rb -o my_game.exe
 ```
 

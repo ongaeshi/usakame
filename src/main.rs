@@ -1,6 +1,8 @@
 pub mod bundle;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cli;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod llm;
 pub mod emoji;
 pub mod sound;
 pub mod config;
@@ -7609,6 +7611,24 @@ async fn run_embedded_game_with_args(
     }
 }
 
+/// Ruby スクリプト文字列をコンパイルし、ヘッドレス環境で指定フレーム数だけ `update` / `draw` を実行して
+/// 構文エラーや `NoMethodError` 等の実行時例外が発生しないかを検証する。
+#[cfg(not(target_arch = "wasm32"))]
+pub fn verify_ruby_script_headless(full_source: &str, frames: u32) -> Result<(), String> {
+    let (tail_data, mrb_bytes) =
+        cli::compile_ruby_script_str_with_filename(full_source, Some("game.rb"))?;
+    let mut runtime = GameRuntime::new(&tail_data, &mrb_bytes, true).map_err(|e| e.full_message)?;
+    for _ in 0..frames {
+        runtime
+            .call_update_result()
+            .map_err(|e| e.full_message)?;
+        runtime
+            .call_draw_result()
+            .map_err(|e| e.full_message)?;
+    }
+    Ok(())
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
     let action = match cli::parse_cli_args(std::env::args()) {
@@ -7628,6 +7648,22 @@ fn main() {
         }
         cli::CliAction::New(opts) => {
             if let Err(err) = cli::cmd_new(&opts) {
+                eprintln!("Error: {}", err);
+                std::process::exit(1);
+            }
+        }
+        cli::CliAction::Generate {
+            prompt,
+            output_path,
+            model,
+            api_key,
+        } => {
+            if let Err(err) = cli::cmd_generate(
+                &prompt,
+                &output_path,
+                model.as_deref(),
+                api_key.as_deref(),
+            ) {
                 eprintln!("Error: {}", err);
                 std::process::exit(1);
             }

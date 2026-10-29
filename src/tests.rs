@@ -3438,13 +3438,31 @@ fn test_cli_parse_new_edit_examples_and_run_with_edit() {
             split: false,
             with_refs: false,
             template: "default".to_string(),
+            prompt: None,
+            model: None,
+            api_key: None,
         })
     );
 
-    // 2. uk new <dir> --minimal --split --with-refs -t minimal
+    // 2. uk new <dir> --minimal --split --with-refs -t minimal -p "rabbit game" -m gemini-2.5-pro --api-key testkey
     let act_new_opts = cli::parse_cli_args(
-        ["uk", "new", "my_game", "--minimal", "--split", "--with-refs", "-t", "minimal"]
-            .map(String::from),
+        [
+            "uk",
+            "new",
+            "my_game",
+            "--minimal",
+            "--split",
+            "--with-refs",
+            "-t",
+            "minimal",
+            "-p",
+            "rabbit game",
+            "-m",
+            "gemini-2.5-pro",
+            "--api-key",
+            "testkey",
+        ]
+        .map(String::from),
     )
     .unwrap();
     assert_eq!(
@@ -3455,7 +3473,25 @@ fn test_cli_parse_new_edit_examples_and_run_with_edit() {
             split: true,
             with_refs: true,
             template: "minimal".to_string(),
+            prompt: Some("rabbit game".to_string()),
+            model: Some("gemini-2.5-pro".to_string()),
+            api_key: Some("testkey".to_string()),
         })
+    );
+
+    // 2.5 uk generate "<prompt>" -o stage2.rb
+    let act_gen = cli::parse_cli_args(
+        ["uk", "generate", "space shooter", "-o", "stage2.rb", "-m", "gpt-4o"].map(String::from),
+    )
+    .unwrap();
+    assert_eq!(
+        act_gen,
+        cli::CliAction::Generate {
+            prompt: "space shooter".to_string(),
+            output_path: std::path::PathBuf::from("stage2.rb"),
+            model: Some("gpt-4o".to_string()),
+            api_key: None,
+        }
     );
 
     // 3. uk init (defaults to ".")
@@ -3468,6 +3504,9 @@ fn test_cli_parse_new_edit_examples_and_run_with_edit() {
             split: false,
             with_refs: false,
             template: "default".to_string(),
+            prompt: None,
+            model: None,
+            api_key: None,
         })
     );
 
@@ -3548,6 +3587,9 @@ fn test_cmd_new_and_examples_archive_workflow() {
         split: false,
         with_refs: false,
         template: "default".to_string(),
+        prompt: None,
+        model: None,
+        api_key: None,
     };
     cli::cmd_new(&opts_default).expect("cmd_new default should succeed");
 
@@ -3577,6 +3619,9 @@ fn test_cmd_new_and_examples_archive_workflow() {
         split: false,
         with_refs: false,
         template: "minimal".to_string(),
+        prompt: None,
+        model: None,
+        api_key: None,
     };
     cli::cmd_new(&opts_min).expect("cmd_new --minimal should succeed");
     assert!(dir_min.join(".gitignore").exists());
@@ -3600,6 +3645,9 @@ fn test_cmd_new_and_examples_archive_workflow() {
         split: true,
         with_refs: true,
         template: "default".to_string(),
+        prompt: None,
+        model: None,
+        api_key: None,
     };
     cli::cmd_new(&opts_split).expect("cmd_new --split --with-refs should succeed");
     assert!(dir_split.join("game.rb").exists());
@@ -3631,6 +3679,226 @@ fn test_cmd_new_and_examples_archive_workflow() {
         rt_sp.vm.globals.get("$spawn_ok").map(|o| o.as_ref().clone()),
         Some(RObject::boolean(true))
     );
+
+    let _ = std::fs::remove_dir_all(&base_temp);
+}
+
+#[test]
+fn test_llm_json_parser_and_request_response_builders() {
+    // 1. JSON string escaping and parsing (including surrogate pair for emoji 🐰 = \uD83D\uDC30)
+    let raw_str = "Hello \"Usakame\"\nLine2\t🐰";
+    let json_lit = llm::to_json_string_literal(raw_str);
+    let parsed_str = llm::parse_json(&json_lit).unwrap();
+    assert_eq!(parsed_str.as_str(), Some(raw_str));
+
+    let surrogate_json = r#"{"emoji": "\uD83D\uDC30", "ok": true, "count": 42}"#;
+    let parsed_obj = llm::parse_json(surrogate_json).unwrap();
+    assert_eq!(parsed_obj.get("emoji").and_then(|v| v.as_str()), Some("🐰"));
+    assert_eq!(parsed_obj.get("ok"), Some(&llm::JsonValue::Bool(true)));
+
+    // 2. Gemini request & response
+    let gemini_prov = llm::LlmProvider::Gemini {
+        api_key: "k1".to_string(),
+        model: "gemini-2.5-flash".to_string(),
+    };
+    let req_g = llm::build_api_request_json(
+        &gemini_prov,
+        "SYS_PROMPT",
+        &[("user".to_string(), "Make a game".to_string())],
+    );
+    let parsed_req_g = llm::parse_json(&req_g).unwrap();
+    assert_eq!(
+        parsed_req_g
+            .get("system_instruction")
+            .and_then(|s| s.get("parts"))
+            .and_then(|p| p.index(0))
+            .and_then(|p0| p0.get("text"))
+            .and_then(|t| t.as_str()),
+        Some("SYS_PROMPT")
+    );
+
+    let mock_gemini_resp = r#"{
+        "candidates": [
+            {
+                "content": {
+                    "parts": [
+                        { "text": "```ruby\ndef update; end\ndef draw; cls(1); end\n```" }
+                    ]
+                }
+            }
+        ]
+    }"#;
+    let extracted_g = llm::parse_api_response_json(&gemini_prov, mock_gemini_resp).unwrap();
+    let code_g = llm::extract_ruby_code_from_response(&extracted_g);
+    assert_eq!(code_g, "def update; end\ndef draw; cls(1); end\n");
+
+    // 3. OpenAI & Anthropic response parsing
+    let oa_prov = llm::LlmProvider::OpenAi {
+        api_key: "k2".to_string(),
+        model: "gpt-4o".to_string(),
+    };
+    let mock_oa_resp = r#"{"choices":[{"message":{"content":"```ruby\ncls(0)\n```"}}]}"#;
+    let extracted_oa = llm::parse_api_response_json(&oa_prov, mock_oa_resp).unwrap();
+    assert_eq!(llm::extract_ruby_code_from_response(&extracted_oa), "cls(0)\n");
+
+    let anth_prov = llm::LlmProvider::Anthropic {
+        api_key: "k3".to_string(),
+        model: "claude-sonnet-4-20250514".to_string(),
+    };
+    let mock_anth_resp = r#"{"content":[{"type":"text","text":"```ruby\ncls(2)\n```"}]}"#;
+    let extracted_anth = llm::parse_api_response_json(&anth_prov, mock_anth_resp).unwrap();
+    assert_eq!(llm::extract_ruby_code_from_response(&extracted_anth), "cls(2)\n");
+}
+
+#[test]
+fn test_llm_self_healing_compile_and_headless_runtime_verification() {
+    let mut call_count = 0;
+
+    let (verified_code, attempts) = llm::generate_verified_game_rb_with_backend(
+        "A rabbit dodging falling meteors",
+        "METEOR RABBIT",
+        |conversation| {
+            call_count += 1;
+            match call_count {
+                1 => {
+                    // Attempt 1: Syntax error (missing `end`)
+                    Ok("```ruby\ndef update\n  $x = 10\n```".to_string())
+                }
+                2 => {
+                    // Attempt 2: Compiles, but uses forbidden mrubyedge method `Array#sample` inside `update`!
+                    // Verify that Attempt 1's syntax error was fed back in the conversation
+                    let last_msg = &conversation.last().unwrap().1;
+                    assert!(
+                        last_msg.contains("syntax error"),
+                        "Attempt 2 should receive syntax error feedback, got: {}",
+                        last_msg
+                    );
+                    Ok(r#"```ruby
+$items = [10, 20, 30]
+def update
+  $picked = $items.sample
+end
+def draw
+  cls(0)
+end
+```"#
+                    .to_string())
+                }
+                _ => {
+                    // Attempt 3: Receives `NoMethodError` feedback from headless 60-frame verification and fixes it!
+                    let last_msg = &conversation.last().unwrap().1;
+                    assert!(
+                        last_msg.contains("NoMethodError") && last_msg.contains("sample"),
+                        "Attempt 3 should receive NoMethodError feedback for .sample, got: {}",
+                        last_msg
+                    );
+                    Ok(r#"```ruby
+$items = [10, 20, 30]
+$frame = 0
+def update
+  $frame += 1
+  $picked = $items[rand($items.size)]
+end
+def draw
+  cls(1)
+  spr(0, 100, 100)
+  print_text("METEOR RABBIT", 10, 10, 7)
+end
+__END__
+@SPRITE 0
+7777777777777777
+@SFX 0
+square c5 e5 g5
+```"#
+                    .to_string())
+                }
+            }
+        },
+    )
+    .expect("Self-healing loop should succeed on attempt 3");
+
+    assert_eq!(attempts, 3);
+    assert_eq!(call_count, 3);
+    assert!(verified_code.contains("$items[rand($items.size)]"));
+    assert!(verified_code.contains("@SPRITE 0"));
+}
+
+#[test]
+fn test_cmd_new_with_prompt_and_genre_templates() {
+    let base_temp = std::env::temp_dir().join("uk_test_phase2_prompt_and_templates");
+    let _ = std::fs::remove_dir_all(&base_temp);
+    std::fs::create_dir_all(&base_temp).unwrap();
+
+    // 1. `uk new moon_rabbit --prompt "..." --split` using mock generator
+    let dir_prompt = base_temp.join("moon_rabbit");
+    let opts_prompt = cli::NewProjectOptions {
+        project_dir: dir_prompt.clone(),
+        minimal: false,
+        split: true,
+        with_refs: false,
+        template: "default".to_string(),
+        prompt: Some("Moon rabbit pounding mochi".to_string()),
+        model: None,
+        api_key: None,
+    };
+
+    cli::cmd_new_with_generator(&opts_prompt, |_prompt, title| {
+        let mock_rb = format!(
+            r#"# {}
+def update
+end
+def draw
+  cls(1)
+  map(0, 0, 0, 0, 4, 4)
+  spr(0, 64, 64)
+end
+__END__
+@SPRITE 0
+7777777777777777
+@MAP 0 0
+0000
+@SFX 0
+square c4 e4 g4
+"#,
+            title
+        );
+        Ok((mock_rb, 1))
+    })
+    .expect("cmd_new with --prompt and --split should succeed");
+
+    assert!(dir_prompt.join("game.rb").exists());
+    assert!(dir_prompt.join("game.spr").exists());
+    assert!(dir_prompt.join("game.map").exists());
+    assert!(dir_prompt.join("game.sfx").exists());
+    assert!(dir_prompt.join("AGENTS.md").exists());
+
+    // Verify unpacked game.rb + .spr + .map + .sfx compiles and runs
+    let (_, tail_p, mrb_p) = cli::compile_ruby_script_file(&dir_prompt.join("game.rb")).unwrap();
+    assert!(tail_p.contains("@SPRITE 0"));
+    assert!(tail_p.contains("@MAP 0 0"));
+    assert!(tail_p.contains("@SFX 0"));
+    let mut rt_p = GameRuntime::new(&tail_p, &mrb_p, true).unwrap();
+    rt_p.call_update_result().unwrap();
+    rt_p.call_draw_result().unwrap();
+
+    // 2. `uk new my_rpg -t rpg` (extracts rabbit_knight template)
+    let dir_rpg = base_temp.join("my_rpg");
+    let opts_rpg = cli::NewProjectOptions {
+        project_dir: dir_rpg.clone(),
+        minimal: true,
+        split: false,
+        with_refs: false,
+        template: "rpg".to_string(),
+        prompt: None,
+        model: None,
+        api_key: None,
+    };
+    cli::cmd_new(&opts_rpg).expect("cmd_new -t rpg should succeed");
+    assert!(dir_rpg.join("game.rb").exists());
+    let (_, tail_rpg, mrb_rpg) = cli::compile_ruby_script_file(&dir_rpg.join("game.rb")).unwrap();
+    let mut rt_rpg = GameRuntime::new(&tail_rpg, &mrb_rpg, true).unwrap();
+    rt_rpg.call_update_result().unwrap();
+    rt_rpg.call_draw_result().unwrap();
 
     let _ = std::fs::remove_dir_all(&base_temp);
 }

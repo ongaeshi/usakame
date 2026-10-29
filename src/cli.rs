@@ -32,12 +32,22 @@ pub struct NewProjectOptions {
     pub split: bool,
     pub with_refs: bool,
     pub template: String,
+    pub prompt: Option<String>,
+    pub model: Option<String>,
+    pub api_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliAction {
-    /// `uk new <dir> [--minimal] [--split] [--with-refs] [-t <template>]` (新規プロジェクト作成)
+    /// `uk new <dir> [--minimal] [--split] [--with-refs] [-t <template>] [-p <prompt>]` (新規プロジェクト作成)
     New(NewProjectOptions),
+    /// `uk generate <prompt> [-o <script.rb>] [--model <model>] [--api-key <key>]` (LLMによるスクリプト生成)
+    Generate {
+        prompt: String,
+        output_path: PathBuf,
+        model: Option<String>,
+        api_key: Option<String>,
+    },
     /// `uk examples [dest_dir]` (同梱サンプルコード群の展開)
     Examples { dest_dir: PathBuf },
     /// `uk edit [spr|map|all] [script.rb]` (内蔵スプライト/タイルマップエディタ起動)
@@ -104,8 +114,12 @@ USAGE:
         --minimal                       Generate minimal files only (skip AGENTS.md & docs/)
         --split                         Separate resources into game.spr, game.map, game.sfx
         --with-refs                     Extract sample games into refs/examples/ for AI/reference
-        -t, --template <name>           Template: default, minimal, split
+        -t, --template <name>           Template: default, minimal, split, platformer, rpg, survivors, dungeon
+        -p, --prompt <text>             Generate initial game.rb from prompt via LLM API (with auto self-check)
+        -m, --model <name>              LLM model name (default: gemini-2.5-flash)
+        --api-key <key>                 LLM API key (or set GEMINI_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY)
     uk init [dir] [options]             Initialize Usakame project in current or specified directory
+    uk generate <prompt> [-o <file>]    Generate or overwrite script from prompt via LLM API
     uk run [script.rb] [options]        Run script natively with live hot-reload (default: game.rb)
         -e, --edit[=spr|map|all]        Launch editor(s) alongside the running game
         -s, --screenshot <out.png>      Auto-save screenshot and exit
@@ -171,6 +185,7 @@ where
         "version" | "--version" | "-V" => Ok(CliAction::Version),
         "new" => parse_new_args(&rest[1..], false),
         "init" => parse_new_args(&rest[1..], true),
+        "generate" | "gen" => parse_generate_args(&rest[1..]),
         "examples" | "copy_examples" => {
             let dest_dir = rest
                 .get(1)
@@ -366,6 +381,9 @@ fn parse_new_args(args: &[String], is_init: bool) -> Result<CliAction, String> {
     let mut split = false;
     let mut with_refs = false;
     let mut template = "default".to_string();
+    let mut prompt: Option<String> = None;
+    let mut model: Option<String> = None;
+    let mut api_key: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -389,6 +407,27 @@ fn parse_new_args(args: &[String], is_init: bool) -> Result<CliAction, String> {
                     split = true;
                 }
             }
+            "-p" | "--prompt" => {
+                i += 1;
+                let p = args
+                    .get(i)
+                    .ok_or_else(|| "Missing argument for -p / --prompt".to_string())?;
+                prompt = Some(p.to_string());
+            }
+            "-m" | "--model" => {
+                i += 1;
+                let m = args
+                    .get(i)
+                    .ok_or_else(|| "Missing argument for -m / --model".to_string())?;
+                model = Some(m.to_string());
+            }
+            "--api-key" => {
+                i += 1;
+                let k = args
+                    .get(i)
+                    .ok_or_else(|| "Missing argument for --api-key".to_string())?;
+                api_key = Some(k.to_string());
+            }
             arg if arg.starts_with('-') => {
                 return Err(format!("Unknown option for `uk new`: {}", arg));
             }
@@ -408,7 +447,7 @@ fn parse_new_args(args: &[String], is_init: bool) -> Result<CliAction, String> {
         None if is_init => PathBuf::from("."),
         None => {
             return Err(
-                "Missing project directory. Usage: `uk new <project_dir> [--minimal] [--split] [--with-refs]`"
+                "Missing project directory. Usage: `uk new <project_dir> [--minimal] [--split] [--with-refs] [-p <prompt>]`"
                     .to_string(),
             );
         }
@@ -420,7 +459,73 @@ fn parse_new_args(args: &[String], is_init: bool) -> Result<CliAction, String> {
         split,
         with_refs,
         template,
+        prompt,
+        model,
+        api_key,
     }))
+}
+
+fn parse_generate_args(args: &[String]) -> Result<CliAction, String> {
+    let mut prompt: Option<String> = None;
+    let mut output_path: Option<PathBuf> = None;
+    let mut model: Option<String> = None;
+    let mut api_key: Option<String> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-o" | "--output" => {
+                i += 1;
+                let out = args
+                    .get(i)
+                    .ok_or_else(|| "Missing argument for -o / --output".to_string())?;
+                output_path = Some(PathBuf::from(out));
+            }
+            "-p" | "--prompt" => {
+                i += 1;
+                let p = args
+                    .get(i)
+                    .ok_or_else(|| "Missing argument for -p / --prompt".to_string())?;
+                prompt = Some(p.to_string());
+            }
+            "-m" | "--model" => {
+                i += 1;
+                let m = args
+                    .get(i)
+                    .ok_or_else(|| "Missing argument for -m / --model".to_string())?;
+                model = Some(m.to_string());
+            }
+            "--api-key" => {
+                i += 1;
+                let k = args
+                    .get(i)
+                    .ok_or_else(|| "Missing argument for --api-key".to_string())?;
+                api_key = Some(k.to_string());
+            }
+            arg if arg.starts_with('-') => {
+                return Err(format!("Unknown option for `uk generate`: {}", arg));
+            }
+            arg => {
+                if prompt.is_none() {
+                    prompt = Some(arg.to_string());
+                } else {
+                    return Err(format!("Unexpected extra argument for `uk generate`: {}", arg));
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let prompt = prompt.ok_or_else(|| {
+        "Missing prompt. Usage: `uk generate \"<prompt>\" [-o game.rb] [--model <model>]`".to_string()
+    })?;
+
+    Ok(CliAction::Generate {
+        prompt,
+        output_path: output_path.unwrap_or_else(|| PathBuf::from("game.rb")),
+        model,
+        api_key,
+    })
 }
 
 fn parse_editor_kind_token(s: &str) -> Option<EditorKind> {
@@ -1546,8 +1651,37 @@ Usakame のスクリプト実行環境は軽量 Ruby VM **mrubyedge** です。�
   ```
 "#;
 
+/// テンプレート名に対応する埋め込みサンプルスクリプトの stem 名を解決する
+fn resolve_example_template_stem(template_lower: &str) -> Option<&str> {
+    match template_lower {
+        "default" | "starter" | "minimal" | "empty" | "split" => None,
+        "rpg" | "knight" => Some("rabbit_knight"),
+        "shooter" | "action" => Some("survivors"),
+        "dungeon" => Some("tiny_dungeon"),
+        other => Some(other),
+    }
+}
+
 /// `uk new <dir>` / `uk init [dir]` の実装
 pub fn cmd_new(opts: &NewProjectOptions) -> Result<Vec<PathBuf>, String> {
+    cmd_new_with_generator(opts, |prompt, title| {
+        crate::llm::generate_verified_game_rb(
+            prompt,
+            title,
+            opts.api_key.as_deref(),
+            opts.model.as_deref(),
+        )
+    })
+}
+
+/// 任意の LLM 生成関数（テスト時のモック等）を注入可能な `uk new` 実装
+pub fn cmd_new_with_generator<G>(
+    opts: &NewProjectOptions,
+    mut generator: G,
+) -> Result<Vec<PathBuf>, String>
+where
+    G: FnMut(&str, &str) -> Result<(String, usize), String>,
+{
     let dir = &opts.project_dir;
     let game_rb_path = dir.join("game.rb");
     if game_rb_path.exists() {
@@ -1584,48 +1718,130 @@ pub fn cmd_new(opts: &NewProjectOptions) -> Result<Vec<PathBuf>, String> {
         created_files.push(gitignore_path);
     }
 
-    // 2. game.rb (and .spr / .map / .sfx if split)
+    // 2. game.rb (LLM生成 / 埋め込みサンプルテンプレート / 標準テンプレート)
     let tpl_lower = opts.template.to_ascii_lowercase();
-    let code_body = if tpl_lower == "minimal" || tpl_lower == "empty" {
-        TEMPLATE_MINIMAL_RB.replace("{{PROJECT_TITLE}}", &project_title)
-    } else {
-        TEMPLATE_STARTER_CODE_RB.replace("{{PROJECT_TITLE}}", &project_title)
-    };
-
-    if opts.split {
-        fs::write(&game_rb_path, &code_body)
-            .map_err(|e| format!("Failed to write `{}`: {}", game_rb_path.display(), e))?;
-        created_files.push(game_rb_path);
-
-        let spr_path = dir.join("game.spr");
-        fs::write(&spr_path, TEMPLATE_STARTER_SPR)
-            .map_err(|e| format!("Failed to write `{}`: {}", spr_path.display(), e))?;
-        created_files.push(spr_path);
-
-        let map_path = dir.join("game.map");
-        fs::write(&map_path, TEMPLATE_STARTER_MAP)
-            .map_err(|e| format!("Failed to write `{}`: {}", map_path.display(), e))?;
-        created_files.push(map_path);
-
-        let sfx_path = dir.join("game.sfx");
-        fs::write(&sfx_path, TEMPLATE_STARTER_SFX)
-            .map_err(|e| format!("Failed to write `{}`: {}", sfx_path.display(), e))?;
-        created_files.push(sfx_path);
-    } else if tpl_lower == "minimal" || tpl_lower == "empty" {
-        fs::write(&game_rb_path, &code_body)
-            .map_err(|e| format!("Failed to write `{}`: {}", game_rb_path.display(), e))?;
-        created_files.push(game_rb_path);
-    } else {
-        let full_game_rb = format!(
-            "{}\n__END__\n{}\n{}\n{}",
-            code_body.trim_end(),
-            TEMPLATE_STARTER_SPR.trim_end(),
-            TEMPLATE_STARTER_MAP.trim_end(),
-            TEMPLATE_STARTER_SFX
+    if let Some(ref prompt_text) = opts.prompt {
+        let (generated_rb, attempts) = generator(prompt_text, &project_title)?;
+        println!(
+            "✨ Generated and verified `game.rb` in {} attempt(s)!",
+            attempts
         );
-        fs::write(&game_rb_path, full_game_rb)
+        if opts.split {
+            let (code_only, tail_only) = crate::bundle::split_ruby_source_and_tail(&generated_rb);
+            fs::write(&game_rb_path, format!("{}\n", code_only.trim_end()))
+                .map_err(|e| format!("Failed to write `{}`: {}", game_rb_path.display(), e))?;
+            created_files.push(game_rb_path.clone());
+
+            if !tail_only.trim().is_empty() {
+                let tmp_packed = dir.join("__tmp_full_game.rb");
+                fs::write(&tmp_packed, &generated_rb).ok();
+                let _ = crate::bundle::unpack_script_to_files(&game_rb_path);
+                let _ = fs::remove_file(&tmp_packed);
+                // Write full first, unpack, then strip __END__
+                fs::write(&game_rb_path, &generated_rb).ok();
+                if let Ok(unpacked) = crate::bundle::unpack_script_to_files(&game_rb_path) {
+                    created_files.extend(unpacked);
+                }
+                fs::write(&game_rb_path, format!("{}\n", code_only.trim_end())).ok();
+            }
+        } else {
+            fs::write(&game_rb_path, &generated_rb)
+                .map_err(|e| format!("Failed to write `{}`: {}", game_rb_path.display(), e))?;
+            created_files.push(game_rb_path);
+        }
+    } else if let Some(example_stem) = resolve_example_template_stem(&tpl_lower) {
+        let entries = unpack_examples_archive(EMBEDDED_EXAMPLES_ARCHIVE)?;
+        let target_rb_name = format!("{}.rb", example_stem);
+        let found_rb = entries
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(&target_rb_name));
+
+        let Some((_, rb_bytes)) = found_rb else {
+            return Err(format!(
+                "Unknown template `{}`. Available templates: default, minimal, split, platformer, rpg, survivors, dungeon, demo, sound",
+                opts.template
+            ));
+        };
+
+        let rb_str = String::from_utf8_lossy(rb_bytes).to_string();
+        fs::write(&game_rb_path, &rb_str)
             .map_err(|e| format!("Failed to write `{}`: {}", game_rb_path.display(), e))?;
-        created_files.push(game_rb_path);
+        created_files.push(game_rb_path.clone());
+
+        // 同梱の関連アセット (例: platformer_bg.png, tiny_dungeon.png, split_game.spr 等) もコピー
+        for (name, data) in &entries {
+            if name.eq_ignore_ascii_case(&target_rb_name) {
+                continue;
+            }
+            if name.starts_with(example_stem) {
+                let ext = Path::new(name)
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("");
+                let dest_file = if matches!(ext, "spr" | "map" | "sfx" | "res")
+                    && name.eq_ignore_ascii_case(&format!("{}.{}", example_stem, ext))
+                {
+                    dir.join(format!("game.{}", ext))
+                } else {
+                    dir.join(name)
+                };
+                fs::write(&dest_file, data)
+                    .map_err(|e| format!("Failed to write `{}`: {}", dest_file.display(), e))?;
+                created_files.push(dest_file);
+            }
+        }
+
+        if opts.split {
+            let (code_only, tail_only) = crate::bundle::split_ruby_source_and_tail(&rb_str);
+            if !tail_only.trim().is_empty() {
+                if let Ok(unpacked) = crate::bundle::unpack_script_to_files(&game_rb_path) {
+                    created_files.extend(unpacked);
+                }
+                fs::write(&game_rb_path, format!("{}\n", code_only.trim_end())).ok();
+            }
+        }
+    } else {
+        let code_body = if tpl_lower == "minimal" || tpl_lower == "empty" {
+            TEMPLATE_MINIMAL_RB.replace("{{PROJECT_TITLE}}", &project_title)
+        } else {
+            TEMPLATE_STARTER_CODE_RB.replace("{{PROJECT_TITLE}}", &project_title)
+        };
+
+        if opts.split {
+            fs::write(&game_rb_path, &code_body)
+                .map_err(|e| format!("Failed to write `{}`: {}", game_rb_path.display(), e))?;
+            created_files.push(game_rb_path);
+
+            let spr_path = dir.join("game.spr");
+            fs::write(&spr_path, TEMPLATE_STARTER_SPR)
+                .map_err(|e| format!("Failed to write `{}`: {}", spr_path.display(), e))?;
+            created_files.push(spr_path);
+
+            let map_path = dir.join("game.map");
+            fs::write(&map_path, TEMPLATE_STARTER_MAP)
+                .map_err(|e| format!("Failed to write `{}`: {}", map_path.display(), e))?;
+            created_files.push(map_path);
+
+            let sfx_path = dir.join("game.sfx");
+            fs::write(&sfx_path, TEMPLATE_STARTER_SFX)
+                .map_err(|e| format!("Failed to write `{}`: {}", sfx_path.display(), e))?;
+            created_files.push(sfx_path);
+        } else if tpl_lower == "minimal" || tpl_lower == "empty" {
+            fs::write(&game_rb_path, &code_body)
+                .map_err(|e| format!("Failed to write `{}`: {}", game_rb_path.display(), e))?;
+            created_files.push(game_rb_path);
+        } else {
+            let full_game_rb = format!(
+                "{}\n__END__\n{}\n{}\n{}",
+                code_body.trim_end(),
+                TEMPLATE_STARTER_SPR.trim_end(),
+                TEMPLATE_STARTER_MAP.trim_end(),
+                TEMPLATE_STARTER_SFX
+            );
+            fs::write(&game_rb_path, full_game_rb)
+                .map_err(|e| format!("Failed to write `{}`: {}", game_rb_path.display(), e))?;
+            created_files.push(game_rb_path);
+        }
     }
 
     // 3. AI Agent Docs (default ON, skipped if --minimal)
@@ -1679,6 +1895,36 @@ pub fn cmd_new(opts: &NewProjectOptions) -> Result<Vec<PathBuf>, String> {
     println!("  uk edit                # Open Sprite Editor (or `uk edit map` for Tilemap)");
 
     Ok(created_files)
+}
+
+/// `uk generate "<prompt>" [-o <script.rb>]` の実装
+pub fn cmd_generate(
+    prompt: &str,
+    output_path: &Path,
+    model: Option<&str>,
+    api_key: Option<&str>,
+) -> Result<PathBuf, String> {
+    let title = output_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Usakame Game")
+        .to_uppercase();
+    let (generated_rb, attempts) =
+        crate::llm::generate_verified_game_rb(prompt, &title, api_key, model)?;
+    if let Some(parent) = output_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create directory `{}`: {}", parent.display(), e))?;
+    }
+    fs::write(output_path, &generated_rb)
+        .map_err(|e| format!("Failed to write `{}`: {}", output_path.display(), e))?;
+    println!(
+        "✨ Generated and verified `{}` in {} attempt(s)!",
+        output_path.display(),
+        attempts
+    );
+    Ok(output_path.to_path_buf())
 }
 
 /// エディタプロセスをバックグラウンド（子プロセス）で起動する
