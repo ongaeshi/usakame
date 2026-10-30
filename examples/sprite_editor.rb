@@ -64,10 +64,114 @@ $current_col = 8     # 初期描画色 (赤)
 $show_grid = true    # グリッド線の表示
 $bg_mode = 0         # プレビュー背景 (0: 黒, 1: 濃紺, 2: 白, 3: 市松)
 
+# 編集サイズモード (16x16, 16x32, 32x16, 32x32)
+SIZE_MODES = [
+  [16, 16],
+  [16, 32],
+  [32, 16],
+  [32, 32]
+]
+$size_mode_idx = 0
+$edit_w = 16
+$edit_h = 16
+
+def set_size_mode(idx)
+  $size_mode_idx = idx % SIZE_MODES.size
+  $edit_w = SIZE_MODES[$size_mode_idx][0]
+  $edit_h = SIZE_MODES[$size_mode_idx][1]
+  $sel_x = [[$sel_x, 0].max, 256 - $edit_w].min
+  $sel_y = [[$sel_y, 0].max, 256 - $edit_h].min
+  sfx(:click)
+  notify("SIZE: #{$edit_w}x#{$edit_h}")
+end
+
+def cycle_size_mode
+  set_size_mode(($size_mode_idx + 1) % SIZE_MODES.size)
+end
+
 # アニメーションプレビュー
 $anim_playing = false
 $anim_frame = 0
 $anim_timer = 0
+$anim_frames = 4       # 1..8 コマ
+$anim_speed = 8        # ticks per frame (8 = ~7.5fps, 6 = 10fps, 4 = 15fps)
+$anim_pingpong = false # true: 往復ピンポン, false: 通常ループ
+
+def toggle_anim
+  $anim_playing = !$anim_playing
+  $anim_frame = 0
+  $anim_timer = 0
+  sfx(:click)
+end
+
+def cycle_anim_frames(delta)
+  $anim_frames = [[$anim_frames + delta, 1].max, 8].min
+  $anim_frame = 0
+  sfx(:cursor)
+  notify("ANIM FRAMES: #{$anim_frames}")
+end
+
+def toggle_anim_pingpong
+  $anim_pingpong = !$anim_pingpong
+  $anim_frame = 0
+  sfx(:click)
+  notify("ANIM LOOP: #{$anim_pingpong ? 'PING-PONG' : 'LOOP'}")
+end
+
+def anim_current_step
+  return 0 unless $anim_playing
+  n = $anim_frames
+  return 0 if n <= 1
+  if $anim_pingpong
+    period = (n - 1) * 2
+    step = $anim_frame % period
+    step < n ? step : (period - step)
+  else
+    $anim_frame % n
+  end
+end
+
+# オニオンスキン (前フレーム透かし表示)
+$show_onion = false
+
+def toggle_onion
+  $show_onion = !$show_onion
+  sfx(:click)
+  notify("ONION SKIN: #{$show_onion ? 'ON' : 'OFF'}")
+end
+
+# クリップボード (コピー & ペースト)
+$clipboard = nil
+$clipboard_w = 0
+$clipboard_h = 0
+
+def copy_selection
+  $clipboard = get_bank_rect($current_bank, $sel_x, $sel_y, $edit_w, $edit_h)
+  $clipboard_w = $edit_w
+  $clipboard_h = $edit_h
+  sfx(:coin)
+  notify("COPIED #{$edit_w}x#{$edit_h}")
+end
+
+def paste_selection
+  return unless $clipboard
+  push_undo
+  if $clipboard_w == $edit_w && $clipboard_h == $edit_h
+    update_bank_rect($current_bank, $sel_x, $sel_y, $edit_w, $edit_h, $clipboard)
+  else
+    cur = get_bank_rect($current_bank, $sel_x, $sel_y, $edit_w, $edit_h)
+    pw = [$clipboard_w, $edit_w].min
+    ph = [$clipboard_h, $edit_h].min
+    ph.times do |y|
+      pw.times do |x|
+        cur[y * $edit_w + x] = $clipboard[y * $clipboard_w + x]
+      end
+    end
+    update_bank_rect($current_bank, $sel_x, $sel_y, $edit_w, $edit_h, cur)
+  end
+  sfx(:powerup)
+  notify("PASTED")
+end
 
 # コードプレビューモーダル
 $show_code_modal = false
@@ -137,16 +241,16 @@ def set_canvas_pixels(bx, by, pixels)
 end
 
 def push_undo
-  $undo_stack << [$sel_x, $sel_y, get_canvas_pixels($sel_x, $sel_y)]
+  $undo_stack << [$sel_x, $sel_y, $edit_w, $edit_h, get_bank_rect($current_bank, $sel_x, $sel_y, $edit_w, $edit_h)]
   $undo_stack.shift if $undo_stack.size > 30
 end
 
 def perform_undo
   return if $is_read_only
   return if $undo_stack.empty?
-  sel_x, sel_y, saved_grid = $undo_stack.pop
+  sel_x, sel_y, uw, uh, saved_grid = $undo_stack.pop
   set_selection(sel_x, sel_y)
-  set_canvas_pixels(sel_x, sel_y, saved_grid)
+  update_bank_rect($current_bank, sel_x, sel_y, uw, uh, saved_grid)
   sfx(:click)
   notify("UNDO")
 end
@@ -182,6 +286,8 @@ def reload_palettes(source)
 end
 
 def set_selection(gx, gy)
+  gx = [[gx, 0].max, 256 - $edit_w].min
+  gy = [[gy, 0].max, 256 - $edit_h].min
   if $sel_x != gx || $sel_y != gy
     $sel_x = gx
     $sel_y = gy
@@ -199,8 +305,10 @@ def cycle_palette(dir)
     $current_pal = ($current_pal + dir) % 8
     $current_pal = 0 if $current_pal < 0
   end
+  cur_spr_id = ($sel_x / 16) + ($sel_y / 16) * 16
+  $sprite_palettes[cur_spr_id] = $current_pal
   sfx(:click)
-  notify("PALETTE: #{$current_pal}")
+  notify("PALETTE: P#{$current_pal}")
 end
 
 reload_palettes(load_source)
@@ -310,42 +418,43 @@ def export_all
   notify("EXPORTED @SPRITE DATA TO CONSOLE!")
 end
 
-# 塗りつぶし (Flood Fill on 32x32 canvas - 高速 DFS & 部分更新)
+# 塗りつぶし (選択領域 $edit_w x $edit_h 内での高速 DFS & 部分更新)
 def flood_fill(start_cx, start_cy, new_col)
+  return if start_cx >= $edit_w || start_cy >= $edit_h
   start_gx = $sel_x + start_cx
   start_gy = $sel_y + start_cy
   return if start_gx >= BANK_SIZE || start_gy >= BANK_SIZE
 
-  cur_pixels = get_canvas_pixels($sel_x, $sel_y)
-  start_idx = start_cy * CANVAS_GRID + start_cx
+  cur_pixels = get_bank_rect($current_bank, $sel_x, $sel_y, $edit_w, $edit_h)
+  start_idx = start_cy * $edit_w + start_cx
   target_col = cur_pixels[start_idx]
   return if target_col == new_col
 
   push_undo
   stack = [[start_cx, start_cy]]
-  visited = Array.new(CANVAS_GRID * CANVAS_GRID, false)
+  visited = Array.new($edit_w * $edit_h, false)
 
   while !stack.empty?
     pt = stack.pop
     cx = pt[0]
     cy = pt[1]
-    key = cy * CANVAS_GRID + cx
+    key = cy * $edit_w + cx
     next if visited[key]
     visited[key] = true
 
     if cur_pixels[key] == target_col
       cur_pixels[key] = new_col
-      stack << [cx + 1, cy] if cx + 1 < CANVAS_GRID
+      stack << [cx + 1, cy] if cx + 1 < $edit_w
       stack << [cx - 1, cy] if cx - 1 >= 0
-      stack << [cx, cy + 1] if cy + 1 < CANVAS_GRID
+      stack << [cx, cy + 1] if cy + 1 < $edit_h
       stack << [cx, cy - 1] if cy - 1 >= 0
     end
   end
-  set_canvas_pixels($sel_x, $sel_y, cur_pixels)
+  update_bank_rect($current_bank, $sel_x, $sel_y, $edit_w, $edit_h, cur_pixels)
   sfx(:click)
 end
 
-# 反転 (32x32 領域内)
+# 反転 (選択領域 $edit_w x $edit_h 内)
 def flip_canvas(horizontal)
   if $is_read_only
     sfx(:boom)
@@ -353,21 +462,48 @@ def flip_canvas(horizontal)
     return
   end
   push_undo
-  cur = get_canvas_pixels($sel_x, $sel_y)
-  new_grid = Array.new(CANVAS_GRID * CANVAS_GRID, nil)
-  CANVAS_GRID.times do |cy|
-    CANVAS_GRID.times do |cx|
-      src_idx = cy * CANVAS_GRID + cx
-      nx = horizontal ? (CANVAS_GRID - 1 - cx) : cx
-      ny = horizontal ? cy : (CANVAS_GRID - 1 - cy)
-      new_grid[ny * CANVAS_GRID + nx] = cur[src_idx]
+  cur = get_bank_rect($current_bank, $sel_x, $sel_y, $edit_w, $edit_h)
+  new_grid = Array.new($edit_w * $edit_h, nil)
+  $edit_h.times do |cy|
+    $edit_w.times do |cx|
+      src_idx = cy * $edit_w + cx
+      nx = horizontal ? ($edit_w - 1 - cx) : cx
+      ny = horizontal ? cy : ($edit_h - 1 - cy)
+      new_grid[ny * $edit_w + nx] = cur[src_idx]
     end
   end
-  set_canvas_pixels($sel_x, $sel_y, new_grid)
+  update_bank_rect($current_bank, $sel_x, $sel_y, $edit_w, $edit_h, new_grid)
   sfx(:select)
+  notify(horizontal ? "FLIP-H" : "FLIP-V")
 end
 
-# シフト移動 (dx, dy on 32x32)
+# 90度回転 (正方形 $edit_w == $edit_h 時のみ)
+def rotate_canvas
+  if $is_read_only
+    sfx(:boom)
+    notify("READ ONLY: Cannot edit PNG-backed bank in editor!")
+    return
+  end
+  if $edit_w != $edit_h
+    sfx(:boom)
+    notify("ROTATE: Square only (#{$edit_w}x#{$edit_h})")
+    return
+  end
+  push_undo
+  n = $edit_w
+  cur = get_bank_rect($current_bank, $sel_x, $sel_y, n, n)
+  new_grid = Array.new(n * n, nil)
+  n.times do |cy|
+    n.times do |cx|
+      new_grid[cx * n + (n - 1 - cy)] = cur[cy * n + cx]
+    end
+  end
+  update_bank_rect($current_bank, $sel_x, $sel_y, n, n, new_grid)
+  sfx(:select)
+  notify("ROTATE 90°")
+end
+
+# シフト移動 (dx, dy on $edit_w x $edit_h)
 def shift_canvas(dx, dy)
   if $is_read_only
     sfx(:boom)
@@ -375,17 +511,17 @@ def shift_canvas(dx, dy)
     return
   end
   push_undo
-  cur = get_canvas_pixels($sel_x, $sel_y)
-  new_grid = Array.new(CANVAS_GRID * CANVAS_GRID, nil)
-  CANVAS_GRID.times do |cy|
-    CANVAS_GRID.times do |cx|
-      src_idx = cy * CANVAS_GRID + cx
-      nx = (cx + dx) % CANVAS_GRID
-      ny = (cy + dy) % CANVAS_GRID
-      new_grid[ny * CANVAS_GRID + nx] = cur[src_idx]
+  cur = get_bank_rect($current_bank, $sel_x, $sel_y, $edit_w, $edit_h)
+  new_grid = Array.new($edit_w * $edit_h, nil)
+  $edit_h.times do |cy|
+    $edit_w.times do |cx|
+      src_idx = cy * $edit_w + cx
+      nx = (cx + dx) % $edit_w
+      ny = (cy + dy) % $edit_h
+      new_grid[ny * $edit_w + nx] = cur[src_idx]
     end
   end
-  set_canvas_pixels($sel_x, $sel_y, new_grid)
+  update_bank_rect($current_bank, $sel_x, $sel_y, $edit_w, $edit_h, new_grid)
   sfx(:cursor)
 end
 
@@ -396,12 +532,11 @@ def clear_canvas
     return
   end
   push_undo
-  new_grid = Array.new(CANVAS_GRID * CANVAS_GRID, nil)
-  set_canvas_pixels($sel_x, $sel_y, new_grid)
+  new_grid = Array.new($edit_w * $edit_h, nil)
+  update_bank_rect($current_bank, $sel_x, $sel_y, $edit_w, $edit_h, new_grid)
   sfx(:boom)
-  notify("CLEARED 32x32 AT (#{$sel_x}, #{$sel_y})")
+  notify("CLEARED #{$edit_w}x#{$edit_h}")
 end
-
 # ------------------------------------------------------------------------------
 # 更新処理 (update)
 # ------------------------------------------------------------------------------
@@ -427,9 +562,9 @@ def update
 
   if $anim_playing
     $anim_timer += 1
-    if $anim_timer >= 8
+    if $anim_timer >= $anim_speed
       $anim_timer = 0
-      $anim_frame = ($anim_frame + 1) % 4
+      $anim_frame += 1
     end
   end
 
@@ -437,17 +572,44 @@ def update
   perform_undo if btnp(:z)
   save_to_target if btnp(:s)
   export_all if btnp(:x)
-  clear_canvas if btnp(:c)
+  clear_canvas if btnp(:c) && !btn(:ctrl)
+  cycle_size_mode if btnp(:tab)
+  toggle_anim if btnp(:space)
+  flip_canvas(true) if btnp(:h)
+  flip_canvas(false) if btnp(:v)
+  rotate_canvas if btnp(:r)
+  toggle_onion if btnp(:o)
+  cycle_anim_frames(-1) if btnp(:"[")
+  cycle_anim_frames(1) if btnp(:"]")
 
-  # 矢印キーで 32x32 シフト
+  # Ctrl+C (コピー) / Ctrl+V (貼り付け)
+  if btn(:ctrl)
+    if btnp(:c)
+      copy_selection
+    elsif btnp(:v)
+      paste_selection
+    end
+  end
+
+  # パレット切り替え (P / Shift+P)
+  if btnp(:p)
+    cycle_palette(btn(:shift) ? -1 : 1)
+  end
+
+  # ツールショートカット
+  $current_tool = :pen if btnp(:b)
+  $current_tool = :fill if btnp(:f)
+  $current_tool = :eraser if btnp(:e)
+
+  # 矢印キーで移動 / シフト
   if btn(:ctrl)
     # Ctrl+矢印で選択エリア移動 (16px刻み)
     nx = $sel_x
     ny = $sel_y
     nx = [nx - 16, 0].max if btnp(0)
-    nx = [nx + 16, 224].min if btnp(1)
+    nx = [nx + 16, 256 - $edit_w].min if btnp(1)
     ny = [ny - 16, 0].max if btnp(2)
-    ny = [ny + 16, 224].min if btnp(3)
+    ny = [ny + 16, 256 - $edit_h].min if btnp(3)
     set_selection(nx, ny)
   else
     shift_canvas(-1, 0) if btnp(0) # left
@@ -479,48 +641,65 @@ def update
   in_minimap = (mx >= $minimap_x && mx < $minimap_x + $minimap_size &&
                 my >= $minimap_y && my < $minimap_y + $minimap_size)
   if in_minimap && (btn(:mouse_l) || btn(:mouse_r))
-    # ミニマップ上では 1セル = 0.5px -> 8px が 16px グリッド
     gx = ((mx - $minimap_x) / 8) * 16
     gy = ((my - $minimap_y) / 8) * 16
-    gx = [[gx, 0].max, 224].min
-    gy = [[gy, 0].max, 224].min
+    gx = [[gx, 0].max, 256 - $edit_w].min
+    gy = [[gy, 0].max, 256 - $edit_h].min
     set_selection(gx, gy)
   end
 
   # --- ボタンクリック判定 (mouse_l / mouse_r) ---
   if btnp(:mouse_l)
-    # 1. ヘッダーボタン
+    # 1. ヘッダーボタン (y: 3..21)
     if my >= 3 && my <= 21
-      if mx >= 260 && mx <= 276 # [<] バンク減
+      if mx >= 124 && mx <= 176 # [SIZE]
+        cycle_size_mode
+      elsif mx >= 182 && mx <= 198 # [<] バンク減
         switch_bank([$current_bank - 1, 0].max)
         sfx(:click)
-      elsif mx >= 324 && mx <= 340 # [>] バンク増
+      elsif mx >= 232 && mx <= 248 # [>] バンク増
         switch_bank($current_bank + 1)
         sfx(:click)
-      elsif mx >= 346 && mx <= 390 # [SAVE]
+      elsif mx >= 252 && mx <= 296 # [SAVE]
         save_to_target
-      elsif mx >= 395 && mx <= 430 # [EXP]
+      elsif mx >= 302 && mx <= 340 # [EXP]
         export_all
-      elsif mx >= 435 && mx <= 475 # [MAP]
+      elsif mx >= 346 && mx <= 386 # [MAP]
         spawn_editor("map", $target_path) if respond_to?(:spawn_editor)
+        sfx(:click)
+      elsif mx >= 392 && mx <= 434 # [ONION]
+        toggle_onion
+      elsif mx >= 440 && mx <= 476 # [CODE]
+        $show_code_modal = true
         sfx(:click)
       end
     end
 
-    # 2. プレビュー操作
+    # 2. プレビュー操作 (y: 28..44)
     if my >= 28 && my <= 44
       if mx >= 282 && mx <= 306 # [BG]
         $bg_mode = ($bg_mode + 1) % 4
         sfx(:click)
       elsif mx >= 310 && mx <= 334 # [▶/■]
-        $anim_playing = !$anim_playing
-        $anim_frame = 0
-        sfx(:click)
+        toggle_anim
       end
     end
 
-    # 2.5 パレット切り替え [< P0 >] (y: 52..68)
-    if my >= 52 && my <= 68
+    # 2.2 アニメーション設定 (y: 46..62)
+    if my >= 46 && my <= 62
+      if mx >= 220 && mx <= 250 # [#F] フレーム数
+        cycle_anim_frames(1)
+      elsif mx >= 254 && mx <= 296 # [LOOP/PING]
+        toggle_anim_pingpong
+      elsif mx >= 300 && mx <= 336 # [SPD]
+        $anim_speed = case $anim_speed; when 8 then 6; when 6 then 4; when 4 then 12; else 8; end
+        sfx(:cursor)
+        notify("ANIM SPEED: #{$anim_speed} ticks")
+      end
+    end
+
+    # 2.5 パレット切り替え [< P0 >] (y: 66..82)
+    if my >= 66 && my <= 82
       if mx >= 266 && mx <= 282 # [<]
         cycle_palette(-1)
       elsif mx >= 310 && mx <= 328 # [>]
@@ -528,10 +707,10 @@ def update
       end
     end
 
-    # 3. パレット選択 (4x4, x: 220..316, y: 76..172)
-    if mx >= 220 && mx < 320 && my >= 76 && my < 176
+    # 3. パレットカラー選択 (4x4, x: 220..320, y: 88..188)
+    if mx >= 220 && mx < 320 && my >= 88 && my < 188
       col_idx = (mx - 220) / 25
-      row_idx = (my - 76) / 25
+      row_idx = (my - 88) / 25
       if col_idx >= 0 && col_idx < 4 && row_idx >= 0 && row_idx < 4
         $current_col = row_idx * 4 + col_idx
         $current_tool = :pen if $current_tool == :eraser
@@ -539,8 +718,8 @@ def update
       end
     end
 
-    # [TRANS] 透過色ボタン (x: 220..316, y: 180..196)
-    if mx >= 220 && mx <= 316 && my >= 180 && my <= 196
+    # [TRANS] 透過色ボタン (x: 220..316, y: 192..208)
+    if mx >= 220 && mx <= 316 && my >= 192 && my <= 208
       $current_col = nil
       sfx(:select)
     end
@@ -567,29 +746,35 @@ def update
       end
     end
 
-    # 5. アクションボタン (中央下部, y: 202..242)
-    if my >= 202 && my <= 220
-      if mx >= 220 && mx <= 264 # [UNDO]
+    # 5. アクションボタン (中央下部, y: 212..246)
+    if my >= 212 && my <= 228
+      if mx >= 220 && mx <= 248 # [UNDO]
         perform_undo
-      elsif mx >= 268 && mx <= 316 # [FLIP-H]
-        flip_canvas(true)
-      elsif mx >= 320 && mx <= 340 # [↑]
+      elsif mx >= 252 && mx <= 280 # [COPY]
+        copy_selection
+      elsif mx >= 284 && mx <= 314 # [PASTE]
+        paste_selection
+      elsif mx >= 322 && mx <= 342 # [↑]
         shift_canvas(0, -1)
       end
-    elsif my >= 224 && my <= 242
-      if mx >= 220 && mx <= 264 # [FLIP-V]
+    elsif my >= 230 && my <= 246
+      if mx >= 220 && mx <= 250 # [FLIP-H]
+        flip_canvas(true)
+      elsif mx >= 254 && mx <= 284 # [FLIP-V]
         flip_canvas(false)
-      elsif mx >= 268 && mx <= 288 # [←]
+      elsif mx >= 288 && mx <= 312 # [ROT]
+        rotate_canvas
+      elsif mx >= 316 && mx <= 328 # [←]
         shift_canvas(-1, 0)
-      elsif mx >= 292 && mx <= 312 # [↓]
+      elsif mx >= 330 && mx <= 342 # [↓]
         shift_canvas(0, 1)
-      elsif mx >= 316 && mx <= 336 # [→]
+      elsif mx >= 344 && mx <= 356 # [→]
         shift_canvas(1, 0)
       end
     end
   end
 
-  # --- キャンバス内での描画 & ツール操作 (32x32) ---
+  # --- キャンバス内での描画 & スポイト操作 ---
   in_canvas = (mx >= $canvas_x && mx < $canvas_x + CANVAS_GRID * $cell_size &&
                my >= $canvas_y && my < $canvas_y + CANVAS_GRID * $cell_size)
 
@@ -602,41 +787,41 @@ def update
     else
       cx = (mx - $canvas_x) / $cell_size
       cy = (my - $canvas_y) / $cell_size
-      cx = [[cx, 0].max, CANVAS_GRID - 1].min
-      cy = [[cy, 0].max, CANVAS_GRID - 1].min
 
-      gx = $sel_x + cx
-      gy = $sel_y + cy
+      # 選択中スプライト範囲 ($edit_w x $edit_h) の内側のみ描画可能
+      if cx >= 0 && cx < $edit_w && cy >= 0 && cy < $edit_h
+        gx = $sel_x + cx
+        gy = $sel_y + cy
 
-      if gx < BANK_SIZE && gy < BANK_SIZE
-        idx = gy * BANK_SIZE + gx
-
-        case $current_tool
-        when :pen
-          push_undo if btnp(:mouse_l) || btnp(:mouse_r)
-          if btn(:mouse_l)
-            set_bank_pixel($current_bank, gx, gy, $current_col)
-          elsif btn(:mouse_r)
-            set_bank_pixel($current_bank, gx, gy, nil)
-          end
-        when :eraser
-          push_undo if btnp(:mouse_l)
-          if btn(:mouse_l)
-            set_bank_pixel($current_bank, gx, gy, nil)
-          end
-        when :fill
-          if btnp(:mouse_l)
-            flood_fill(cx, cy, $current_col)
-          elsif btnp(:mouse_r)
-            flood_fill(cx, cy, nil)
-          end
-        when :picker
-          if btnp(:mouse_l)
-            picked = get_bank_pixel($current_bank, gx, gy)
+        # 【右クリック = スポイト (カラーピック)】
+        if btn(:mouse_r)
+          picked = get_bank_pixel($current_bank, gx, gy)
+          if picked != $current_col
             $current_col = picked
-            $current_tool = :pen
             sfx(:pickup)
-            notify("PICKED: #{picked ? COLOR_NAMES[picked] : 'TRANS'}")
+            col_name = picked ? COLOR_NAMES[picked] : "TRANS"
+            notify("PICKED: #{col_name}")
+          end
+        elsif btn(:mouse_l)
+          case $current_tool
+          when :pen
+            push_undo if btnp(:mouse_l)
+            set_bank_pixel($current_bank, gx, gy, $current_col)
+          when :eraser
+            push_undo if btnp(:mouse_l)
+            set_bank_pixel($current_bank, gx, gy, nil)
+          when :fill
+            if btnp(:mouse_l)
+              flood_fill(cx, cy, $current_col)
+            end
+          when :picker
+            if btnp(:mouse_l)
+              picked = get_bank_pixel($current_bank, gx, gy)
+              $current_col = picked
+              $current_tool = :pen
+              sfx(:pickup)
+              notify("PICKED: #{picked ? COLOR_NAMES[picked] : 'TRANS'}")
+            end
           end
         end
       end
@@ -648,59 +833,74 @@ end
 # 描画処理 (draw)
 # ------------------------------------------------------------------------------
 def draw
-  # UI 描画は常にシステムパレット(0)で行う
   pal_bank(0)
   cls(0) # 背景: 黒
 
   mx = mouse_x
   my = mouse_y
+  cur_spr_id = ($sel_x / 16) + ($sel_y / 16) * 16
 
   # 1. 上部ヘッダーバー (y: 0..24)
   rectfill(0, 0, 480, 24, 1) # 濃紺
   line(0, 24, 480, 24, 5)
 
-  print_text("USAKAME STUDIO", 8, 7, 7)
-  print_text("Bank: #{$current_bank}", 110, 7, 10)
+  print_text("USAKAME", 8, 7, 7)
+  print_text("##{cur_spr_id}", 76, 7, 10)
+
+  # [SIZE: 16x16] ボタン
+  rectfill(124, 4, 52, 16, 2)
+  rect(124, 4, 52, 16, 6)
+  print_text("#{$edit_w}x#{$edit_h}", 132, 8, 11)
 
   # [< BANK n >] バンク選択ボタン
-  rectfill(260, 4, 16, 16, 2)
-  rect(260, 4, 16, 16, 6)
-  print_text("<", 265, 8, 7)
+  rectfill(182, 4, 16, 16, 2)
+  rect(182, 4, 16, 16, 6)
+  print_text("<", 187, 8, 7)
 
-  rectfill(280, 4, 40, 16, 1)
-  rect(280, 4, 40, 16, 5)
-  print_text("B#{$current_bank}", 292, 8, 10)
+  rectfill(200, 4, 30, 16, 1)
+  rect(200, 4, 30, 16, 5)
+  print_text("B#{$current_bank}", 206, 8, 10)
 
-  rectfill(324, 4, 16, 16, 2)
-  rect(324, 4, 16, 16, 6)
-  print_text(">", 330, 8, 7)
+  rectfill(232, 4, 16, 16, 2)
+  rect(232, 4, 16, 16, 6)
+  print_text(">", 238, 8, 7)
 
-  # [SAVE] ボタン (通常: 緑 / 読み込み専用: 灰色)
+  # [SAVE] ボタン
   if $is_read_only
-    rectfill(346, 4, 44, 16, 5)
-    rect(346, 4, 44, 16, 6)
-    print_text("R-ONLY", 348, 8, 7)
+    rectfill(252, 4, 44, 16, 5)
+    rect(252, 4, 44, 16, 6)
+    print_text("R-ONLY", 254, 8, 7)
   else
-    rectfill(346, 4, 44, 16, 11)
-    rect(346, 4, 44, 16, 7)
-    print_text("SAVE", 356, 8, 0)
+    rectfill(252, 4, 44, 16, 11)
+    rect(252, 4, 44, 16, 7)
+    print_text("SAVE", 262, 8, 0)
   end
 
   # [EXP] ボタン
-  rectfill(395, 4, 35, 16, 2)
-  rect(395, 4, 35, 16, 6)
-  print_text("EXP", 403, 8, 7)
+  rectfill(302, 4, 38, 16, 2)
+  rect(302, 4, 38, 16, 6)
+  print_text("EXP", 312, 8, 7)
 
-  # [MAP] ボタン (タイルマップエディタを起動)
-  rectfill(435, 4, 38, 16, 3)
-  rect(435, 4, 38, 16, 11)
-  print_text("MAP", 445, 8, 7)
+  # [MAP] ボタン
+  rectfill(346, 4, 40, 16, 3)
+  rect(346, 4, 40, 16, 11)
+  print_text("MAP", 356, 8, 7)
+
+  # [ONION] ボタン
+  rectfill(392, 4, 42, 16, $show_onion ? 12 : 2)
+  rect(392, 4, 42, 16, $show_onion ? 7 : 6)
+  print_text("ONION", 397, 8, $show_onion ? 0 : 7)
+
+  # [CODE] ボタン
+  rectfill(440, 4, 36, 16, 2)
+  rect(440, 4, 36, 16, 6)
+  print_text("CODE", 446, 8, 7)
 
   # 2. キャンバス描画 (32x32, 6px/cell -> 192x192)
   rectfill($canvas_x - 2, $canvas_y - 2, CANVAS_GRID * $cell_size + 4, CANVAS_GRID * $cell_size + 4, 1)
   rect($canvas_x - 2, $canvas_y - 2, CANVAS_GRID * $cell_size + 4, CANVAS_GRID * $cell_size + 4, 5)
 
-  # 背景市松模様: @PALETTE 99 (Aseprite / EDGE 風ミディアムグレー市松模様) で描画
+  # 背景市松模様
   pal_bank(CHECKER_PALETTE)
   rectfill($canvas_x, $canvas_y, 192, 192, 0)
   8.times do |cy|
@@ -712,10 +912,42 @@ def draw
   end
   pal_bank(0)
 
-  # バンクテクスチャから 32x32 を 6倍拡大描画 (左上基準 blt で 192x192 ぴったり描画)
+  # バンクテクスチャ描画
   blt($canvas_x, $canvas_y, $current_bank, $sel_x, $sel_y, 32, 32, 0, 6.0, $current_pal)
 
-  # グリッド線 (一括描画で高速化)
+  # オニオンスキン描画 (前フレームのドットを透かし表示)
+  if $show_onion && $sel_x >= $edit_w
+    prev_x = $sel_x - $edit_w
+    prev_pixels = get_bank_rect($current_bank, prev_x, $sel_y, $edit_w, $edit_h)
+    cur_pixels = get_bank_rect($current_bank, $sel_x, $sel_y, $edit_w, $edit_h)
+    $edit_h.times do |cy|
+      $edit_w.times do |cx|
+        cur_c = cur_pixels[cy * $edit_w + cx]
+        prev_c = prev_pixels[cy * $edit_w + cx]
+        if cur_c.nil? && prev_c
+          px = $canvas_x + cx * $cell_size
+          py = $canvas_y + cy * $cell_size
+          rectfill(px + 2, py + 2, 2, 2, 12) # 淡い水色ドット
+        end
+      end
+    end
+  end
+
+  # 非アクティブ領域のディム表示 (枠外の半透明シェード)
+  if $edit_w < 32 || $edit_h < 32
+    32.times do |cy|
+      32.times do |cx|
+        if cx >= $edit_w || cy >= $edit_h
+          px = $canvas_x + cx * $cell_size
+          py = $canvas_y + cy * $cell_size
+          pset(px + 1, py + 1, 0)
+          pset(px + 4, py + 4, 0)
+        end
+      end
+    end
+  end
+
+  # グリッド線
   if $show_grid
     (CANVAS_GRID + 1).times do |i|
       gx = $canvas_x + i * $cell_size
@@ -725,11 +957,9 @@ def draw
     end
   end
 
-  # 16x16 ガイド十字線 (中央)
-  guide_x = $canvas_x + 16 * $cell_size
-  guide_y = $canvas_y + 16 * $cell_size
-  line(guide_x, $canvas_y, guide_x, $canvas_y + 192, 6)
-  line($canvas_x, guide_y, $canvas_x + 192, guide_y, 6)
+  # アクティブスプライトの境界枠
+  rect($canvas_x, $canvas_y, $edit_w * $cell_size, $edit_h * $cell_size, 7)
+  rect($canvas_x - 1, $canvas_y - 1, $edit_w * $cell_size + 2, $edit_h * $cell_size + 2, 10)
 
   # カーソル枠プレビュー
   in_canvas = (mx >= $canvas_x && mx < $canvas_x + CANVAS_GRID * $cell_size &&
@@ -737,7 +967,9 @@ def draw
   if in_canvas
     hx = (mx - $canvas_x) / $cell_size
     hy = (my - $canvas_y) / $cell_size
-    rect($canvas_x + hx * $cell_size, $canvas_y + hy * $cell_size, $cell_size, $cell_size, 7)
+    if hx < $edit_w && hy < $edit_h
+      rect($canvas_x + hx * $cell_size, $canvas_y + hy * $cell_size, $cell_size, $cell_size, 7)
+    end
   end
 
   # 3. ツールバー (キャンバス下部, y: 224..242)
@@ -764,100 +996,94 @@ def draw
   print_text("GRID", 160, 229, $show_grid ? 7 : 5)
 
   # [CLR]
-  rectfill(190, 224, 26, 18, 1)
-  rect(190, 224, 26, 18, 8)
+  rectfill(190, 224, 24, 18, 1)
+  rect(190, 224, 24, 18, 8)
   print_text("CLR", 193, 229, 8)
 
   # 4. 中央ペイン: プレビュー & パレット
   print_text("PREVIEW", 220, 27, 6)
 
-  if $bg_mode == 3
-    # 市松模様背景 (Aseprite / EDGE 風ミディアムグレー)
-    pal_bank(CHECKER_PALETTE)
-    rectfill(219, 37, 18, 18, 0)
-    2.times do |cy|
-      2.times do |cx|
-        rectfill(220 + cx * 8, 38 + cy * 8, 8, 8, 1) if (cx + cy) % 2 == 1
-      end
-    end
-    rectfill(241, 29, 34, 34, 0)
-    4.times do |cy|
-      4.times do |cx|
-        rectfill(242 + cx * 8, 30 + cy * 8, 8, 8, 1) if (cx + cy) % 2 == 1
-      end
-    end
-    pal_bank(0)
-  else
-    preview_bg = case $bg_mode
-                 when 0 then 0
-                 when 1 then 1
-                 when 2 then 7
-                 else 0
-                 end
-    # 1x プレビュー (16x16, x: 220, y: 38)
-    rectfill(219, 37, 18, 18, preview_bg)
-    # 2x プレビュー (32x32, x: 242, y: 30)
-    rectfill(241, 29, 34, 34, preview_bg)
-  end
-  # 1x プレビュー (16x16, x: 220, y: 38)
-  rect(219, 37, 18, 18, 5)
-  anim_off_x = $anim_playing ? (($anim_frame % 4) * 16) : 0
-  draw_u = ($sel_x + anim_off_x) % BANK_SIZE
-  blt(220, 38, $current_bank, draw_u, $sel_y, 16, 16, 0, 1.0, $current_pal)
+  preview_bg = case $bg_mode
+               when 0 then 0
+               when 1 then 1
+               when 2 then 7
+               else 0
+               end
+  # 1x プレビュー背景 (x: 219, y: 35)
+  rectfill(219, 35, $edit_w + 2, $edit_h + 2, preview_bg)
+  rect(219, 35, $edit_w + 2, $edit_h + 2, 5)
 
-  # 2x プレビュー (32x32, x: 242, y: 30)
-  rect(241, 29, 34, 34, 5)
-  blt(242, 30, $current_bank, $sel_x, $sel_y, 32, 32, 0, 1.0, $current_pal)
+  # アニメーション再生オフセット計算
+  anim_step = anim_current_step
+  draw_u = ($sel_x + anim_step * $edit_w) % BANK_SIZE
+  blt(220, 36, $current_bank, draw_u, $sel_y, $edit_w, $edit_h, 0, 1.0, $current_pal)
+
+  # 2x プレビュー (x: 254, y: 28)
+  rectfill(253, 27, 24, 24, preview_bg)
+  rect(253, 27, 24, 24, 5)
+  blt(254, 28, $current_bank, $sel_x, $sel_y, $edit_w, $edit_h, 0, 1.0, $current_pal)
 
   # [BG]
-  rectfill(282, 32, 24, 15, 2)
-  rect(282, 32, 24, 15, 6)
+  rectfill(282, 32, 24, 14, 2)
+  rect(282, 32, 24, 14, 6)
   print_text("BG", 288, 36, 7)
 
   # [▶/■]
-  rectfill(310, 32, 24, 15, $anim_playing ? 8 : 3)
-  rect(310, 32, 24, 15, 6)
+  rectfill(310, 32, 24, 14, $anim_playing ? 8 : 3)
+  rect(310, 32, 24, 14, 6)
   print_text($anim_playing ? "■" : "▶", 318, 36, 7)
 
-  # パレットヘッダー & [< P0 >] 切替ボタン (y: 52..68)
-  print_text("PALETTE", 220, 56, 6)
+  # アニメーション設定ボタン群 (y: 48..62)
+  # [#F] フレーム数
+  rectfill(220, 48, 30, 14, 2)
+  rect(220, 48, 30, 14, 6)
+  print_text("#{$anim_frames}F", 228, 52, 10)
+
+  # [LOOP / PING]
+  rectfill(254, 48, 42, 14, $anim_pingpong ? 12 : 2)
+  rect(254, 48, 42, 14, $anim_pingpong ? 7 : 6)
+  print_text($anim_pingpong ? "PING" : "LOOP", 260, 52, $anim_pingpong ? 0 : 7)
+
+  # [SPD]
+  rectfill(300, 48, 36, 14, 2)
+  rect(300, 48, 36, 14, 6)
+  fps_label = ($anim_speed == 4 ? "FAST" : ($anim_speed == 6 ? "MID" : ($anim_speed == 12 ? "SLOW" : "NORM")))
+  print_text(fps_label, 305, 52, 7)
+
+  # パレットヘッダー & [< P0 >] 切替ボタン (y: 66..82)
+  print_text("PALETTE", 220, 70, 6)
 
   # [<] ボタン
-  rectfill(268, 52, 14, 14, 2)
-  rect(268, 52, 14, 14, 6)
-  print_text("<", 273, 55, 7)
+  rectfill(268, 66, 14, 14, 2)
+  rect(268, 66, 14, 14, 6)
+  print_text("<", 273, 69, 7)
 
   # [P#{$current_pal}] 表示バッジ
-  rectfill(284, 52, 26, 14, 1)
-  rect(284, 52, 26, 14, 5)
-  print_text("P#{$current_pal}", 288, 55, 10)
+  rectfill(284, 66, 26, 14, 1)
+  rect(284, 66, 26, 14, 5)
+  print_text("P#{$current_pal}", 288, 69, 10)
 
   # [>] ボタン
-  rectfill(312, 52, 14, 14, 2)
-  rect(312, 52, 14, 14, 6)
-  print_text(">", 317, 55, 7)
+  rectfill(312, 66, 14, 14, 2)
+  rect(312, 66, 14, 14, 6)
+  print_text(">", 317, 69, 7)
 
-  # 選択中のカラー名
-  print_text("#{$current_col ? COLOR_NAMES[$current_col] : 'TRANS'}", 220, 66, 5)
-
-  # 16色グリッド (4x4, y: 76..172)
-  # カラーチップの塗りつぶしは選択パレットで描画
+  # 16色グリッド (4x4, y: 88..188)
   pal_bank($current_pal)
   4.times do |row|
     4.times do |col_idx|
       c_id = row * 4 + col_idx
       bx = 220 + col_idx * 25
-      by = 76 + row * 25
+      by = 88 + row * 25
       rectfill(bx, by, 22, 22, c_id)
     end
   end
-  # グリッド枠線やUI描画はシステムパレット(0)で行う
   pal_bank(0)
   4.times do |row|
     4.times do |col_idx|
       c_id = row * 4 + col_idx
       bx = 220 + col_idx * 25
-      by = 76 + row * 25
+      by = 88 + row * 25
       if $current_col == c_id
         rect(bx - 1, by - 1, 24, 24, 7)
       else
@@ -867,63 +1093,75 @@ def draw
   end
 
   # [TRANS]
-  rectfill(220, 180, 96, 16, $current_col.nil? ? 8 : 1)
-  rect(220, 180, 96, 16, $current_col.nil? ? 7 : 5)
-  print_text("TRANSPARENT (.)", 232, 184, $current_col.nil? ? 7 : 6)
+  rectfill(220, 192, 96, 16, $current_col.nil? ? 8 : 1)
+  rect(220, 192, 96, 16, $current_col.nil? ? 7 : 5)
+  print_text("TRANSPARENT (.)", 232, 196, $current_col.nil? ? 7 : 6)
 
-  # アクションボタン群 (y: 202..242)
-  rectfill(220, 202, 44, 18, 1)
-  rect(220, 202, 44, 18, 5)
-  print_text("UNDO", 228, 207, 7)
+  # アクションボタン群 (y: 212..246)
+  # 行 1: UNDO, COPY, PASTE, ↑
+  rectfill(220, 212, 30, 16, 1)
+  rect(220, 212, 30, 16, 5)
+  print_text("UNDO", 223, 216, 7)
 
-  rectfill(268, 202, 48, 18, 1)
-  rect(268, 202, 48, 18, 5)
-  print_text("FLIP-H", 274, 207, 7)
+  rectfill(254, 212, 28, 16, 1)
+  rect(254, 212, 28, 16, 5)
+  print_text("COPY", 257, 216, 7)
 
-  rectfill(220, 224, 44, 18, 1)
-  rect(220, 224, 44, 18, 5)
-  print_text("FLIP-V", 225, 229, 7)
+  rectfill(286, 212, 32, 16, 1)
+  rect(286, 212, 32, 16, 5)
+  print_text("PASTE", 288, 216, 7)
 
-  # シフト矢印
-  arrow_buttons = [
-    ["←", 268, 224, 20],
-    ["↓", 292, 224, 20],
-    ["→", 316, 224, 20],
-    ["↑", 320, 202, 20]
-  ]
-  arrow_buttons.each do |item|
-    lbl = item[0]
-    sx = item[1]
-    sy = item[2]
-    sw = item[3]
-    rectfill(sx, sy, sw, 18, 1)
-    rect(sx, sy, sw, 18, 5)
-    print_text(lbl, sx + 5, sy + 5, 7)
-  end
+  rectfill(322, 212, 20, 16, 1)
+  rect(322, 212, 20, 16, 5)
+  print_text("↑", 328, 216, 7)
+
+  # 行 2: FLIP-H, FLIP-V, ROT, ←, ↓, →
+  rectfill(220, 230, 30, 16, 1)
+  rect(220, 230, 30, 16, 5)
+  print_text("FL-H", 224, 234, 7)
+
+  rectfill(254, 230, 28, 16, 1)
+  rect(254, 230, 28, 16, 5)
+  print_text("FL-V", 257, 234, 7)
+
+  rectfill(286, 230, 28, 16, 1)
+  rect(286, 230, 28, 16, 5)
+  print_text("ROT", 291, 234, 7)
+
+  rectfill(318, 230, 12, 16, 1)
+  rect(318, 230, 12, 16, 5)
+  print_text("←", 320, 234, 7)
+
+  rectfill(332, 230, 12, 16, 1)
+  rect(332, 230, 12, 16, 5)
+  print_text("↓", 334, 234, 7)
+
+  rectfill(346, 230, 12, 16, 1)
+  rect(346, 230, 12, 16, 5)
+  print_text("→", 348, 234, 7)
 
   # 5. 右ペイン: 256x256 バンクミニマップ (x: 342, y: 38, 幅128x高128)
   print_text("BANK #{$current_bank} MINIMAP (256x256)", 342, 27, 6)
 
-  # ミニマップ外枠
   rectfill($minimap_x - 1, $minimap_y - 1, $minimap_size + 2, $minimap_size + 2, 1)
   rect($minimap_x - 1, $minimap_y - 1, $minimap_size + 2, $minimap_size + 2, 5)
 
-  # バンク全体の 1/2 縮小テクスチャ転送描画
   blt($minimap_x, $minimap_y, $current_bank, 0, 0, 256, 256, 0, 0.5, $current_pal)
 
-  # 選択中 32x32 領域の枠線表示 (ミニマップ上では 16x16 px)
+  # 選択中スプライト領域の枠線表示 (ミニマップ上では $edit_w/2 x $edit_h/2 px)
   sel_box_x = $minimap_x + $sel_x / 2
   sel_box_y = $minimap_y + $sel_y / 2
-  rect(sel_box_x, sel_box_y, 16, 16, 7)
-  rect(sel_box_x - 1, sel_box_y - 1, 18, 18, 10)
+  sel_box_w = $edit_w / 2
+  sel_box_h = $edit_h / 2
+  rect(sel_box_x, sel_box_y, sel_box_w, sel_box_h, 7)
+  rect(sel_box_x - 1, sel_box_y - 1, sel_box_w + 2, sel_box_h + 2, 10)
 
   # ミニマップ下部情報
-  cur_spr_id = ($sel_x / 16) + ($sel_y / 16) * 16
-  print_text("Pos:(#{$sel_x},#{$sel_y})  Sprite ID:#{cur_spr_id}", 342, 172, 10)
-  print_text("Minimap: Click/Drag to jump", 342, 186, 6)
-  print_text("Shortcuts: Z (Undo), S (Save), X (Exp)", 342, 200, 5)
-  print_text("Arrows: Shift 32x32  Ctrl+Arrows: Move", 342, 214, 5)
-  print_text("Mouse Wheel: Switch Color", 342, 228, 5)
+  print_text("Pos:(#{$sel_x},#{$sel_y})  Sprite ##{cur_spr_id} (#{$edit_w}x#{$edit_h})", 342, 172, 10)
+  print_text("Right-Click: Eyedropper (Pick Color)", 342, 186, 11)
+  print_text("Tab: Size  P: Pal  O: Onion  Space: Anim", 342, 200, 5)
+  print_text("Ctrl+C/V: Copy/Paste  H/V: Flip  R: Rot", 342, 214, 5)
+  print_text("Ctrl+Arrows: Move  Arrows: Shift px", 342, 228, 5)
 
   # 6. 下部ステータスバー (y: 250..270)
   rectfill(0, 250, 480, 20, 1)
