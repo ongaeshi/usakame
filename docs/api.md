@@ -316,10 +316,17 @@ Usakame では、`game.rb` 等の単一スクリプト内に Ruby コード、�
   * バンク内の非空スプライトを `@SPRITE` テキスト形式（16進数ブロック）でフォーマットした文字列を返します。
   * ファイルパスを指定した場合は、既存のインラインコメントや絵文字ラベルを可能な限り引き継ぎます。
 
-### 5.2 タイルマップ／オブジェクト保存
+### 5.2 タイルマップ／オブジェクト保存・読み込み
 * **`save_resource_map(path, map_text)`**:
   * 指定ファイル（`game.rb` または `.map`）の `@MAP` および `@OBJECTS` セクションのみを安全に差し替えて保存します。
   * `Ruby` コードや `@SPRITE` 定義、コメントは一切破壊されません。
+* **`load_resource_map(path, width = nil, height = nil)`**:
+  * 指定スクリプトまたは外部マップファイルからタイルIDの配列（1次元、要素数 `width * height`）を返します。未設定セルは `nil` になります。
+  * `width` および `height` を省略した場合は、`@MAP` に記述されている実サイズ（幅と高さ）を自動検出します。
+* **`load_resource_map_dimensions(path)`**:
+  * 指定ファイルの `@MAP` セクションから実際の幅と高さを `[width, height]` 配列で返します（`@MAP` が無い場合は `nil`）。
+* **`load_resource_objects(path, filter_type = nil)`**:
+  * 指定ファイルの `@OBJECTS` セクションからオブジェクトの配列（各オブジェクトは Hash）を返します。
 
 ### 5.3 ファイル監視
 * **`file_mtime(path)`**:

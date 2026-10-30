@@ -37,7 +37,7 @@ AI コード生成や高度なゲーム制作で頻出する、mrubyedge に最�
 | ツール / サンプル名 | ファイル | 概要 |
 |:---|:---|:---|
 | **スプライトエディタ** | [`sprite_editor.rb`](sprite_editor.rb) | `uk edit spr` で起動するドット絵エディタ。可変サイズ（16x16 / 16x32 / 32x16 / 32x32）、右クリックスポイト、アニメプレビュー＆オニオンスキン、パレット切替、コピペ、反転・回転対応。 |
-| **タイルマップエディタ** | [`tilemap_editor.rb`](tilemap_editor.rb) | `uk edit map` で起動するタイルマップエディタ。マップチップ選択、タイル配置、右クリック消去。 |
+| **タイルマップエディタ** | [`tilemap_editor.rb`](tilemap_editor.rb) | `uk edit map` で起動するタイルマップエディタ。可変マップサイズ（16x16, 32x32, 64x32, 64x64, 128x32 & 自動検出）、右クリックスポイト、マルチタイルスタンプ、矩形コピペ（Ctrl+C/V）対応。 |
 | **分離フォーマットサンプル** | [`split_game.rb`](split_game.rb) | ゲームコードと外部リソース（[`split_game.spr`](split_game.spr), [`split_game.map`](split_game.map), [`split_game.sfx`](split_game.sfx)）を分けて管理するサンプル。 |
 
 ---

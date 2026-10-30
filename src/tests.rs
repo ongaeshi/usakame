@@ -673,7 +673,9 @@ $read_back = read_file("{}")
     let map_script = format!(r#"
 $mtime = file_mtime("{}")
 $map_tiles = load_resource_map("{}", 2, 2)
-"#, map_file_str, map_file_str);
+$map_dims = load_resource_map_dimensions("{}")
+$map_auto_tiles = load_resource_map("{}")
+"#, map_file_str, map_file_str, map_file_str, map_file_str);
     let (_, mrb_map) = cli::compile_ruby_script_str(&map_script).unwrap();
     let runtime_map = GameRuntime::new("", &mrb_map, true).unwrap();
 
@@ -694,6 +696,25 @@ $map_tiles = load_resource_map("{}", 2, 2)
         assert_eq!(t3, 4);
     } else {
         panic!("$map_tiles should be an Array");
+    }
+
+    let map_dims_obj = runtime_map.vm.globals.get("$map_dims").unwrap();
+    if let RValue::Array(arr) = &map_dims_obj.value {
+        let borrowed = arr.borrow();
+        assert_eq!(borrowed.len(), 2);
+        let w: i64 = borrowed[0].as_ref().try_into().unwrap();
+        let h: i64 = borrowed[1].as_ref().try_into().unwrap();
+        assert_eq!(w, 2);
+        assert_eq!(h, 2);
+    } else {
+        panic!("$map_dims should be an Array");
+    }
+
+    let auto_tiles_obj = runtime_map.vm.globals.get("$map_auto_tiles").unwrap();
+    if let RValue::Array(arr) = &auto_tiles_obj.value {
+        assert_eq!(arr.borrow().len(), 4);
+    } else {
+        panic!("$map_auto_tiles should be an Array");
     }
 
     let _ = std::fs::remove_dir_all(&temp_dir);
@@ -1583,6 +1604,25 @@ fn test_tilemap_editor_example_script() {
     assert_eq!(parsed_map.get(0, 0), 1);
     assert_eq!(parsed_map.get(1, 1), -1);
     assert_eq!(parsed_map.get(4, 2), 4);
+}
+
+#[test]
+fn test_tilemap_editor_variable_size_and_resize() {
+    let (_, tail_data, mrb_bytes) =
+        cli::compile_ruby_script_file(std::path::Path::new("examples/tilemap_editor.rb"))
+            .expect("examples/tilemap_editor.rb should compile");
+
+    let mut runtime =
+        GameRuntime::new(&tail_data, &mrb_bytes, true).expect("Tilemap editor should initialize");
+
+    // 初期サイズは 32x32
+    let w0: i64 = runtime.vm.globals.get("$map_w").unwrap().as_ref().try_into().unwrap();
+    let h0: i64 = runtime.vm.globals.get("$map_h").unwrap().as_ref().try_into().unwrap();
+    assert_eq!(w0, 32);
+    assert_eq!(h0, 32);
+
+    runtime.call_update_result().expect("Tilemap editor update should succeed");
+    runtime.call_draw_result().expect("Tilemap editor draw should succeed");
 }
 
 #[test]

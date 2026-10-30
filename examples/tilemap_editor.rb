@@ -36,8 +36,31 @@ show_mouse(true)
 # ------------------------------------------------------------------------------
 # 定数 & 初期設定
 # ------------------------------------------------------------------------------
-MAP_WIDTH  = 32
-MAP_HEIGHT = 32
+# マップサイズプリセット & 動的マップ寸法
+MAP_PRESETS = [
+  [16, 16],
+  [32, 32],
+  [64, 32],
+  [64, 64],
+  [128, 32]
+]
+$map_w = 32
+$map_h = 32
+
+# ブラシサイズ定義 (マルチタイルスタンプ対応)
+BRUSH_SIZES = [
+  [1, 1, "1x1"],
+  [1, 2, "1x2"],
+  [2, 1, "2x1"],
+  [2, 2, "2x2"]
+]
+$brush_size_idx = 0
+$brush_w = 1
+$brush_h = 1
+$clipboard_tiles = nil
+$clipboard_w = 0
+$clipboard_h = 0
+
 MINIMAP_BANK = 127 # ミニマップ高速描画用バンク
 
 # キャンバス表示領域 (352 x 320 px = 22 x 20 タイル)
@@ -98,7 +121,7 @@ end
 # ------------------------------------------------------------------------------
 # グローバル状態
 # ------------------------------------------------------------------------------
-$map = Array.new(MAP_WIDTH * MAP_HEIGHT, nil)
+$map = Array.new($map_w * $map_h, nil)
 $objects = []         # オブジェクト一覧 [{ type: "apple", x: 48, y: 48, spr: "🍎", ... }]
 $minimap_dirty = true # ミニマップ再生成フラグ
 
@@ -275,14 +298,16 @@ end
 def push_undo
   $undo_stack << {
     map: $map.dup,
+    w: $map_w,
+    h: $map_h,
     objects: clone_objects_list($objects)
   }
   $undo_stack.shift if $undo_stack.size > 20
 end
 
 def sync_tilemap_to_engine
-  MAP_HEIGHT.times do |y|
-    MAP_WIDTH.times do |x|
+  $map_h.times do |y|
+    $map_w.times do |x|
       mset(x, y, get_tile(x, y))
     end
   end
@@ -293,6 +318,10 @@ def perform_undo
   state = $undo_stack.pop
   if state.is_a?(Hash)
     $map = state[:map]
+    if state[:w] && state[:h]
+      $map_w = state[:w]
+      $map_h = state[:h]
+    end
     $objects = clone_objects_list(state[:objects])
   else
     $map = state
@@ -305,14 +334,74 @@ def perform_undo
   notify("UNDO")
 end
 
+def resize_map(new_w, new_h)
+  return if new_w <= 0 || new_h <= 0
+  return if new_w == $map_w && new_h == $map_h
+  push_undo
+  new_map = Array.new(new_w * new_h, nil)
+  old_w = $map_w
+  old_h = $map_h
+  old_map = $map
+  copy_h = [old_h, new_h].min
+  copy_w = [old_w, new_w].min
+  copy_h.times do |y|
+    copy_w.times do |x|
+      new_map[y * new_w + x] = old_map[y * old_w + x]
+    end
+  end
+  $map = new_map
+  $map_w = new_w
+  $map_h = new_h
+  sync_tilemap_to_engine
+  $minimap_dirty = true
+  sfx(:select)
+  notify("RESIZED MAP: #{new_w}x#{new_h}")
+end
+
+def cycle_map_size
+  cur_idx = 0
+  MAP_PRESETS.each_with_index do |p, i|
+    if p[0] == $map_w && p[1] == $map_h
+      cur_idx = i
+      break
+    end
+  end
+  next_idx = (cur_idx + 1) % MAP_PRESETS.size
+  new_w = MAP_PRESETS[next_idx][0]
+  new_h = MAP_PRESETS[next_idx][1]
+  resize_map(new_w, new_h)
+end
+
+def cycle_brush_size
+  $brush_size_idx = ($brush_size_idx + 1) % BRUSH_SIZES.size
+  $brush_w = BRUSH_SIZES[$brush_size_idx][0]
+  $brush_h = BRUSH_SIZES[$brush_size_idx][1]
+  $clipboard_tiles = nil
+  sfx(:click)
+  notify("BRUSH: #{BRUSH_SIZES[$brush_size_idx][2]}")
+end
+
+def minimap_scale
+  max_dim = [$map_w, $map_h].max
+  if max_dim <= 16
+    4.0
+  elsif max_dim <= 32
+    2.0
+  elsif max_dim <= 64
+    1.0
+  else
+    0.5
+  end
+end
+
 def get_tile(tx, ty)
-  return nil if tx < 0 || tx >= MAP_WIDTH || ty < 0 || ty >= MAP_HEIGHT
-  $map[ty * MAP_WIDTH + tx]
+  return nil if tx < 0 || tx >= $map_w || ty < 0 || ty >= $map_h
+  $map[ty * $map_w + tx]
 end
 
 def set_tile(tx, ty, tid)
-  return if tx < 0 || tx >= MAP_WIDTH || ty < 0 || ty >= MAP_HEIGHT
-  idx = ty * MAP_WIDTH + tx
+  return if tx < 0 || tx >= $map_w || ty < 0 || ty >= $map_h
+  idx = ty * $map_w + tx
   if $map[idx] != tid
     $map[idx] = tid
     mset(tx, ty, tid)
@@ -337,14 +426,14 @@ end
 def update_minimap_cache
   return unless $minimap_dirty
   $minimap_dirty = false
-  pixels = Array.new(MAP_WIDTH * MAP_HEIGHT)
-  MAP_HEIGHT.times do |my|
-    MAP_WIDTH.times do |mx|
+  pixels = Array.new($map_w * $map_h)
+  $map_h.times do |my|
+    $map_w.times do |mx|
       tid = get_tile(mx, my)
-      pixels[my * MAP_WIDTH + mx] = tile_color(tid)
+      pixels[my * $map_w + mx] = tile_color(tid)
     end
   end
-  update_bank_rect(MINIMAP_BANK, 0, 0, MAP_WIDTH, MAP_HEIGHT, pixels)
+  update_bank_rect(MINIMAP_BANK, 0, 0, $map_w, $map_h, pixels)
 end
 
 # 外部スプライト／バンクの再読み込み (減色処理を行わずフルカラーRGBAのままバンクへ直接ロード)
@@ -375,64 +464,75 @@ end
 
 # サンプルマップ初期化（見本ダンジョン）
 def init_sample_map
-  $map = Array.new(MAP_WIDTH * MAP_HEIGHT, nil)
-  MAP_HEIGHT.times do |y|
-    MAP_WIDTH.times do |x|
-      if x == 0 || x == MAP_WIDTH - 1 || y == 0 || y == MAP_HEIGHT - 1
-        $map[y * MAP_WIDTH + x] = 1 # レンガ壁
+  $map = Array.new($map_w * $map_h, nil)
+  $map_h.times do |y|
+    $map_w.times do |x|
+      if x == 0 || x == $map_w - 1 || y == 0 || y == $map_h - 1
+        $map[y * $map_w + x] = 1 # レンガ壁
       end
     end
   end
 
-  10.times { |i| $map[8 * MAP_WIDTH + (5 + i)] = 1 }
-  8.times  { |i| $map[(8 + i) * MAP_WIDTH + 14] = 1 }
-  $map[8 * MAP_WIDTH + 10] = 13 # 扉
+  if $map_w >= 32 && $map_h >= 32
+    10.times { |i| $map[8 * $map_w + (5 + i)] = 1 }
+    8.times  { |i| $map[(8 + i) * $map_w + 14] = 1 }
+    $map[8 * $map_w + 10] = 13 # 扉
 
-  (12..16).each do |y|
-    (3..7).each do |x|
-      $map[y * MAP_WIDTH + x] = 4
+    (12..16).each do |y|
+      (3..7).each do |x|
+        $map[y * $map_w + x] = 4
+      end
     end
-  end
 
-  (2..6).each do |y|
-    (20..28).each do |x|
-      $map[y * MAP_WIDTH + x] = 3
+    (2..6).each do |y|
+      (20..28).each do |x|
+        $map[y * $map_w + x] = 3
+      end
     end
-  end
-  $map[3 * MAP_WIDTH + 22] = 6
-  $map[4 * MAP_WIDTH + 26] = 6
-  $map[5 * MAP_WIDTH + 23] = 6
+    $map[3 * $map_w + 22] = 6
+    $map[4 * $map_w + 26] = 6
+    $map[5 * $map_w + 23] = 6
 
-  (18..24).each do |y|
-    (18..26).each do |x|
-      $map[y * MAP_WIDTH + x] = 5
+    (18..24).each do |y|
+      (18..26).each do |x|
+        $map[y * $map_w + x] = 5
+      end
     end
+
+    (10..22).each { |y| $map[y * $map_w + 10] = 7 }
+    (10..18).each { |x| $map[22 * $map_w + x] = 7 }
+
+    (12..15).each { |y| $map[y * $map_w + 14] = 9 }
+
+    $map[5 * $map_w + 5]   = 12 # 鍵
+    $map[20 * $map_w + 24] = 10 # 宝箱
+    $map[20 * $map_w + 20] = 11 # コイン
+    $map[21 * $map_w + 20] = 11
+    $map[22 * $map_w + 20] = 11
+    $map[14 * $map_w + 9]  = 14 # 看板
+    $map[17 * $map_w + 14] = 8  # トゲ
+    $map[18 * $map_w + 14] = 8
+    $map[28 * $map_w + 28] = 15 # ゴール旗
   end
-
-  (10..22).each { |y| $map[y * MAP_WIDTH + 10] = 7 }
-  (10..18).each { |x| $map[22 * MAP_WIDTH + x] = 7 }
-
-  (12..15).each { |y| $map[y * MAP_WIDTH + 14] = 9 }
-
-  $map[5 * MAP_WIDTH + 5]   = 12 # 鍵
-  $map[20 * MAP_WIDTH + 24] = 10 # 宝箱
-  $map[20 * MAP_WIDTH + 20] = 11 # コイン
-  $map[21 * MAP_WIDTH + 20] = 11
-  $map[22 * MAP_WIDTH + 20] = 11
-  $map[14 * MAP_WIDTH + 9]  = 14 # 看板
-  $map[17 * MAP_WIDTH + 14] = 8  # トゲ
-  $map[18 * MAP_WIDTH + 14] = 8
-  $map[28 * MAP_WIDTH + 28] = 15 # ゴール旗
   $minimap_dirty = true
 end
 
 # 起動時の読み込み
 load_source = ($save_path != $target_path && read_file($save_path)) ? $save_path : $target_path
-loaded_tiles = load_resource_map(load_source, MAP_WIDTH, MAP_HEIGHT)
+dims = load_resource_map_dimensions(load_source)
+if dims && dims.size == 2 && dims[0] > 0 && dims[1] > 0
+  $map_w = dims[0]
+  $map_h = dims[1]
+  loaded_tiles = load_resource_map(load_source, $map_w, $map_h)
+else
+  $map_w = 32
+  $map_h = 32
+  loaded_tiles = nil
+end
 
-if loaded_tiles && loaded_tiles.size == MAP_WIDTH * MAP_HEIGHT
+if loaded_tiles && loaded_tiles.size == $map_w * $map_h
   $map = loaded_tiles
-  notify("LOADED MAP FROM #{load_source}")
+  notify("LOADED MAP FROM #{load_source} (#{$map_w}x#{$map_h})")
 else
   init_sample_map
   notify("TARGET: #{$target_path} (SAMPLE MAP)")
@@ -465,15 +565,15 @@ def flood_fill_tile(start_tx, start_ty, new_tid)
     pt = queue.shift
     tx = pt[0]
     ty = pt[1]
-    key = ty * MAP_WIDTH + tx
+    key = ty * $map_w + tx
     next if visited[key]
     visited[key] = true
 
     if get_tile(tx, ty) == target_tid
       set_tile(tx, ty, new_tid)
-      queue << [tx + 1, ty] if tx + 1 < MAP_WIDTH
+      queue << [tx + 1, ty] if tx + 1 < $map_w
       queue << [tx - 1, ty] if tx - 1 >= 0
-      queue << [tx, ty + 1] if ty + 1 < MAP_HEIGHT
+      queue << [tx, ty + 1] if ty + 1 < $map_h
       queue << [tx, ty - 1] if ty - 1 >= 0
     end
   end
@@ -501,7 +601,7 @@ end
 # マップ全消去
 def clear_map
   push_undo
-  $map = Array.new(MAP_WIDTH * MAP_HEIGHT, nil)
+  $map = Array.new($map_w * $map_h, nil)
   sync_tilemap_to_engine
   $minimap_dirty = true
   sfx(:boom)
@@ -514,9 +614,9 @@ end
 def generate_map_text
   has_large_tiles = $map.any? { |tid| tid && tid >= 16 }
   lines = ["@MAP 0 0"]
-  MAP_HEIGHT.times do |y|
+  $map_h.times do |y|
     row_tokens = []
-    MAP_WIDTH.times do |x|
+    $map_w.times do |x|
       tid = get_tile(x, y)
       if has_large_tiles
         row_tokens << (tid.nil? ? "." : tid.to_s)
@@ -606,12 +706,17 @@ def update
     cur_map_mtime = file_mtime($save_path)
     if cur_map_mtime > 0 && cur_map_mtime != $last_map_mtime
       $last_map_mtime = cur_map_mtime
-      loaded = load_resource_map($save_path, MAP_WIDTH, MAP_HEIGHT)
-      if loaded && loaded.size == MAP_WIDTH * MAP_HEIGHT
+      dims = load_resource_map_dimensions($save_path)
+      if dims && dims.size == 2 && dims[0] > 0 && dims[1] > 0
+        $map_w = dims[0]
+        $map_h = dims[1]
+      end
+      loaded = load_resource_map($save_path, $map_w, $map_h)
+      if loaded && loaded.size == $map_w * $map_h
         $map = loaded
         sync_tilemap_to_engine
         $minimap_dirty = true
-        notify("RELOADED MAP (EXTERNAL MODIFIED)")
+        notify("RELOADED MAP (#{$map_w}x#{$map_h})")
       end
     end
   end
@@ -625,6 +730,46 @@ def update
   # アンドゥ: Ctrl+Z (モーダル外)
   if btn(:ctrl) && btnp(:z) && !$show_code_modal
     perform_undo
+  end
+
+  # コピー: Ctrl+C (キャンバス上の hover 領域を取得)
+  if btn(:ctrl) && btnp(:c) && !$show_code_modal && $current_mode == :terrain
+    if mx >= VIEW_X && mx < VIEW_X + VIEW_W && my >= VIEW_Y && my < VIEW_Y + VIEW_H
+      tx = $cam_x + ((mx - VIEW_X) / $cell_size).to_i
+      ty = $cam_y + ((my - VIEW_Y) / $cell_size).to_i
+      cw = $brush_w
+      ch = $brush_h
+      tiles = []
+      ch.times do |dy|
+        cw.times do |dx|
+          tiles << get_tile(tx + dx, ty + dy)
+        end
+      end
+      $clipboard_tiles = tiles
+      $clipboard_w = cw
+      $clipboard_h = ch
+      sfx(:select)
+      notify("COPIED #{cw}x#{ch} TILES")
+    end
+  end
+
+  # ペースト: Ctrl+V (スタンプ準備)
+  if btn(:ctrl) && btnp(:v) && !$show_code_modal && $current_mode == :terrain
+    if $clipboard_tiles
+      $current_tool = :pen
+      sfx(:select)
+      notify("PASTE READY: #{$clipboard_w}x#{$clipboard_h}")
+    end
+  end
+
+  # M: マップサイズ循環切替 (16x16, 32x32, 64x32, 64x64, 128x32)
+  if btnp(:m) && !$show_code_modal
+    cycle_map_size
+  end
+
+  # B: ブラシサイズ循環切替 (1x1, 1x2, 2x1, 2x2)
+  if btnp(:b) && !$show_code_modal
+    cycle_brush_size
   end
 
   # Tab: モード切替 (TERRAIN ⇔ OBJECTS)
@@ -661,8 +806,10 @@ def update
 
   max_tiles_x = (VIEW_W / $cell_size).to_i
   max_tiles_y = (VIEW_H / $cell_size).to_i
-  $cam_x = [[$cam_x, 0].max, MAP_WIDTH - max_tiles_x].min
-  $cam_y = [[$cam_y, 0].max, MAP_HEIGHT - max_tiles_y].min
+  max_cam_x = [$map_w - max_tiles_x, 0].max
+  max_cam_y = [$map_h - max_tiles_y, 0].max
+  $cam_x = [[$cam_x, 0].max, max_cam_x].min
+  $cam_y = [[$cam_y, 0].max, max_cam_y].min
 
   cur_sheet_w = ($current_mode == :objects && $obj_palette_tab == :emoji) ? 256 : $sheet_w
   cur_sheet_h = ($current_mode == :objects && $obj_palette_tab == :emoji) ? 256 : $sheet_h
@@ -803,7 +950,7 @@ def update
       end
     end
 
-    # 0. バンク切替ボタン (x: 442..500, y: 64..78)
+    # 0. バンク切替 & マップサイズ & ブラシサイズ (x: 442..634, y: 64..78)
     if my >= 64 && my <= 78
       if mx >= 442 && mx <= 458
         switch_ref_bank([$ref_bank - 1, 0].max)
@@ -811,17 +958,24 @@ def update
       elsif mx >= 484 && mx <= 500
         switch_ref_bank($ref_bank + 1)
         sfx(:click)
+      elsif mx >= 504 && mx <= 568
+        cycle_map_size
+      elsif mx >= 572 && mx <= 634
+        cycle_brush_size
       end
     end
 
     # 1. ミニマップクリック (x: 368..434, y: 22..88) -> カメラジャンプ
     if mx >= 368 && mx < 434 && my >= 22 && my < 88
-      jump_tx = ((mx - 368) / 2).to_i
-      jump_ty = ((my - 22) / 2).to_i
+      m_scale = minimap_scale
+      jump_tx = ((mx - 368) / m_scale).to_i
+      jump_ty = ((my - 22) / m_scale).to_i
       $cam_x = jump_tx - (max_tiles_x / 2)
       $cam_y = jump_ty - (max_tiles_y / 2)
-      $cam_x = [[$cam_x, 0].max, MAP_WIDTH - max_tiles_x].min
-      $cam_y = [[$cam_y, 0].max, MAP_HEIGHT - max_tiles_y].min
+      max_cam_x = [$map_w - max_tiles_x, 0].max
+      max_cam_y = [$map_h - max_tiles_y, 0].max
+      $cam_x = [[$cam_x, 0].max, max_cam_x].min
+      $cam_y = [[$cam_y, 0].max, max_cam_y].min
       sfx(:cursor)
     end
 
@@ -925,48 +1079,76 @@ def update
       tx = $cam_x + ((mx - VIEW_X) / $cell_size).to_i
       ty = $cam_y + ((my - VIEW_Y) / $cell_size).to_i
 
-      if tx >= 0 && tx < MAP_WIDTH && ty >= 0 && ty < MAP_HEIGHT
-        case $current_tool
-        when :pen
-          is_l = btn(:mouse_l)
-          is_r = btn(:mouse_r)
-          if is_l || is_r
-            draw_tid = is_l ? $selected_tile : nil
-            if btnp(:mouse_l) || btnp(:mouse_r)
-              push_undo
-            end
-            if get_tile(tx, ty) != draw_tid
-              set_tile(tx, ty, draw_tid)
+      if tx >= 0 && tx < $map_w && ty >= 0 && ty < $map_h
+        # 右クリック = 即時スポイト（どのツールでもキャンバス上のタイルを取得）
+        if btnp(:mouse_r) || btn(:mouse_r)
+          picked = get_tile(tx, ty)
+          $selected_tile = (picked && picked >= 0) ? picked : -1
+          $current_tool = :pen
+          $clipboard_tiles = nil
+          sfx(:select)
+          notify("PICKED: #{tile_name($selected_tile)}")
+        else
+          case $current_tool
+          when :pen
+            if btn(:mouse_l)
+              if btnp(:mouse_l)
+                push_undo
+              end
+              if $clipboard_tiles
+                $clipboard_h.times do |bdy|
+                  $clipboard_w.times do |bdx|
+                    stx = tx + bdx
+                    sty = ty + bdy
+                    next if stx >= $map_w || sty >= $map_h
+                    tid = $clipboard_tiles[bdy * $clipboard_w + bdx]
+                    set_tile(stx, sty, tid)
+                  end
+                end
+              else
+                $brush_h.times do |bdy|
+                  $brush_w.times do |bdx|
+                    stx = tx + bdx
+                    sty = ty + bdy
+                    next if stx >= $map_w || sty >= $map_h
+                    if $selected_tile < 0
+                      set_tile(stx, sty, nil)
+                    else
+                      sel_col = ($selected_tile % $sheet_cols) + bdx
+                      sel_row = ($selected_tile / $sheet_cols) + bdy
+                      tid = sel_row * $sheet_cols + sel_col
+                      set_tile(stx, sty, tid)
+                    end
+                  end
+                end
+              end
               sfx(:click)
             end
-          end
 
-        when :rect
-          if btnp(:mouse_l) || btnp(:mouse_r)
-            $rect_drag = [tx, ty, btnp(:mouse_l) ? $selected_tile : nil]
-          elsif (!btn(:mouse_l) && !btn(:mouse_r)) && $rect_drag
-            stx = $rect_drag[0]
-            sty = $rect_drag[1]
-            rect_tid = $rect_drag[2]
-            apply_rect(stx, sty, tx, ty, rect_tid)
-            $rect_drag = nil
-          end
+          when :rect
+            if btnp(:mouse_l)
+              $rect_drag = [tx, ty, $selected_tile]
+            elsif !btn(:mouse_l) && $rect_drag
+              stx = $rect_drag[0]
+              sty = $rect_drag[1]
+              rect_tid = $rect_drag[2]
+              apply_rect(stx, sty, tx, ty, rect_tid)
+              $rect_drag = nil
+            end
 
-        when :fill
-          if btnp(:mouse_l)
-            flood_fill_tile(tx, ty, $selected_tile)
-          elsif btnp(:mouse_r)
-            flood_fill_tile(tx, ty, nil)
-          end
+          when :fill
+            if btnp(:mouse_l)
+              flood_fill_tile(tx, ty, $selected_tile)
+            end
 
-        when :picker
-          if btnp(:mouse_l) || btnp(:mouse_r)
-            picked = get_tile(tx, ty)
-            if picked && picked >= 0
-              $selected_tile = picked
+          when :picker
+            if btnp(:mouse_l)
+              picked = get_tile(tx, ty)
+              $selected_tile = (picked && picked >= 0) ? picked : -1
               $current_tool = :pen
+              $clipboard_tiles = nil
               sfx(:select)
-              notify("PICKED TILE: #{picked}")
+              notify("PICKED TILE: #{$selected_tile}")
             end
           end
         end
@@ -1048,8 +1230,8 @@ def update
         if $drag_moved
           tx = snap_x - $drag_offset_x
           ty = snap_y - $drag_offset_y
-          tx = [[tx, 0].max, MAP_WIDTH * 16 - 16].min
-          ty = [[ty, 0].max, MAP_HEIGHT * 16 - 16].min
+          tx = [[tx, 0].max, $map_w * 16 - 16].min
+          ty = [[ty, 0].max, $map_h * 16 - 16].min
           $objects[$dragging_obj_idx][:x] = tx
           $objects[$dragging_obj_idx][:y] = ty
         end
@@ -1161,11 +1343,11 @@ def draw
   else
     tiles_y.times do |dy|
       ty = $cam_y + dy
-      next if ty >= MAP_HEIGHT
+      next if ty >= $map_h
       draw_py = VIEW_Y + dy * $cell_size
       tiles_x.times do |dx|
         tx = $cam_x + dx
-        next if tx >= MAP_WIDTH
+        next if tx >= $map_w
 
         tid = get_tile(tx, ty)
         if tid
@@ -1174,6 +1356,13 @@ def draw
       end
     end
   end
+
+  # マップのアクティブ領域外枠
+  mb_x = VIEW_X + (0 - $cam_x) * $cell_size
+  mb_y = VIEW_Y + (0 - $cam_y) * $cell_size
+  mb_w = $map_w * $cell_size
+  mb_h = $map_h * $cell_size
+  rect(mb_x, mb_y, mb_w, mb_h, 7)
 
   # グリッド線の一括描画
   if $show_grid
@@ -1240,8 +1429,8 @@ def draw
     cur_my = mouse_y
     cur_tx = $cam_x + ((cur_mx - VIEW_X) / $cell_size).to_i
     cur_ty = $cam_y + ((cur_my - VIEW_Y) / $cell_size).to_i
-    cur_tx = [[cur_tx, 0].max, MAP_WIDTH - 1].min
-    cur_ty = [[cur_ty, 0].max, MAP_HEIGHT - 1].min
+    cur_tx = [[cur_tx, 0].max, $map_w - 1].min
+    cur_ty = [[cur_ty, 0].max, $map_h - 1].min
 
     min_x = [stx, cur_tx].min
     max_x = [stx, cur_tx].max
@@ -1264,7 +1453,9 @@ def draw
       hty = ((cur_my - VIEW_Y) / $cell_size).to_i
       hx = VIEW_X + htx * $cell_size
       hy = VIEW_Y + hty * $cell_size
-      rect(hx, hy, $cell_size, $cell_size, 7)
+      hover_w = $clipboard_tiles ? $clipboard_w : $brush_w
+      hover_h = $clipboard_tiles ? $clipboard_h : $brush_h
+      rect(hx, hy, hover_w * $cell_size, hover_h * $cell_size, 10)
     else
       world_x = ($cam_x * 16 + (cur_mx - VIEW_X) / scale).to_i
       world_y = ($cam_y * 16 + (cur_my - VIEW_Y) / scale).to_i
@@ -1280,15 +1471,18 @@ def draw
 
   # --- 3. 右側パネル: ミニマップ & プレビュー (y: 22..88) ---
   # ミニマップ (x: 368, y: 22, w: 66, h: 66)
-  rectfill(367, 21, 66, 66, 1)
+  rectfill(367, 21, 66, 66, 0)
   rect(367, 21, 66, 66, 5)
 
   update_minimap_cache
-  blt(368, 22, MINIMAP_BANK, 0, 0, 32, 32, 0, 2.0)
+  m_scale = minimap_scale
+  blt(368, 22, MINIMAP_BANK, 0, 0, $map_w, $map_h, 0, m_scale)
+  # マップ実寸外枠
+  rect(368, 22, ($map_w * m_scale).to_i, ($map_h * m_scale).to_i, 6)
 
-  cam_vw = (VIEW_W / $cell_size).to_i * 2
-  cam_vh = (VIEW_H / $cell_size).to_i * 2
-  rect(368 + $cam_x * 2, 22 + $cam_y * 2, cam_vw, cam_vh, 7)
+  cam_vw = [(VIEW_W / $cell_size).to_i, $map_w].min * m_scale
+  cam_vh = [(VIEW_H / $cell_size).to_i, $map_h].min * m_scale
+  rect(368 + ($cam_x * m_scale).to_i, 22 + ($cam_y * m_scale).to_i, cam_vw.to_i, cam_vh.to_i, 7)
 
   # プレビュー枠 (32x32)
   rectfill(442, 21, 36, 36, 1)
@@ -1302,10 +1496,10 @@ def draw
       draw_tile_at($selected_tile, 444, 23, 2.0)
     end
     print_text("ID:#{$selected_tile}", 486, 22, 10)
-    u_pos = ($selected_tile % $sheet_cols) * 16
-    v_pos = ($selected_tile / $sheet_cols) * 16
+    u_pos = ($selected_tile >= 0) ? ($selected_tile % $sheet_cols) * 16 : 0
+    v_pos = ($selected_tile >= 0) ? ($selected_tile / $sheet_cols) * 16 : 0
     print_text("U:#{u_pos} V:#{v_pos}", 486, 34, 6)
-    print_text("SHEET:#{$sheet_w}x#{$sheet_h}", 486, 46, 7)
+    print_text("MAP:#{$map_w}x#{$map_h}", 486, 46, 11)
   else
     if $selected_obj_idx && $selected_obj_idx < $objects.size
       sel_o = $objects[$selected_obj_idx]
@@ -1345,6 +1539,16 @@ def draw
   rect(484, 64, 16, 14, 6)
   print_text(">", 489, 67, 7)
 
+  # [MAP: #{$map_w}x#{$map_h}] & [BR: ...]
+  rectfill(504, 64, 64, 14, 1)
+  rect(504, 64, 64, 14, 11)
+  print_text("#{$map_w}x#{$map_h}", 508, 67, 11)
+
+  b_label = $clipboard_tiles ? "PASTE" : BRUSH_SIZES[$brush_size_idx][2]
+  rectfill(572, 64, 62, 14, 1)
+  rect(572, 64, 62, 14, 10)
+  print_text("BR:#{b_label}", 576, 67, 10)
+
   # --- 4. パレット領域 (等倍 16x16 px、枠寸法はシートサイズに追従) ---
   cur_sheet_w = ($current_mode == :objects && $obj_palette_tab == :emoji) ? 256 : $sheet_w
   cur_sheet_h = ($current_mode == :objects && $obj_palette_tab == :emoji) ? 256 : $sheet_h
@@ -1379,13 +1583,15 @@ def draw
 
     # 選択タイル枠
     cur_sel_tid = ($current_mode == :terrain) ? $selected_tile : $selected_obj_chip
-    if cur_sel_tid < $num_tiles
+    if cur_sel_tid >= 0 && cur_sel_tid < $num_tiles
       sel_col = cur_sel_tid % cur_cols
       sel_row = cur_sel_tid / cur_cols
       bx = PAL_X + sel_col * 16
       by = PAL_Y + sel_row * 16 - $pal_scroll_y
-      rect(bx - 1, by - 1, 18, 18, 10)
-      rect(bx, by, 16, 16, 7)
+      bw = ($current_mode == :terrain) ? $brush_w * 16 : 16
+      bh = ($current_mode == :terrain) ? $brush_h * 16 : 16
+      rect(bx - 1, by - 1, bw + 2, bh + 2, 10)
+      rect(bx, by, bw, bh, 7)
     end
   else
     # オブジェクトモード: 絵文字パレット (等倍 16x16 で一括描画)

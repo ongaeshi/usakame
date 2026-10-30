@@ -1604,6 +1604,9 @@ pub fn parse_tail_map(data_section: &str) -> Tilemap {
         } else if in_map {
             tilemap.parse_row_line(offset_x, cur_y, line);
             cur_y += 1;
+            if cur_y > tilemap.height {
+                tilemap.height = cur_y;
+            }
         }
     }
 
@@ -4712,8 +4715,9 @@ fn register_engine_api(
         }),
     );
 
-    // load_resource_map(path, width = 32, height = 32): 指定スクリプトまたは外部リソースから
+    // load_resource_map(path, width = nil, height = nil): 指定スクリプトまたは外部リソースから
     // タイルマップデータを読み込み、(width * height) 要素のタイルID配列を返す。@MAPがない場合はnilを返す。
+    // width / height が省略された場合は @MAP の実サイズ（幅・高さ）を自動検出する。
     mrb_define_cmethod(
         vm,
         obj_class.clone(),
@@ -4723,8 +4727,6 @@ fn register_engine_api(
                 .first()
                 .and_then(|v| String::try_from(v.as_ref()).ok())
                 .unwrap_or_default();
-            let width = arg_i32(args, 1, 32).max(1) as usize;
-            let height = arg_i32(args, 2, 32).max(1) as usize;
 
             if path_str.is_empty() {
                 return Ok(Rc::new(RObject::nil()));
@@ -4746,6 +4748,17 @@ fn register_engine_api(
             }
 
             let tmap = parse_tail_map(&tail);
+            let opt_w = args.get(1).and_then(|v| match v.value {
+                RValue::Integer(n) if n > 0 => Some(n as usize),
+                _ => None,
+            });
+            let opt_h = args.get(2).and_then(|v| match v.value {
+                RValue::Integer(n) if n > 0 => Some(n as usize),
+                _ => None,
+            });
+            let width = opt_w.unwrap_or(tmap.width.max(1) as usize);
+            let height = opt_h.unwrap_or(tmap.height.max(1) as usize);
+
             let mut tiles = Vec::with_capacity(width * height);
             for y in 0..height {
                 for x in 0..width {
@@ -4759,6 +4772,42 @@ fn register_engine_api(
             }
 
             Ok(Rc::new(RObject::array(tiles)))
+        }),
+    );
+
+    // load_resource_map_dimensions(path): 指定スクリプトまたは外部リソースから
+    // タイルマップの幅と高さを [width, height] 配列で返す。@MAP がない場合は nil を返す。
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "load_resource_map_dimensions",
+        Box::new(|_vm, args| {
+            let path_str = args
+                .first()
+                .and_then(|v| String::try_from(v.as_ref()).ok())
+                .unwrap_or_default();
+            if path_str.is_empty() {
+                return Ok(Rc::new(RObject::nil()));
+            }
+            let p = std::path::Path::new(&path_str);
+            let tail = if p.extension().and_then(|s| s.to_str()) == Some("rb") {
+                cli::compile_ruby_script_file(p)
+                    .map(|(_, t, _)| t)
+                    .unwrap_or_default()
+            } else if p.is_file() {
+                std::fs::read_to_string(p).unwrap_or_default()
+            } else {
+                String::new()
+            };
+            if !tail.contains("@MAP") {
+                return Ok(Rc::new(RObject::nil()));
+            }
+            let tmap = parse_tail_map(&tail);
+            let dims = vec![
+                Rc::new(RObject::integer(tmap.width.max(1) as i64)),
+                Rc::new(RObject::integer(tmap.height.max(1) as i64)),
+            ];
+            Ok(Rc::new(RObject::array(dims)))
         }),
     );
 
