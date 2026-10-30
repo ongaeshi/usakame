@@ -32,7 +32,7 @@ show_mouse(true)
 # ------------------------------------------------------------------------------
 BANK_SIZE = 256
 CANVAS_GRID = 32
-CHECKER_PALETTE = 99
+CANVAS_BG_PALETTE = 99 # キャンバス背景用固定システムパレット (Maya風単色グレー #C0C0C0)
 
 COLOR_NAMES = [
   "BLACK", "DARK-BLUE", "PURPLE", "DARK-GREEN",
@@ -900,16 +900,9 @@ def draw
   rectfill($canvas_x - 2, $canvas_y - 2, CANVAS_GRID * $cell_size + 4, CANVAS_GRID * $cell_size + 4, 1)
   rect($canvas_x - 2, $canvas_y - 2, CANVAS_GRID * $cell_size + 4, CANVAS_GRID * $cell_size + 4, 5)
 
-  # 背景市松模様
-  pal_bank(CHECKER_PALETTE)
+  # キャンバス背景描画 (Maya風単色ライトグレー #C0C0C0)
+  pal_bank(CANVAS_BG_PALETTE)
   rectfill($canvas_x, $canvas_y, 192, 192, 0)
-  8.times do |cy|
-    8.times do |cx|
-      if (cx + cy) % 2 == 1
-        rectfill($canvas_x + cx * 24, $canvas_y + cy * 24, 24, 24, 1)
-      end
-    end
-  end
   pal_bank(0)
 
   # バンクテクスチャ描画
@@ -1196,8 +1189,8 @@ __END__
 # ==============================================================================
 # スプライトエディタ用 特殊パレット
 # ==============================================================================
-# @PALETTE 99: 市松模様背景用 (Aseprite / EDGE 風ライトグレー)
-# 黒のアウトラインや濃色の視認性を高め、PICO-8カラーと衝突しない無彩色グレー
+# @PALETTE 99: キャンバス背景用 (Maya風ライトグレー #C0C0C0)
+# 黒のアウトラインや白・濃色・原色の視認性を高め、PICO-8カラーと衝突しない無彩色グレー
 @PALETTE 99
 0: #C0C0C0
 1: #E0E0E0
