@@ -58,11 +58,101 @@ $sel_y = 0
 # バンク番号
 $current_bank = 0
 
-# ツール一覧: :pen, :fill, :picker, :eraser
+# ツール一覧: :pen, :fill, :picker, :eraser, :select
 $current_tool = :pen
 $current_col = 8     # 初期描画色 (赤)
 $show_grid = true    # グリッド線の表示
 $bg_mode = 0         # プレビュー背景 (0: 黒, 1: 濃紺, 2: 白, 3: 市松)
+$ui_tick = 0         # マーチングアンツ等のアニメーション用フレームカウンタ
+
+# 矩形範囲選択 & フローティング移動用ステート
+# $rect_sel: [rx, ry, rw, rh] (キャンバス内ローカル座標 0...$edit_w, 0...$edit_h) または nil
+$rect_sel = nil
+$floating_pixels = nil # フローティング中のピクセル配列 (rw * rh) または nil
+$sel_drag_mode = nil   # :create (ドラッグ選択中) または :move (選択領域移動中)
+$sel_start_cx = 0
+$sel_start_cy = 0
+$sel_move_ox = 0
+$sel_move_oy = 0
+
+def commit_floating_selection
+  if $floating_pixels && $rect_sel
+    rx = $rect_sel[0]
+    ry = $rect_sel[1]
+    rw = $rect_sel[2]
+    rh = $rect_sel[3]
+    cur = get_bank_rect($current_bank, $sel_x, $sel_y, $edit_w, $edit_h)
+    rh.times do |fy|
+      rw.times do |fx|
+        tx = rx + fx
+        ty = ry + fy
+        if tx >= 0 && tx < $edit_w && ty >= 0 && ty < $edit_h
+          col = $floating_pixels[fy * rw + fx]
+          cur[ty * $edit_w + tx] = col unless col.nil?
+        end
+      end
+    end
+    update_bank_rect($current_bank, $sel_x, $sel_y, $edit_w, $edit_h, cur)
+    $floating_pixels = nil
+    # 確定後の選択枠をキャンバス範囲内にクランプ
+    nx0 = [[rx, 0].max, $edit_w].min
+    ny0 = [[ry, 0].max, $edit_h].min
+    nx1 = [[rx + rw, 0].max, $edit_w].min
+    ny1 = [[ry + rh, 0].max, $edit_h].min
+    if nx1 > nx0 && ny1 > ny0
+      $rect_sel = [nx0, ny0, nx1 - nx0, ny1 - ny0]
+    else
+      $rect_sel = nil
+    end
+  end
+end
+
+def clear_rect_selection(commit = true)
+  commit_floating_selection if commit
+  $rect_sel = nil
+  $floating_pixels = nil
+  $sel_drag_mode = nil
+end
+
+def lift_rect_selection_to_floating
+  return if $rect_sel.nil? || !$floating_pixels.nil?
+  push_undo
+  rx = $rect_sel[0]
+  ry = $rect_sel[1]
+  rw = $rect_sel[2]
+  rh = $rect_sel[3]
+  cur = get_bank_rect($current_bank, $sel_x, $sel_y, $edit_w, $edit_h)
+  $floating_pixels = Array.new(rw * rh, nil)
+  rh.times do |fy|
+    rw.times do |fx|
+      tx = rx + fx
+      ty = ry + fy
+      if tx >= 0 && tx < $edit_w && ty >= 0 && ty < $edit_h
+        idx = ty * $edit_w + tx
+        $floating_pixels[fy * rw + fx] = cur[idx]
+        cur[idx] = nil
+      end
+    end
+  end
+  update_bank_rect($current_bank, $sel_x, $sel_y, $edit_w, $edit_h, cur)
+end
+
+def select_all_rect
+  commit_floating_selection
+  $current_tool = :select
+  $rect_sel = [0, 0, $edit_w, $edit_h]
+  $floating_pixels = nil
+  $sel_drag_mode = nil
+  sfx(:select)
+  notify("SELECTED ALL (#{$edit_w}x#{$edit_h})")
+end
+
+def switch_tool(new_tool)
+  if $current_tool == :select && new_tool != :select
+    clear_rect_selection(true)
+  end
+  $current_tool = new_tool
+end
 
 # 編集サイズモード (16x16, 16x32, 32x16, 32x32)
 SIZE_MODES = [
@@ -76,6 +166,7 @@ $edit_w = 16
 $edit_h = 16
 
 def set_size_mode(idx)
+  clear_rect_selection(true)
   $size_mode_idx = idx % SIZE_MODES.size
   $edit_w = SIZE_MODES[$size_mode_idx][0]
   $edit_h = SIZE_MODES[$size_mode_idx][1]
@@ -146,31 +237,68 @@ $clipboard_w = 0
 $clipboard_h = 0
 
 def copy_selection
-  $clipboard = get_bank_rect($current_bank, $sel_x, $sel_y, $edit_w, $edit_h)
-  $clipboard_w = $edit_w
-  $clipboard_h = $edit_h
-  sfx(:coin)
-  notify("COPIED #{$edit_w}x#{$edit_h}")
+  if $rect_sel
+    rx = $rect_sel[0]
+    ry = $rect_sel[1]
+    rw = $rect_sel[2]
+    rh = $rect_sel[3]
+    if $floating_pixels
+      $clipboard = $floating_pixels.dup
+    else
+      cur = get_bank_rect($current_bank, $sel_x, $sel_y, $edit_w, $edit_h)
+      $clipboard = Array.new(rw * rh, nil)
+      rh.times do |fy|
+        rw.times do |fx|
+          tx = rx + fx
+          ty = ry + fy
+          if tx >= 0 && tx < $edit_w && ty >= 0 && ty < $edit_h
+            $clipboard[fy * rw + fx] = cur[ty * $edit_w + tx]
+          end
+        end
+      end
+    end
+    $clipboard_w = rw
+    $clipboard_h = rh
+    sfx(:coin)
+    notify("COPIED SELECTION #{rw}x#{rh}")
+  else
+    $clipboard = get_bank_rect($current_bank, $sel_x, $sel_y, $edit_w, $edit_h)
+    $clipboard_w = $edit_w
+    $clipboard_h = $edit_h
+    sfx(:coin)
+    notify("COPIED #{$edit_w}x#{$edit_h}")
+  end
+end
+
+def cut_selection
+  if $is_read_only
+    sfx(:boom)
+    notify("READ ONLY: Cannot edit PNG-backed bank in editor!")
+    return
+  end
+  copy_selection
+  clear_canvas
+  notify("CUT #{$clipboard_w}x#{$clipboard_h}")
 end
 
 def paste_selection
   return unless $clipboard
-  push_undo
-  if $clipboard_w == $edit_w && $clipboard_h == $edit_h
-    update_bank_rect($current_bank, $sel_x, $sel_y, $edit_w, $edit_h, $clipboard)
-  else
-    cur = get_bank_rect($current_bank, $sel_x, $sel_y, $edit_w, $edit_h)
-    pw = [$clipboard_w, $edit_w].min
-    ph = [$clipboard_h, $edit_h].min
-    ph.times do |y|
-      pw.times do |x|
-        cur[y * $edit_w + x] = $clipboard[y * $clipboard_w + x]
-      end
-    end
-    update_bank_rect($current_bank, $sel_x, $sel_y, $edit_w, $edit_h, cur)
+  if $is_read_only
+    sfx(:boom)
+    notify("READ ONLY: Cannot edit PNG-backed bank in editor!")
+    return
   end
+  commit_floating_selection
+  $current_tool = :select
+  px = $rect_sel ? $rect_sel[0] : 0
+  py = $rect_sel ? $rect_sel[1] : 0
+  px = [[px, 0].max, [$edit_w - 1, 0].max].min
+  py = [[py, 0].max, [$edit_h - 1, 0].max].min
+  $rect_sel = [px, py, $clipboard_w, $clipboard_h]
+  $floating_pixels = $clipboard.dup
+  $sel_drag_mode = nil
   sfx(:powerup)
-  notify("PASTED")
+  notify("PASTED #{$clipboard_w}x#{$clipboard_h} (DRAG/ARROWS TO MOVE)")
 end
 
 # コードプレビューモーダル
@@ -197,11 +325,14 @@ end
 
 $target_path = "game.rb"
 $open_picker_on_start = false
+$open_select_on_start = false
 if ARGV && ARGV.size > 0
   pos_args = []
   ARGV.each do |arg|
     if arg == "--picker" || arg == "-k"
       $open_picker_on_start = true
+    elsif arg == "--select" || arg == "-m"
+      $open_select_on_start = true
     elsif arg
       pos_args << arg
     end
@@ -257,6 +388,10 @@ end
 
 def perform_undo
   return if $is_read_only
+  if $floating_pixels
+    # フローティング移動・貼り付け中なら、まず未確定のフローティング状態を破棄して直前のバンク状態に戻す
+    clear_rect_selection(false)
+  end
   return if $undo_stack.empty?
   sel_x, sel_y, uw, uh, saved_grid = $undo_stack.pop
   set_selection(sel_x, sel_y)
@@ -430,6 +565,7 @@ def set_selection(gx, gy)
   gx = [[gx, 0].max, 256 - $edit_w].min
   gy = [[gy, 0].max, 256 - $edit_h].min
   if $sel_x != gx || $sel_y != gy
+    clear_rect_selection(true)
     $sel_x = gx
     $sel_y = gy
     sfx(:cursor)
@@ -457,6 +593,10 @@ reload_palettes(load_source)
 if $open_picker_on_start
   $show_color_picker = true
   sync_picker_from_current_color
+end
+if $open_select_on_start
+  $current_tool = :select
+  $rect_sel = [2, 1, 12, 10]
 end
 
 if $is_read_only
@@ -509,6 +649,7 @@ end
 # ------------------------------------------------------------------------------
 def switch_bank(new_bank)
   return if new_bank < 0
+  clear_rect_selection(true)
   $current_bank = new_bank
   $undo_stack.clear
 
@@ -531,10 +672,10 @@ def switch_bank(new_bank)
   end
 
   reload_palettes(load_source)
-if $open_picker_on_start
-  $show_color_picker = true
-  sync_picker_from_current_color
-end
+  if $open_picker_on_start
+    $show_color_picker = true
+    sync_picker_from_current_color
+  end
 end
 
 # ------------------------------------------------------------------------------
@@ -547,6 +688,7 @@ def save_to_target
     return
   end
 
+  commit_floating_selection
   if save_resource_bank($save_path, $current_bank, nil, $sprite_palettes)
     $last_target_mtime = file_mtime($save_path)
     sfx(:powerup)
@@ -558,6 +700,7 @@ def save_to_target
 end
 
 def export_all
+  commit_floating_selection
   text = export_bank_sprites_text($save_path, $current_bank, $sprite_palettes)
   puts "\n# =================================================="
   puts "# 🐰 USAKAME BANK DATA (Bank #{$current_bank})"
@@ -604,13 +747,59 @@ def flood_fill(start_cx, start_cy, new_col)
   sfx(:click)
 end
 
-# 反転 (選択領域 $edit_w x $edit_h 内)
+# 反転 (矩形選択範囲 または $edit_w x $edit_h 全体)
 def flip_canvas(horizontal)
   if $is_read_only
     sfx(:boom)
     notify("READ ONLY: Cannot edit PNG-backed bank in editor!")
     return
   end
+  if $rect_sel
+    rx = $rect_sel[0]
+    ry = $rect_sel[1]
+    rw = $rect_sel[2]
+    rh = $rect_sel[3]
+    if $floating_pixels
+      new_fp = Array.new(rw * rh, nil)
+      rh.times do |fy|
+        rw.times do |fx|
+          nx = horizontal ? (rw - 1 - fx) : fx
+          ny = horizontal ? fy : (rh - 1 - fy)
+          new_fp[ny * rw + nx] = $floating_pixels[fy * rw + fx]
+        end
+      end
+      $floating_pixels = new_fp
+    else
+      push_undo
+      cur = get_bank_rect($current_bank, $sel_x, $sel_y, $edit_w, $edit_h)
+      sub = Array.new(rw * rh, nil)
+      rh.times do |fy|
+        rw.times do |fx|
+          tx = rx + fx
+          ty = ry + fy
+          if tx >= 0 && tx < $edit_w && ty >= 0 && ty < $edit_h
+            sub[fy * rw + fx] = cur[ty * $edit_w + tx]
+          end
+        end
+      end
+      rh.times do |fy|
+        rw.times do |fx|
+          nx = horizontal ? (rw - 1 - fx) : fx
+          ny = horizontal ? fy : (rh - 1 - fy)
+          tx = rx + nx
+          ty = ry + ny
+          if tx >= 0 && tx < $edit_w && ty >= 0 && ty < $edit_h
+            cur[ty * $edit_w + tx] = sub[fy * rw + fx]
+          end
+        end
+      end
+      update_bank_rect($current_bank, $sel_x, $sel_y, $edit_w, $edit_h, cur)
+    end
+    sfx(:select)
+    notify(horizontal ? "FLIP-H (SEL #{rw}x#{rh})" : "FLIP-V (SEL #{rw}x#{rh})")
+    return
+  end
+
   push_undo
   cur = get_bank_rect($current_bank, $sel_x, $sel_y, $edit_w, $edit_h)
   new_grid = Array.new($edit_w * $edit_h, nil)
@@ -627,16 +816,37 @@ def flip_canvas(horizontal)
   notify(horizontal ? "FLIP-H" : "FLIP-V")
 end
 
-# 90度回転 (正方形 $edit_w == $edit_h 時のみ)
+# 90度回転 (矩形選択時は非正方形もフローティング回転対応 / 未選択時は正方形 $edit_w == $edit_h のみ)
 def rotate_canvas
   if $is_read_only
     sfx(:boom)
     notify("READ ONLY: Cannot edit PNG-backed bank in editor!")
     return
   end
+  if $rect_sel
+    lift_rect_selection_to_floating if $floating_pixels.nil?
+    rx = $rect_sel[0]
+    ry = $rect_sel[1]
+    rw = $rect_sel[2]
+    rh = $rect_sel[3]
+    new_w = rh
+    new_h = rw
+    new_fp = Array.new(new_w * new_h, nil)
+    rh.times do |fy|
+      rw.times do |fx|
+        new_fp[fx * new_w + (new_w - 1 - fy)] = $floating_pixels[fy * rw + fx]
+      end
+    end
+    $floating_pixels = new_fp
+    $rect_sel = [rx, ry, new_w, new_h]
+    sfx(:select)
+    notify("ROTATE 90° (SEL #{new_w}x#{new_h})")
+    return
+  end
+
   if $edit_w != $edit_h
     sfx(:boom)
-    notify("ROTATE: Square only (#{$edit_w}x#{$edit_h})")
+    notify("ROTATE: Square only (#{$edit_w}x#{$edit_h}) or use [SEL]")
     return
   end
   push_undo
@@ -653,13 +863,21 @@ def rotate_canvas
   notify("ROTATE 90°")
 end
 
-# シフト移動 (dx, dy on $edit_w x $edit_h)
+# シフト移動 (矩形選択時は選択領域を1px移動 / 未選択時は $edit_w x $edit_h ループシフト)
 def shift_canvas(dx, dy)
   if $is_read_only
     sfx(:boom)
     notify("READ ONLY: Cannot edit PNG-backed bank in editor!")
     return
   end
+  if $rect_sel
+    lift_rect_selection_to_floating if $floating_pixels.nil?
+    $rect_sel[0] += dx
+    $rect_sel[1] += dy
+    sfx(:cursor)
+    return
+  end
+
   push_undo
   cur = get_bank_rect($current_bank, $sel_x, $sel_y, $edit_w, $edit_h)
   new_grid = Array.new($edit_w * $edit_h, nil)
@@ -681,6 +899,34 @@ def clear_canvas
     notify("READ ONLY: Cannot edit PNG-backed bank in editor!")
     return
   end
+  if $rect_sel
+    rx = $rect_sel[0]
+    ry = $rect_sel[1]
+    rw = $rect_sel[2]
+    rh = $rect_sel[3]
+    if $floating_pixels
+      $floating_pixels = nil
+      $rect_sel = nil
+    else
+      push_undo
+      cur = get_bank_rect($current_bank, $sel_x, $sel_y, $edit_w, $edit_h)
+      rh.times do |fy|
+        rw.times do |fx|
+          tx = rx + fx
+          ty = ry + fy
+          if tx >= 0 && tx < $edit_w && ty >= 0 && ty < $edit_h
+            cur[ty * $edit_w + tx] = nil
+          end
+        end
+      end
+      update_bank_rect($current_bank, $sel_x, $sel_y, $edit_w, $edit_h, cur)
+      $rect_sel = nil
+    end
+    sfx(:boom)
+    notify("CLEARED SELECTION #{rw}x#{rh}")
+    return
+  end
+
   push_undo
   new_grid = Array.new($edit_w * $edit_h, nil)
   update_bank_rect($current_bank, $sel_x, $sel_y, $edit_w, $edit_h, new_grid)
@@ -691,6 +937,8 @@ end
 # 更新処理 (update)
 # ------------------------------------------------------------------------------
 def update
+  $ui_tick += 1
+
   # --- 外部更新（ホットリロード）の検知 ---
   if $save_path
     cur_mtime = file_mtime($save_path)
@@ -698,6 +946,7 @@ def update
       $last_target_mtime = cur_mtime
       loaded = load_resource_bank($save_path, $current_bank)
       if loaded && loaded.size == BANK_SIZE * BANK_SIZE
+        clear_rect_selection(false)
         update_bank($current_bank, loaded)
         reload_palettes($save_path)
         notify("RELOADED BANK #{$current_bank} (EXTERNAL MODIFIED)")
@@ -721,8 +970,8 @@ def update
   # --- キーボードショートカット ---
   perform_undo if btnp(:z)
   save_to_target if btnp(:s)
-  export_all if btnp(:x)
-  clear_canvas if btnp(:c) && !btn(:ctrl)
+  export_all if btnp(:x) && !btn(:ctrl)
+  clear_canvas if (btnp(:c) && !btn(:ctrl)) || btnp(:delete) || btnp(:backspace)
   cycle_size_mode if btnp(:tab)
   toggle_anim if btnp(:space)
   flip_canvas(true) if btnp(:h)
@@ -732,10 +981,23 @@ def update
   cycle_anim_frames(-1) if btnp(:"[")
   cycle_anim_frames(1) if btnp(:"]")
 
-  # Ctrl+C (コピー) / Ctrl+V (貼り付け)
+  # Escape / Enter で範囲選択確定＆解除
+  if btnp(:escape) || btnp(:enter)
+    if $rect_sel
+      clear_rect_selection(true)
+      sfx(:click)
+      notify("SELECTION CLEARED")
+    end
+  end
+
+  # Ctrl+A (全選択) / Ctrl+C (コピー) / Ctrl+X (切り取り) / Ctrl+V (貼り付け)
   if btn(:ctrl)
-    if btnp(:c)
+    if btnp(:a)
+      select_all_rect
+    elsif btnp(:c)
       copy_selection
+    elsif btnp(:x)
+      cut_selection
     elsif btnp(:v)
       paste_selection
     end
@@ -753,9 +1015,14 @@ def update
   end
 
   # ツールショートカット
-  $current_tool = :pen if btnp(:b)
-  $current_tool = :fill if btnp(:f)
-  $current_tool = :eraser if btnp(:e)
+  switch_tool(:pen) if btnp(:b)
+  switch_tool(:fill) if btnp(:f)
+  switch_tool(:eraser) if btnp(:e)
+  if btnp(:m)
+    switch_tool(:select)
+    sfx(:click)
+    notify("TOOL: SELECT (Drag to select / Drag inside to move)")
+  end
 
   # 矢印キーで移動 / シフト
   if btn(:ctrl)
@@ -894,7 +1161,7 @@ def update
     row_idx = (my - 88) / 25
     if col_idx >= 0 && col_idx < 4 && row_idx >= 0 && row_idx < 4
       $current_col = row_idx * 4 + col_idx
-      $current_tool = :pen if $current_tool == :eraser
+      switch_tool(:pen) if $current_tool == :eraser
       $show_color_picker = true
       sync_picker_from_current_color
       sfx(:select)
@@ -919,11 +1186,13 @@ def update
       elsif mx >= 302 && mx <= 340 # [EXP]
         export_all
       elsif mx >= 346 && mx <= 386 # [MAP]
+        commit_floating_selection
         spawn_editor("map", $target_path) if respond_to?(:spawn_editor)
         sfx(:click)
       elsif mx >= 392 && mx <= 434 # [ONION]
         toggle_onion
       elsif mx >= 440 && mx <= 476 # [CODE]
+        commit_floating_selection
         $show_code_modal = true
         sfx(:click)
       end
@@ -974,7 +1243,7 @@ def update
       row_idx = (my - 88) / 25
       if col_idx >= 0 && col_idx < 4 && row_idx >= 0 && row_idx < 4
         $current_col = row_idx * 4 + col_idx
-        $current_tool = :pen if $current_tool == :eraser
+        switch_tool(:pen) if $current_tool == :eraser || $current_tool == :select
         sync_picker_from_current_color
         sfx(:select)
       end
@@ -988,22 +1257,26 @@ def update
 
     # 4. ツールボタン (キャンバス下部, y: 224..242)
     if my >= 224 && my <= 242
-      if mx >= 12 && mx <= 42 # [PEN]
-        $current_tool = :pen
+      if mx >= 12 && mx <= 38 # [PEN]
+        switch_tool(:pen)
         sfx(:click)
-      elsif mx >= 46 && mx <= 76 # [FILL]
-        $current_tool = :fill
+      elsif mx >= 40 && mx <= 68 # [FILL]
+        switch_tool(:fill)
         sfx(:click)
-      elsif mx >= 80 && mx <= 110 # [PICK]
-        $current_tool = :picker
+      elsif mx >= 70 && mx <= 98 # [PICK]
+        switch_tool(:picker)
         sfx(:click)
-      elsif mx >= 114 && mx <= 152 # [ERASER]
-        $current_tool = :eraser
+      elsif mx >= 100 && mx <= 128 # [ERAS]
+        switch_tool(:eraser)
         sfx(:click)
-      elsif mx >= 156 && mx <= 186 # [GRID]
+      elsif mx >= 130 && mx <= 156 # [SEL]
+        switch_tool(:select)
+        sfx(:click)
+        notify("TOOL: SELECT (Drag to select / Drag inside to move)")
+      elsif mx >= 158 && mx <= 186 # [GRID]
         $show_grid = !$show_grid
         sfx(:click)
-      elsif mx >= 190 && mx <= 204 # [CLR]
+      elsif mx >= 188 && mx <= 212 # [CLR]
         clear_canvas
       end
     end
@@ -1036,11 +1309,62 @@ def update
     end
   end
 
-  # --- キャンバス内での描画 & スポイト操作 ---
+  # --- キャンバス内での描画 & 範囲選択 & スポイト操作 ---
+  if !btn(:mouse_l)
+    $sel_drag_mode = nil
+  end
+
   in_canvas = (mx >= $canvas_x && mx < $canvas_x + CANVAS_GRID * $cell_size &&
                my >= $canvas_y && my < $canvas_y + CANVAS_GRID * $cell_size)
 
-  if in_canvas && $picker_drag.nil?
+  if $current_tool == :select && $picker_drag.nil?
+    if $sel_drag_mode && btn(:mouse_l)
+      if $sel_drag_mode == :create
+        ccx = [[(mx - $canvas_x) / $cell_size, 0].max, $edit_w - 1].min
+        ccy = [[(my - $canvas_y) / $cell_size, 0].max, $edit_h - 1].min
+        x0 = [$sel_start_cx, ccx].min
+        y0 = [$sel_start_cy, ccy].min
+        x1 = [$sel_start_cx, ccx].max
+        y1 = [$sel_start_cy, ccy].max
+        $rect_sel = [x0, y0, x1 - x0 + 1, y1 - y0 + 1]
+      elsif $sel_drag_mode == :move && $rect_sel
+        mcx = (mx - $canvas_x) / $cell_size
+        mcy = (my - $canvas_y) / $cell_size
+        $rect_sel[0] = mcx - $sel_move_ox
+        $rect_sel[1] = mcy - $sel_move_oy
+      end
+    elsif in_canvas
+      if $is_read_only
+        if btnp(:mouse_l) || btnp(:mouse_r)
+          sfx(:boom)
+          notify("READ ONLY: Direct PNG reference (view-only). Edit PNG in external tool.")
+        end
+      else
+        cx = (mx - $canvas_x) / $cell_size
+        cy = (my - $canvas_y) / $cell_size
+        if btnp(:mouse_r)
+          clear_rect_selection(true)
+          sfx(:click)
+          notify("SELECTION CLEARED")
+        elsif btnp(:mouse_l) && cx >= 0 && cx < $edit_w && cy >= 0 && cy < $edit_h
+          if $rect_sel && cx >= $rect_sel[0] && cx < $rect_sel[0] + $rect_sel[2] && cy >= $rect_sel[1] && cy < $rect_sel[1] + $rect_sel[3]
+            lift_rect_selection_to_floating
+            $sel_drag_mode = :move
+            $sel_move_ox = cx - $rect_sel[0]
+            $sel_move_oy = cy - $rect_sel[1]
+            sfx(:cursor)
+          else
+            commit_floating_selection
+            $sel_drag_mode = :create
+            $sel_start_cx = cx
+            $sel_start_cy = cy
+            $rect_sel = [cx, cy, 1, 1]
+            sfx(:select)
+          end
+        end
+      end
+    end
+  elsif in_canvas && $picker_drag.nil?
     if $is_read_only
       if btnp(:mouse_l) || btnp(:mouse_r)
         sfx(:boom)
@@ -1081,7 +1405,7 @@ def update
             if btnp(:mouse_l)
               picked = get_bank_pixel($current_bank, gx, gy)
               $current_col = picked
-              $current_tool = :pen
+              switch_tool(:pen)
               sync_picker_from_current_color
               sfx(:pickup)
               notify("PICKED: #{picked ? COLOR_NAMES[picked] : 'TRANS'}")
@@ -1090,6 +1414,28 @@ def update
         end
       end
     end
+  end
+end
+
+# マーチングアンツ（アニメーション破線矩形枠）の描画ヘルパー
+def draw_marching_rect(rx, ry, rw, rh, tick)
+  return if rw <= 0 || rh <= 0
+  phase = (tick / 6) % 4
+  x1 = rx + rw - 1
+  y1 = ry + rh - 1
+  # 上辺 & 下辺
+  rw.times do |i|
+    c_top = ((i + phase) % 4 < 2) ? 10 : 0
+    c_bot = ((i + (4 - phase)) % 4 < 2) ? 10 : 0
+    pset(rx + i, ry, c_top)
+    pset(rx + i, y1, c_bot)
+  end
+  # 左辺 & 右辺
+  rh.times do |j|
+    c_left = ((j + (4 - phase)) % 4 < 2) ? 10 : 0
+    c_right = ((j + phase) % 4 < 2) ? 10 : 0
+    pset(rx, ry + j, c_left)
+    pset(x1, ry + j, c_right)
   end
 end
 
@@ -1172,6 +1518,28 @@ def draw
   # バンクテクスチャ描画
   blt($canvas_x, $canvas_y, $current_bank, $sel_x, $sel_y, 32, 32, 0, 6.0, $current_pal)
 
+  # フローティング選択中のドットを描画
+  if $rect_sel && $floating_pixels
+    rx = $rect_sel[0]
+    ry = $rect_sel[1]
+    rw = $rect_sel[2]
+    rh = $rect_sel[3]
+    pal_bank($current_pal)
+    rh.times do |fy|
+      rw.times do |fx|
+        tx = rx + fx
+        ty = ry + fy
+        if tx >= 0 && tx < $edit_w && ty >= 0 && ty < $edit_h
+          col = $floating_pixels[fy * rw + fx]
+          if col
+            rectfill($canvas_x + tx * $cell_size, $canvas_y + ty * $cell_size, $cell_size, $cell_size, col)
+          end
+        end
+      end
+    end
+    pal_bank(0)
+  end
+
   # オニオンスキン描画 (前フレームのドットを透かし表示)
   if $show_onion && $sel_x >= $edit_w
     prev_x = $sel_x - $edit_w
@@ -1218,6 +1586,26 @@ def draw
   rect($canvas_x, $canvas_y, $edit_w * $cell_size, $edit_h * $cell_size, 7)
   rect($canvas_x - 1, $canvas_y - 1, $edit_w * $cell_size + 2, $edit_h * $cell_size + 2, 10)
 
+  # 矩形選択枠 (マーチングアンツ)
+  if $rect_sel
+    rx = $rect_sel[0]
+    ry = $rect_sel[1]
+    rw = $rect_sel[2]
+    rh = $rect_sel[3]
+    cx0 = [[rx, 0].max, $edit_w].min
+    cy0 = [[ry, 0].max, $edit_h].min
+    cx1 = [[rx + rw, 0].max, $edit_w].min
+    cy1 = [[ry + rh, 0].max, $edit_h].min
+    if cx1 > cx0 && cy1 > cy0
+      sx = $canvas_x + cx0 * $cell_size
+      sy = $canvas_y + cy0 * $cell_size
+      sw = (cx1 - cx0) * $cell_size
+      sh = (cy1 - cy0) * $cell_size
+      draw_marching_rect(sx, sy, sw, sh, $ui_tick)
+      draw_marching_rect(sx - 1, sy - 1, sw + 2, sh + 2, $ui_tick + 12)
+    end
+  end
+
   # カーソル枠プレビュー
   in_canvas = (mx >= $canvas_x && mx < $canvas_x + CANVAS_GRID * $cell_size &&
                my >= $canvas_y && my < $canvas_y + CANVAS_GRID * $cell_size)
@@ -1231,10 +1619,11 @@ def draw
 
   # 3. ツールバー (キャンバス下部, y: 224..242)
   tools = [
-    [:pen, "PEN", 12, 30],
-    [:fill, "FILL", 46, 30],
-    [:picker, "PICK", 80, 30],
-    [:eraser, "ERASER", 114, 38]
+    [:pen,    "PEN",  12,  26],
+    [:fill,   "FILL", 40,  28],
+    [:picker, "PICK", 70,  28],
+    [:eraser, "ERAS", 100, 28],
+    [:select, "SEL",  130, 26]
   ]
   tools.each do |item|
     tool_id = item[0]
@@ -1244,18 +1633,18 @@ def draw
     is_active = ($current_tool == tool_id)
     rectfill(bx, 224, bw, 18, is_active ? 8 : 1)
     rect(bx, 224, bw, 18, is_active ? 7 : 5)
-    print_text(label, bx + 4, 229, is_active ? 7 : 6)
+    print_text(label, bx + 2, 229, is_active ? 7 : 6)
   end
 
   # [GRID]
-  rectfill(156, 224, 30, 18, $show_grid ? 12 : 1)
-  rect(156, 224, 30, 18, 5)
+  rectfill(158, 224, 28, 18, $show_grid ? 12 : 1)
+  rect(158, 224, 28, 18, 5)
   print_text("GRID", 160, 229, $show_grid ? 7 : 5)
 
   # [CLR]
-  rectfill(190, 224, 24, 18, 1)
-  rect(190, 224, 24, 18, 8)
-  print_text("CLR", 193, 229, 8)
+  rectfill(188, 224, 24, 18, 1)
+  rect(188, 224, 24, 18, 8)
+  print_text("CLR", 191, 229, 8)
 
   # 4. 中央ペイン: プレビュー & パレット
   print_text("PREVIEW", 220, 27, 6)
@@ -1516,9 +1905,13 @@ def draw
 
     # ミニマップ下部情報
     print_text("Pos:(#{$sel_x},#{$sel_y}) Spr##{cur_spr_id}(#{$edit_w}x#{$edit_h})", 342, 172, 10)
-    print_text("R-Click Swatch / [PICK]", 342, 186, 11)
-    print_text("Tab:Size P:Pal K:Picker", 342, 200, 5)
-    print_text("Ctrl+C/V:Copy H/V:Flip", 342, 214, 5)
+    if $rect_sel
+      print_text("Sel:(#{$rect_sel[0]},#{$rect_sel[1]}) #{$rect_sel[2]}x#{$rect_sel[3]}#{$floating_pixels ? '*' : ''}", 342, 186, 11)
+    else
+      print_text("R-Click Swatch / [PICK]", 342, 186, 11)
+    end
+    print_text("M:Sel P:Pal K:Pick O:Oni", 342, 200, 5)
+    print_text("Ctrl+A/C/X/V H/V/R:Flip", 342, 214, 5)
   end
 
   # 6. 下部ステータスバー (y: 250..270)
