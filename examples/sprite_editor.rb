@@ -43,21 +43,21 @@ COLOR_NAMES = [
 ]
 
 # レイアウト座標定数 (640x360)
-# 1) 左ペイン: 32x32 ドット編集キャンバス (1セル = 7px -> 224x224)
-$canvas_x = 10
-$canvas_y = 28
-$cell_size = 7
+# 1) 左ペイン: 32x32 ドット編集キャンバス (1セル = 8px -> 256x256, スプライトシートと同じ高さ!)
+$canvas_x = 16
+$canvas_y = 26
+$cell_size = 8
 
-# 2) 中央ペイン: 256x256 等倍(1x)スプライトシート (キャンバスのすぐ右隣)
-$sheet_x = 244
-$sheet_y = 28
+# 2) 右ペイン: 256x256 等倍(1x)スプライトシート (キャンバスのすぐ右隣)
+$sheet_x = 288
+$sheet_y = 26
 $sheet_size = 256
 
-# 3) 右ペイン: カラーピッカー & インスペクタ (x: 506..634)
-$picker_panel_x = 506
-$picker_panel_y = 28
-$picker_panel_w = 128
-$picker_panel_h = 306
+# 3) カラーピッカー ポップアップウィンドウ座標 (260x240, キャンバスの右隣・中央に出現)
+$picker_win_x = 284
+$picker_win_y = 38
+$picker_win_w = 260
+$picker_win_h = 240
 
 # 編集位置 (16の倍数, 0..240)
 $sel_x = 0
@@ -570,7 +570,7 @@ def is_numeric_arg?(s)
 end
 
 $target_path = "game.rb"
-$open_picker_on_start = true # 640x360では右端の独立ペインにカラーピッカーを常時表示可能
+$open_picker_on_start = false # 通常時は非表示（[PICK] / パレット右クリック / Kキーでポップアップ表示）
 $open_select_on_start = false
 if ARGV && ARGV.size > 0
   pos_args = []
@@ -1198,9 +1198,10 @@ def update
   end
 
   # --- ホバーツールチップ判定 ---
-  if my >= 256 && my <= 272 && mx >= 10 && mx < 10 + 14 * 16
-    t_idx = (mx - 10) / 16
-    if t_idx >= 0 && t_idx < TOOL_BUTTONS.size
+  if my >= 286 && my <= 301 && mx >= 16 && mx < 16 + 14 * 18
+    t_idx = (mx - 16) / 18
+    rel_x = (mx - 16) % 18
+    if rel_x < 16 && t_idx >= 0 && t_idx < TOOL_BUTTONS.size
       $hover_tip = TOOL_BUTTONS[t_idx][1]
     end
   elsif my >= 3 && my <= 19
@@ -1229,9 +1230,14 @@ def update
   cycle_anim_frames(-1) if btnp(:"[")
   cycle_anim_frames(1) if btnp(:"]")
 
-  # Escape / Enter で範囲選択確定＆解除
+  # Escape / Enter でカラーピッカー閉鎖 または 範囲選択確定＆解除
   if btnp(:escape) || btnp(:enter)
-    if $rect_sel
+    if $show_color_picker && btnp(:escape)
+      $show_color_picker = false
+      $picker_drag = nil
+      sfx(:click)
+      notify("COLOR PICKER: CLOSED")
+    elsif $rect_sel
       clear_rect_selection(true)
       sfx(:click)
       notify("SELECTION CLEARED")
@@ -1309,10 +1315,105 @@ def update
     return
   end
 
-  # --- 1倍スプライトシート (256x256, x: 244..500, y: 28..284) での選択 ---
-  in_sheet = (mx >= $sheet_x && mx < $sheet_x + $sheet_size &&
+  # --- ポップアップ カラーピッカー (260x240, x: 284..544, y: 38..278) の操作 ---
+  if !btn(:mouse_l)
+    $picker_drag = nil
+  end
+
+  in_picker_win = ($show_color_picker &&
+                   mx >= $picker_win_x && mx <= $picker_win_x + $picker_win_w &&
+                   my >= $picker_win_y && my <= $picker_win_y + $picker_win_h)
+  in_palette_area = (mx >= 16 && mx <= 272 && my >= 304 && my <= 334)
+
+  if $show_color_picker
+    if btnp(:mouse_l)
+      if in_picker_win
+        # [X] 閉じるボタン (x: 525..540, y: 40..54)
+        if mx >= 525 && mx <= 540 && my >= 40 && my <= 54
+          $show_color_picker = false
+          $picker_drag = nil
+          sfx(:click)
+        # SV 2Dボックス (x: 294..393, y: 64..163, 100x100)
+        elsif mx >= 294 && mx < 394 && my >= 64 && my < 164
+          $picker_drag = :sv
+        # Hue バー (x: 402..416, y: 64..163, 14x100)
+        elsif mx >= 402 && mx <= 416 && my >= 64 && my < 164
+          $picker_drag = :hue
+        # R スライダー (x: 308..500, y: 171..183)
+        elsif mx >= 308 && mx <= 500 && my >= 171 && my <= 183
+          $picker_drag = :r
+        # G スライダー (x: 308..500, y: 186..198)
+        elsif mx >= 308 && mx <= 500 && my >= 186 && my <= 198
+          $picker_drag = :g
+        # B スライダー (x: 308..500, y: 201..213)
+        elsif mx >= 308 && mx <= 500 && my >= 201 && my <= 213
+          $picker_drag = :b
+        # 右側ユーティリティボタン群 (x: 426..534)
+        elsif mx >= 426 && mx <= 534
+          if my >= 64 && my <= 80 # [RESET COL]
+            reset_current_palette_color
+          elsif my >= 84 && my <= 100 # [COPY RGB]
+            $col_clipboard = [$picker_r, $picker_g, $picker_b]
+            sfx(:coin)
+            notify("COPIED COLOR #{rgb_to_hex_str($picker_r, $picker_g, $picker_b)}")
+          elsif my >= 104 && my <= 120 # [PASTE RGB]
+            if $col_clipboard
+              apply_picker_rgb($col_clipboard[0], $col_clipboard[1], $col_clipboard[2], true)
+              sfx(:powerup)
+              notify("PASTED COLOR #{rgb_to_hex_str($picker_r, $picker_g, $picker_b)}")
+            end
+          elsif my >= 124 && my <= 140 # [RESET ALL]
+            reset_all_palette_colors
+          end
+        # 32色プリセットスウォッチ (x: 294..533, y: 228..253, 16列x2段, 1セル15x12)
+        elsif mx >= 294 && mx < 534 && my >= 228 && my < 254
+          sw_col = (mx - 294) / 15
+          sw_row = (my - 228) / 13
+          sw_idx = sw_row * 16 + sw_col
+          if sw_idx >= 0 && sw_idx < PRESET_SWATCHES.size
+            rgb = PRESET_SWATCHES[sw_idx]
+            apply_picker_rgb(rgb[0], rgb[1], rgb[2], true)
+            sfx(:select)
+            notify("PRESET: #{rgb_to_hex_str(rgb[0], rgb[1], rgb[2])}")
+          end
+        end
+      elsif !in_palette_area
+        # ポップアップ枠外（かつ左下のパレット操作エリア外）をクリックしたら閉じる
+        $show_color_picker = false
+        $picker_drag = nil
+        sfx(:click)
+      end
+    end
+
+    if btn(:mouse_l) && $picker_drag
+      if $picker_drag == :sv
+        $picker_s = (((mx - 294) * 100) / 99).clamp(0, 100)
+        $picker_v = (100 - (((my - 64) * 100) / 99)).clamp(0, 100)
+        rgb = hsv_to_rgb($picker_h, $picker_s, $picker_v)
+        apply_picker_rgb(rgb[0], rgb[1], rgb[2], false) if rgb
+      elsif $picker_drag == :hue
+        $picker_h = (((my - 64) * 359) / 99).clamp(0, 359)
+        rgb = hsv_to_rgb($picker_h, $picker_s, $picker_v)
+        apply_picker_rgb(rgb[0], rgb[1], rgb[2], false) if rgb
+      elsif $picker_drag == :r
+        nr = (((mx - 308) * 255) / 191).clamp(0, 255)
+        apply_picker_rgb(nr, $picker_g, $picker_b, true)
+      elsif $picker_drag == :g
+        ng = (((mx - 308) * 255) / 191).clamp(0, 255)
+        apply_picker_rgb($picker_r, ng, $picker_b, true)
+      elsif $picker_drag == :b
+        nb = (((mx - 308) * 255) / 191).clamp(0, 255)
+        apply_picker_rgb($picker_r, $picker_g, nb, true)
+      end
+    end
+  end
+
+  # --- 1倍スプライトシート (256x256, x: 288..544, y: 26..282) での選択 ---
+  # ※ ポップアップカラーピッカー上でのクリック時はシート選択をブロック
+  in_sheet = (!in_picker_win && $picker_drag.nil? &&
+              mx >= $sheet_x && mx < $sheet_x + $sheet_size &&
               my >= $sheet_y && my < $sheet_y + $sheet_size)
-  if in_sheet && $picker_drag.nil? && $sel_drag_mode.nil? && (btn(:mouse_l) || btn(:mouse_r))
+  if in_sheet && $sel_drag_mode.nil? && (btn(:mouse_l) || btn(:mouse_r))
     gx = ((mx - $sheet_x) / 16) * 16
     gy = ((my - $sheet_y) / 16) * 16
     gx = [[gx, 0].max, 256 - $edit_w].min
@@ -1320,91 +1421,10 @@ def update
     set_selection(gx, gy)
   end
 
-  # --- 右ペイン: カラーピッカーの操作 (x: 506..634, y: 28..334) ---
-  if !btn(:mouse_l)
-    $picker_drag = nil
-  end
-
-  if $show_color_picker
-    if btnp(:mouse_l)
-      # [X] 閉じるボタン (x: 618..631, y: 30..42)
-      if mx >= 618 && mx <= 631 && my >= 30 && my <= 42
-        $show_color_picker = false
-        $picker_drag = nil
-        sfx(:click)
-      # SV 2Dボックス (x: 510..589, y: 48..127, 80x80)
-      elsif mx >= 510 && mx < 590 && my >= 48 && my < 128
-        $picker_drag = :sv
-      # Hue バー (x: 593..604, y: 48..127, 11x80)
-      elsif mx >= 593 && mx <= 604 && my >= 48 && my < 128
-        $picker_drag = :hue
-      # R スライダー (x: 520..602, y: 136..148)
-      elsif mx >= 520 && mx <= 602 && my >= 136 && my <= 148
-        $picker_drag = :r
-      # G スライダー (x: 520..602, y: 152..164)
-      elsif mx >= 520 && mx <= 602 && my >= 152 && my <= 164
-        $picker_drag = :g
-      # B スライダー (x: 520..602, y: 168..180)
-      elsif mx >= 520 && mx <= 602 && my >= 168 && my <= 180
-        $picker_drag = :b
-      # 右側ユーティリティボタン群 (x: 608..631)
-      elsif mx >= 608 && mx <= 631
-        if my >= 48 && my <= 65 # [RST]
-          reset_current_palette_color
-        elsif my >= 68 && my <= 85 # [CPY]
-          $col_clipboard = [$picker_r, $picker_g, $picker_b]
-          sfx(:coin)
-          notify("COPIED COLOR #{rgb_to_hex_str($picker_r, $picker_g, $picker_b)}")
-        elsif my >= 88 && my <= 105 # [PST]
-          if $col_clipboard
-            apply_picker_rgb($col_clipboard[0], $col_clipboard[1], $col_clipboard[2], true)
-            sfx(:powerup)
-            notify("PASTED COLOR #{rgb_to_hex_str($picker_r, $picker_g, $picker_b)}")
-          end
-        elsif my >= 108 && my <= 125 # [ALL]
-          reset_all_palette_colors
-        end
-      # 32色プリセットスウォッチ (x: 510..621, y: 196..221, 16列x2段, 1セル7x13)
-      elsif mx >= 510 && mx < 622 && my >= 196 && my < 222
-        sw_col = (mx - 510) / 7
-        sw_row = (my - 196) / 13
-        sw_idx = sw_row * 16 + sw_col
-        if sw_idx >= 0 && sw_idx < PRESET_SWATCHES.size
-          rgb = PRESET_SWATCHES[sw_idx]
-          apply_picker_rgb(rgb[0], rgb[1], rgb[2], true)
-          sfx(:select)
-          notify("PRESET: #{rgb_to_hex_str(rgb[0], rgb[1], rgb[2])}")
-        end
-      end
-    end
-
-    if btn(:mouse_l) && $picker_drag
-      if $picker_drag == :sv
-        $picker_s = (((mx - 510) * 100) / 79).clamp(0, 100)
-        $picker_v = (100 - (((my - 48) * 100) / 79)).clamp(0, 100)
-        rgb = hsv_to_rgb($picker_h, $picker_s, $picker_v)
-        apply_picker_rgb(rgb[0], rgb[1], rgb[2], false) if rgb
-      elsif $picker_drag == :hue
-        $picker_h = (((my - 48) * 359) / 79).clamp(0, 359)
-        rgb = hsv_to_rgb($picker_h, $picker_s, $picker_v)
-        apply_picker_rgb(rgb[0], rgb[1], rgb[2], false) if rgb
-      elsif $picker_drag == :r
-        nr = (((mx - 520) * 255) / 81).clamp(0, 255)
-        apply_picker_rgb(nr, $picker_g, $picker_b, true)
-      elsif $picker_drag == :g
-        ng = (((mx - 520) * 255) / 81).clamp(0, 255)
-        apply_picker_rgb($picker_r, ng, $picker_b, true)
-      elsif $picker_drag == :b
-        nb = (((mx - 520) * 255) / 81).clamp(0, 255)
-        apply_picker_rgb($picker_r, $picker_g, nb, true)
-      end
-    end
-  end
-
   # --- 小型8x2カラーパレットの右クリックでカラーピッカーを開く ---
-  if btnp(:mouse_r) && mx >= 10 && mx < 114 && my >= 278 && my < 304
-    col_idx = (mx - 10) / 13
-    row_idx = (my - 278) / 13
+  if btnp(:mouse_r) && mx >= 16 && mx < 128 && my >= 305 && my < 333
+    col_idx = (mx - 16) / 14
+    row_idx = (my - 305) / 14
     if col_idx >= 0 && col_idx < 8 && row_idx >= 0 && row_idx < 2
       $current_col = row_idx * 8 + col_idx
       switch_tool(:pen) if $current_tool == :eraser
@@ -1416,7 +1436,7 @@ def update
   end
 
   # --- ボタンクリック判定 (mouse_l) ---
-  if btnp(:mouse_l)
+  if btnp(:mouse_l) && !in_picker_win
     # 1. 上部メニューバー (y: 3..19)
     if my >= 3 && my <= 19
       if mx >= 70 && mx <= 134 # [TILEMAP] タブ
@@ -1442,11 +1462,11 @@ def update
       end
     end
 
-    # 2. アイコンツールバー (14個, x: 10..233, y: 256..272)
-    if my >= 256 && my <= 272 && mx >= 10 && mx < 10 + 14 * 16
-      t_idx = (mx - 10) / 16
-      rel_x = (mx - 10) % 16
-      if rel_x < 15 && t_idx >= 0 && t_idx < TOOL_BUTTONS.size
+    # 2. アイコンツールバー (14個, x: 16..266, y: 286..301)
+    if my >= 286 && my <= 301 && mx >= 16 && mx < 16 + 14 * 18
+      t_idx = (mx - 16) / 18
+      rel_x = (mx - 16) % 18
+      if rel_x < 16 && t_idx >= 0 && t_idx < TOOL_BUTTONS.size
         act = TOOL_BUTTONS[t_idx][0]
         case act
         when :pen, :fill, :picker, :eraser, :select
@@ -1475,10 +1495,10 @@ def update
       end
     end
 
-    # 3. 小型カラーパレット (8x2, x: 10..114, y: 278..304)
-    if mx >= 10 && mx < 114 && my >= 278 && my < 304
-      col_idx = (mx - 10) / 13
-      row_idx = (my - 278) / 13
+    # 3. 小型カラーパレット (8x2, 1セル13x13, pitch 14, x: 16..127, y: 305..332)
+    if mx >= 16 && mx < 128 && my >= 305 && my < 333
+      col_idx = (mx - 16) / 14
+      row_idx = (my - 305) / 14
       if col_idx >= 0 && col_idx < 8 && row_idx >= 0 && row_idx < 2
         $current_col = row_idx * 8 + col_idx
         switch_tool(:pen) if $current_tool == :eraser || $current_tool == :select
@@ -1487,53 +1507,50 @@ def update
       end
     end
 
-    # [TRANS (.)] ボタン (x: 10..72, y: 308..322)
-    if mx >= 10 && mx <= 72 && my >= 308 && my <= 322
-      $current_col = nil
-      sfx(:select)
-    end
-
-    # 4. パレット切替 & [+DUP] & [PICK] (x: 118..234, y: 278..292)
-    if my >= 278 && my <= 292
-      if mx >= 118 && mx <= 131 # [<]
+    # 4. パレット切替 & [+DUP] & [PICK] (x: 132..272, y: 305..318)
+    if my >= 305 && my <= 318
+      if mx >= 132 && mx <= 146 # [<]
         cycle_palette(-1)
-      elsif mx >= 159 && mx <= 172 # [>]
+      elsif mx >= 176 && mx <= 190 # [>]
         cycle_palette(1)
-      elsif mx >= 175 && mx <= 204 # [+DUP]
+      elsif mx >= 194 && mx <= 228 # [+DUP]
         duplicate_current_palette
-      elsif mx >= 207 && mx <= 234 # [PICK]
+      elsif mx >= 232 && mx <= 272 # [PICK]
         $show_color_picker = !$show_color_picker
         sync_picker_from_current_color if $show_color_picker
         sfx(:click)
       end
     end
 
-    # 5. 1px シフト移動ボタン [←][↑][↓][→] (x: 118..234, y: 296..310)
-    if my >= 296 && my <= 310
-      if mx >= 118 && mx <= 144 # [←]
+    # 5. [TRANS (.)] ボタン & 1px シフト移動ボタン [←][↑][↓][→] (x: 132..272, y: 320..333)
+    if my >= 320 && my <= 333
+      if mx >= 132 && mx <= 186 # [TRANS(.)]
+        $current_col = nil
+        sfx(:select)
+      elsif mx >= 190 && mx <= 209 # [←]
         shift_canvas(-1, 0)
-      elsif mx >= 148 && mx <= 174 # [↑]
+      elsif mx >= 211 && mx <= 230 # [↑]
         shift_canvas(0, -1)
-      elsif mx >= 178 && mx <= 204 # [↓]
+      elsif mx >= 232 && mx <= 251 # [↓]
         shift_canvas(0, 1)
-      elsif mx >= 208 && mx <= 234 # [→]
+      elsif mx >= 253 && mx <= 272 # [→]
         shift_canvas(1, 0)
       end
     end
 
-    # 6. アニメーションプレビュー操作バー (x: 322..500, y: 290..304)
-    if my >= 290 && my <= 304
-      if mx >= 322 && mx <= 346 # [▶/■]
+    # 6. アニメーションプレビュー操作バー (x: 374..552, y: 288..302)
+    if my >= 288 && my <= 302
+      if mx >= 374 && mx <= 396 # [▶/■]
         toggle_anim
-      elsif mx >= 350 && mx <= 378 # [#F]
+      elsif mx >= 400 && mx <= 428 # [#F]
         cycle_anim_frames(1)
-      elsif mx >= 382 && mx <= 422 # [LOOP/PING]
+      elsif mx >= 432 && mx <= 472 # [LOOP/PING]
         toggle_anim_pingpong
-      elsif mx >= 426 && mx <= 464 # [SPD]
+      elsif mx >= 476 && mx <= 514 # [SPD]
         $anim_speed = case $anim_speed; when 8 then 6; when 6 then 4; when 4 then 12; else 8; end
         sfx(:cursor)
         notify("ANIM SPEED: #{$anim_speed} ticks")
-      elsif mx >= 468 && mx <= 498 # [BG]
+      elsif mx >= 518 && mx <= 548 # [BG]
         $bg_mode = ($bg_mode + 1) % 4
         sfx(:click)
       end
@@ -1737,7 +1754,7 @@ def draw
   print_text("CODE", 596, 7, 7)
 
   # ============================================================================
-  # 2. 左ペイン: ドット編集キャンバス (32x32, 7px/cell -> 224x224) + アイコンバー + 小型パレット
+  # 2. 左ペイン: ドット編集キャンバス (32x32, 8px/cell -> 256x256) + アイコンバー + 小型パレット
   # ============================================================================
   cw_px = CANVAS_GRID * $cell_size
   ch_px = CANVAS_GRID * $cell_size
@@ -1749,8 +1766,8 @@ def draw
   rectfill($canvas_x, $canvas_y, cw_px, ch_px, 0)
   pal_bank(0)
 
-  # バンクテクスチャ描画 (7.0倍)
-  blt($canvas_x, $canvas_y, $current_bank, $sel_x, $sel_y, 32, 32, 0, 7.0, $current_pal)
+  # バンクテクスチャ描画 (8.0倍 = 256x256 px)
+  blt($canvas_x, $canvas_y, $current_bank, $sel_x, $sel_y, 32, 32, 0, 8.0, $current_pal)
 
   # フローティング選択中のドットを描画
   if $rect_sel && $floating_pixels
@@ -1786,7 +1803,7 @@ def draw
         if cur_c.nil? && prev_c
           px = $canvas_x + cx * $cell_size
           py = $canvas_y + cy * $cell_size
-          rectfill(px + 2, py + 2, 3, 3, 12)
+          rectfill(px + 2, py + 2, 4, 4, 12)
         end
       end
     end
@@ -1799,8 +1816,8 @@ def draw
         if cx >= $edit_w || cy >= $edit_h
           px = $canvas_x + cx * $cell_size
           py = $canvas_y + cy * $cell_size
-          pset(px + 1, py + 1, 0)
-          pset(px + 4, py + 4, 0)
+          pset(px + 2, py + 2, 0)
+          pset(px + 5, py + 5, 0)
         end
       end
     end
@@ -1851,12 +1868,12 @@ def draw
     end
   end
 
-  # --- 2.1 アイコンツールバー (14個, x: 10..233, y: 256..271) ---
+  # --- 2.1 アイコンツールバー (14個, x: 16..266, y: 286..301) ---
   bake_tool_icons
   TOOL_BUTTONS.each_with_index do |tb, idx|
     tid = tb[0]
-    bx = 10 + idx * 16
-    by = 256
+    bx = 16 + idx * 18
+    by = 286
     is_active = false
     if tid == :pen || tid == :fill || tid == :picker || tid == :eraser || tid == :select
       is_active = ($current_tool == tid)
@@ -1868,95 +1885,81 @@ def draw
 
     bg_col = is_active ? ((tid == :grid || tid == :onion) ? 12 : 8) : (tid == :clear ? 2 : 1)
     border_col = is_active ? 7 : (tid == :clear ? 8 : 5)
-    rectfill(bx, by, 15, 15, bg_col)
-    rect(bx, by, 15, 15, border_col)
+    rectfill(bx, by, 16, 15, bg_col)
+    rect(bx, by, 16, 15, border_col)
 
     blt(bx + 2, by + 2, ICON_BANK, idx * 16, is_active ? 16 : 0, 11, 11)
   end
 
-  # --- 2.2 小型カラーパレット (8列×2段, 1セル 12x12 px, x: 10..113, y: 278..303) ---
+  # --- 2.2 小型カラーパレット (8列×2段, 1セル 13x13 px, pitch 14, x: 16..127, y: 305..332) ---
   pal_bank($current_pal)
   2.times do |row|
     8.times do |col_idx|
       c_id = row * 8 + col_idx
-      bx = 10 + col_idx * 13
-      by = 278 + row * 13
-      rectfill(bx, by, 12, 12, c_id)
+      bx = 16 + col_idx * 14
+      by = 305 + row * 14
+      rectfill(bx, by, 13, 13, c_id)
     end
   end
   pal_bank(0)
   2.times do |row|
     8.times do |col_idx|
       c_id = row * 8 + col_idx
-      bx = 10 + col_idx * 13
-      by = 278 + row * 13
+      bx = 16 + col_idx * 14
+      by = 305 + row * 14
       # ベースパレット(P0)から変更されている差分カラーには右上に●マーカーを表示
       col_info = get_palette_color($current_pal, c_id)
       if col_info && col_info[3]
-        rectfill(bx + 9, by + 1, 2, 2, 7)
+        rectfill(bx + 10, by + 1, 2, 2, 7)
       end
       if $current_col == c_id
-        rect(bx - 1, by - 1, 14, 14, 7)
+        rect(bx - 1, by - 1, 15, 15, 7)
       else
-        rect(bx, by, 12, 12, 0)
+        rect(bx, by, 13, 13, 0)
       end
     end
   end
 
-  # [TRANS (.)] ボタン & 選択色情報 (y: 308..322)
-  rectfill(10, 308, 62, 14, $current_col.nil? ? 8 : 1)
-  rect(10, 308, 62, 14, $current_col.nil? ? 7 : 5)
-  print_text("TRANS(.)", 16, 311, $current_col.nil? ? 7 : 6)
+  # パレット切替バー [<] [P0] [>] [+DUP] [PICK] (x: 132..272, y: 305..318)
+  rectfill(132, 305, 14, 13, 2)
+  rect(132, 305, 14, 13, 6)
+  print_text("<", 136, 308, 7)
 
-  if $current_col
-    print_text("COL:#{HEX_CHARS[$current_col]}", 76, 311, 10)
-  else
-    print_text("COL:.", 76, 311, 6)
-  end
+  rectfill(148, 305, 26, 13, 1)
+  rect(148, 305, 26, 13, 5)
+  print_text("P#{$current_pal}", 153, 308, 10)
 
-  # パレット切替バー [<] [P0] [>] [+DUP] [PICK] (x: 118..234, y: 278..292)
-  rectfill(118, 278, 13, 14, 2)
-  rect(118, 278, 13, 14, 6)
-  print_text("<", 122, 281, 7)
+  rectfill(176, 305, 14, 13, 2)
+  rect(176, 305, 14, 13, 6)
+  print_text(">", 180, 308, 7)
 
-  rectfill(133, 278, 24, 14, 1)
-  rect(133, 278, 24, 14, 5)
-  print_text("P#{$current_pal}", 137, 281, 10)
+  rectfill(194, 305, 34, 13, 3)
+  rect(194, 305, 34, 13, 11)
+  print_text("+DUP", 199, 308, 7)
 
-  rectfill(159, 278, 13, 14, 2)
-  rect(159, 278, 13, 14, 6)
-  print_text(">", 163, 281, 7)
+  rectfill(232, 305, 40, 13, $show_color_picker ? 8 : 2)
+  rect(232, 305, 40, 13, $show_color_picker ? 7 : 6)
+  print_text("PICK", 240, 308, 7)
 
-  rectfill(175, 278, 29, 14, 3)
-  rect(175, 278, 29, 14, 11)
-  print_text("+DUP", 178, 281, 7)
+  # [TRANS (.)] ボタン & 1px シフト移動ボタン [←][↑][↓][→] (x: 132..272, y: 320..333)
+  rectfill(132, 320, 54, 13, $current_col.nil? ? 8 : 1)
+  rect(132, 320, 54, 13, $current_col.nil? ? 7 : 5)
+  print_text("TRANS(.)", 135, 323, $current_col.nil? ? 7 : 6)
 
-  rectfill(207, 278, 27, 14, $show_color_picker ? 8 : 2)
-  rect(207, 278, 27, 14, $show_color_picker ? 7 : 6)
-  print_text("PICK", 209, 281, 7)
-
-  # 1px シフト移動ボタン [←][↑][↓][→] (x: 118..234, y: 296..310)
   shift_btns = [
-    ["←", 118],
-    ["↑", 148],
-    ["↓", 178],
-    ["→", 208]
+    ["←", 190],
+    ["↑", 211],
+    ["↓", 232],
+    ["→", 253]
   ]
   shift_btns.each do |sb|
-    rectfill(sb[1], 296, 26, 14, 1)
-    rect(sb[1], 296, 26, 14, 5)
-    print_text(sb[0], sb[1] + 10, 299, 7)
-  end
-
-  # 選択範囲・アクティブツール表示 (y: 314)
-  if $rect_sel
-    print_text("SEL:(#{$rect_sel[0]},#{$rect_sel[1]}) #{$rect_sel[2]}x#{$rect_sel[3]}#{$floating_pixels ? '*' : ''}", 118, 314, 11)
-  else
-    print_text("TOOL: #{$current_tool.to_s.upcase}", 118, 314, 6)
+    rectfill(sb[1], 320, 19, 13, 1)
+    rect(sb[1], 320, 19, 13, 5)
+    print_text(sb[0], sb[1] + 7, 323, 7)
   end
 
   # ============================================================================
-  # 3. 中央ペイン (キャンバスのすぐ右隣!): 1倍(256x256) スプライトシート & アニメプレビュー
+  # 3. 右ペイン (キャンバスのすぐ右隣!): 1倍(256x256) スプライトシート & アニメプレビュー
   # ============================================================================
   rectfill($sheet_x - 1, $sheet_y - 1, $sheet_size + 2, $sheet_size + 2, 0)
   rect($sheet_x - 1, $sheet_y - 1, $sheet_size + 2, $sheet_size + 2, 5)
@@ -1970,7 +1973,46 @@ def draw
   rect(s_bx, s_by, $edit_w, $edit_h, 7)
   rect(s_bx - 1, s_by - 1, $edit_w + 2, $edit_h + 2, 10)
 
-  # --- 3.1 シート下部: 1倍 & 2倍 アニメーションプレビューバー (x: 244..500, y: 290..334) ---
+  # --- 3.1 右端インフォ＆ショートカットガイド (x: 552..632, y: 25..283) ---
+  rectfill(552, 25, 80, 258, 1)
+  rect(552, 25, 80, 258, 5)
+
+  print_text("TOOL:#{$current_tool.to_s.upcase[0,4]}", 556, 30, 10)
+  if $current_col
+    print_text("COL :#{HEX_CHARS[$current_col]}", 556, 42, 7)
+    pal_bank($current_pal)
+    rectfill(602, 41, 24, 9, $current_col)
+    pal_bank(0)
+    rect(602, 41, 24, 9, 7)
+  else
+    print_text("COL :TRANS", 556, 42, 6)
+  end
+  if $rect_sel
+    print_text("SEL :#{$rect_sel[2]}x#{$rect_sel[3]}#{$floating_pixels ? '*' : ''}", 556, 54, 11)
+  else
+    print_text("SEL :NONE", 556, 54, 5)
+  end
+
+  line(556, 66, 628, 66, 5)
+  print_text("SHORTCUTS", 556, 72, 10)
+  print_text("B : Pen", 556, 86, 6)
+  print_text("F : Fill", 556, 98, 6)
+  print_text("E : Eraser", 556, 110, 6)
+  print_text("M : Select", 556, 122, 6)
+  print_text("^A: SelAll", 556, 134, 6)
+  print_text("^C: Copy", 556, 146, 6)
+  print_text("^X: Cut", 556, 158, 6)
+  print_text("^V: Paste", 556, 170, 6)
+  print_text("Z : Undo", 556, 182, 6)
+  print_text("H/V:Flip", 556, 194, 6)
+  print_text("R : Rotate", 556, 206, 6)
+  print_text("G : Grid", 556, 218, 6)
+  print_text("O : Onion", 556, 230, 6)
+  print_text("P : PalSw", 556, 242, 6)
+  print_text("K : Picker", 556, 254, 11)
+  print_text("S : Save", 556, 266, 6)
+
+  # --- 3.2 シート下部: 1倍 & 2倍 アニメーションプレビューバー (x: 288..632, y: 288..334) ---
   preview_bg = case $bg_mode
                when 0 then 0
                when 1 then 1
@@ -1980,57 +2022,57 @@ def draw
   anim_step = anim_current_step
   draw_u = ($sel_x + anim_step * $edit_w) % BANK_SIZE
 
-  # (A) 1x 等倍プレビューボックス (36x36, x: 244, y: 290)
-  rectfill(244, 290, 36, 36, preview_bg)
-  rect(244, 290, 36, 36, 5)
-  ox_1x = 244 + (36 - $edit_w) / 2
-  oy_1x = 290 + (36 - $edit_h) / 2
+  # (A) 1x 等倍プレビューボックス (36x36, x: 288, y: 288)
+  rectfill(288, 288, 36, 36, preview_bg)
+  rect(288, 288, 36, 36, 5)
+  ox_1x = 288 + (36 - $edit_w) / 2
+  oy_1x = 288 + (36 - $edit_h) / 2
   blt(ox_1x, oy_1x, $current_bank, draw_u, $sel_y, $edit_w, $edit_h, 0, 1.0, $current_pal)
-  print_text("1x", 246, 328, 6)
+  print_text("1x", 290, 326, 6)
 
-  # (B) 2x 拡大プレビューボックス (36x36, x: 284, y: 290)
-  rectfill(284, 290, 36, 36, preview_bg)
-  rect(284, 290, 36, 36, 5)
+  # (B) 2x 拡大プレビューボックス (36x36, x: 330, y: 288)
+  rectfill(330, 288, 36, 36, preview_bg)
+  rect(330, 288, 36, 36, 5)
   scale_2x = ($edit_w <= 16 && $edit_h <= 16) ? 2.0 : 1.0
   pw_2x = ($edit_w * scale_2x).to_i
   ph_2x = ($edit_h * scale_2x).to_i
-  ox_2x = 284 + (36 - pw_2x) / 2
-  oy_2x = 290 + (36 - ph_2x) / 2
+  ox_2x = 330 + (36 - pw_2x) / 2
+  oy_2x = 288 + (36 - ph_2x) / 2
   blt(ox_2x, oy_2x, $current_bank, draw_u, $sel_y, $edit_w, $edit_h, 0, scale_2x, $current_pal)
-  print_text(scale_2x == 2.0 ? "2x" : "1x", 286, 328, 6)
+  print_text(scale_2x == 2.0 ? "2x" : "1x", 332, 326, 6)
 
-  # (C) アニメーション設定ボタン群 (x: 324..500, y: 290..304)
+  # (C) アニメーション設定ボタン群 (x: 374..548, y: 288..302)
   # [▶/■]
-  rectfill(324, 290, 22, 14, $anim_playing ? 8 : 3)
-  rect(324, 290, 22, 14, 6)
-  print_text($anim_playing ? "■" : "▶", 332, 293, 7)
+  rectfill(374, 288, 22, 14, $anim_playing ? 8 : 3)
+  rect(374, 288, 22, 14, 6)
+  print_text($anim_playing ? "■" : "▶", 382, 291, 7)
 
   # [#F]
-  rectfill(350, 290, 28, 14, 2)
-  rect(350, 290, 28, 14, 6)
-  print_text("#{$anim_frames}F", 358, 293, 10)
+  rectfill(400, 288, 28, 14, 2)
+  rect(400, 288, 28, 14, 6)
+  print_text("#{$anim_frames}F", 408, 291, 10)
 
   # [LOOP / PING]
-  rectfill(382, 290, 40, 14, $anim_pingpong ? 12 : 2)
-  rect(382, 290, 40, 14, $anim_pingpong ? 7 : 6)
-  print_text($anim_pingpong ? "PING" : "LOOP", 388, 293, $anim_pingpong ? 0 : 7)
+  rectfill(432, 288, 40, 14, $anim_pingpong ? 12 : 2)
+  rect(432, 288, 40, 14, $anim_pingpong ? 7 : 6)
+  print_text($anim_pingpong ? "PING" : "LOOP", 438, 291, $anim_pingpong ? 0 : 7)
 
   # [SPD]
-  rectfill(426, 290, 38, 14, 2)
-  rect(426, 290, 38, 14, 6)
+  rectfill(476, 288, 38, 14, 2)
+  rect(476, 288, 38, 14, 6)
   fps_label = ($anim_speed == 4 ? "FAST" : ($anim_speed == 6 ? "MID" : ($anim_speed == 12 ? "SLOW" : "NORM")))
-  print_text(fps_label, 431, 293, 7)
+  print_text(fps_label, 481, 291, 7)
 
   # [BG]
-  rectfill(468, 290, 30, 14, 2)
-  rect(468, 290, 30, 14, 6)
-  print_text("BG", 477, 293, 7)
+  rectfill(518, 288, 30, 14, 2)
+  rect(518, 288, 30, 14, 6)
+  print_text("BG", 527, 291, 7)
 
-  # (D) 1倍アニメーションストリップ (最大8コマ並べて表示, y: 308..326)
+  # (D) 1倍アニメーションストリップ (最大11コマ並べて表示, x: 374..630, y: 306..324)
   $anim_frames.times do |f_idx|
-    fx = 324 + f_idx * 22
-    fy = 308
-    break if fx + 18 > 502
+    fx = 374 + f_idx * 22
+    fy = 306
+    break if fx + 18 > 632
     rectfill(fx, fy, 18, 18, preview_bg)
     is_cur_f = ($anim_playing && anim_step == f_idx)
     rect(fx, fy, 18, 18, is_cur_f ? 10 : 5)
@@ -2040,111 +2082,105 @@ def draw
   end
 
   # ============================================================================
-  # 4. 右ペイン: カラーピッカー & ショートカットガイド (x: 506..634, y: 28..334)
+  # 4. ポップアップ カラーピッカー (通常時は非表示、起動時に中央右 x: 284..544, y: 38..278 に出現)
   # ============================================================================
-  rectfill(506, 28, 128, 306, 1)
-  rect(506, 28, 128, 306, 5)
-
   if $show_color_picker
+    # ドロップシャドウ & ウィンドウ本体
+    rectfill($picker_win_x + 4, $picker_win_y + 4, $picker_win_w, $picker_win_h, 0)
+    rectfill($picker_win_x, $picker_win_y, $picker_win_w, $picker_win_h, 1)
+    rect($picker_win_x, $picker_win_y, $picker_win_w, $picker_win_h, 7)
+    rect($picker_win_x + 1, $picker_win_y + 1, $picker_win_w - 2, $picker_win_h - 2, 12)
+
+    # タイトルバー (y: 38..56)
+    rectfill($picker_win_x + 2, $picker_win_y + 2, $picker_win_w - 4, 16, 12)
     act_col = $current_col || 0
     hex_str = rgb_to_hex_str($picker_r, $picker_g, $picker_b)
-    print_text("P#{$current_pal}:#{HEX_CHARS[act_col]}", 510, 33, 10)
-    rectfill_rgb(546, 31, 12, 11, $picker_r, $picker_g, $picker_b)
-    rect(546, 31, 12, 11, 7)
-    print_text(hex_str, 562, 33, 7)
+    print_text("COLOR PICKER [P#{$current_pal} COL:#{HEX_CHARS[act_col]}]", 290, 43, 0)
+    rectfill_rgb(446, 41, 14, 12, $picker_r, $picker_g, $picker_b)
+    rect(446, 41, 14, 12, 0)
+    print_text(hex_str, 464, 43, 0)
 
-    # [X] 閉じるボタン
-    rectfill(618, 30, 13, 12, 8)
-    rect(618, 30, 13, 12, 7)
-    print_text("X", 622, 32, 7)
+    # [X] 閉じるボタン (x: 525..540, y: 40..54)
+    rectfill(525, 40, 15, 14, 8)
+    rect(525, 40, 15, 14, 7)
+    print_text("X", 530, 43, 7)
 
-    # 2D HSV ボックス (80x80) & Hue レインボーバー (10x80)
-    draw_hsv_picker(510, 48, 80, 80, 594, 48, 10, 80, $picker_h)
-    rect(509, 47, 82, 82, 6)
-    rect(593, 47, 12, 82, 6)
+    # 2D HSV ボックス (100x100, x: 294, y: 64) & Hue レインボーバー (14x100, x: 402, y: 64)
+    draw_hsv_picker(294, 64, 100, 100, 402, 64, 14, 100, $picker_h)
+    rect(293, 63, 102, 102, 6)
+    rect(401, 63, 16, 102, 6)
 
     # SV カーソル
-    sv_cx = 510 + ($picker_s * 79) / 100
-    sv_cy = 48 + ((100 - $picker_v) * 79) / 100
+    sv_cx = 294 + ($picker_s * 99) / 100
+    sv_cy = 64 + ((100 - $picker_v) * 99) / 100
     rect(sv_cx - 2, sv_cy - 2, 5, 5, 0)
     rect(sv_cx - 1, sv_cy - 1, 3, 3, 7)
 
     # Hue バーカーソル
-    h_cy = 48 + ($picker_h * 79) / 359
-    rect(592, h_cy - 1, 14, 3, 7)
+    h_cy = 64 + ($picker_h * 99) / 359
+    rect(400, h_cy - 1, 18, 3, 7)
 
-    # 右側ユーティリティボタン [RST] [CPY] [PST] [ALL]
-    rectfill(608, 48, 23, 17, 2)
-    rect(608, 48, 23, 17, 6)
-    print_text("RST", 611, 53, 7)
+    # 右側ユーティリティボタン [RESET COL] [COPY RGB] [PASTE RGB] [RESET ALL] (x: 426..534)
+    rectfill(426, 64, 108, 16, 2)
+    rect(426, 64, 108, 16, 6)
+    print_text("RESET TO P0 BASE", 432, 68, 7)
 
-    rectfill(608, 68, 23, 17, 2)
-    rect(608, 68, 23, 17, 6)
-    print_text("CPY", 611, 73, 7)
+    rectfill(426, 84, 108, 16, 2)
+    rect(426, 84, 108, 16, 6)
+    print_text("COPY RGB HEX", 442, 88, 7)
 
-    rectfill(608, 88, 23, 17, $col_clipboard ? 3 : 1)
-    rect(608, 88, 23, 17, $col_clipboard ? 11 : 5)
-    print_text("PST", 611, 93, $col_clipboard ? 7 : 5)
+    rectfill(426, 104, 108, 16, $col_clipboard ? 3 : 1)
+    rect(426, 104, 108, 16, $col_clipboard ? 11 : 5)
+    print_text("PASTE RGB HEX", 438, 108, $col_clipboard ? 7 : 5)
 
-    rectfill(608, 108, 23, 17, 2)
-    rect(608, 108, 23, 17, 8)
-    print_text("ALL", 611, 113, 8)
+    rectfill(426, 124, 108, 16, 2)
+    rect(426, 124, 108, 16, 8)
+    print_text("RESET ALL P#{$current_pal}", 436, 128, 8)
 
-    # RGB スライダー (x: 520..602, width 82)
+    print_text("Click palette", 430, 145, 6)
+    print_text("to switch slot", 430, 155, 6)
+
+    # RGB スライダー (x: 308..500, width 192)
     # R
-    print_text("R", 510, 138, 8)
-    rectfill(520, 137, 82, 10, 0)
-    rw = ($picker_r * 80) / 255
-    rectfill_rgb(521, 138, rw, 8, $picker_r, 40, 40) if rw > 0
-    rect(520, 137, 82, 10, 5)
-    rectfill(520 + rw, 136, 3, 12, 7)
-    print_text("#{$picker_r}", 606, 138, 7)
+    print_text("R", 294, 173, 8)
+    rectfill(308, 172, 192, 10, 0)
+    rw = ($picker_r * 190) / 255
+    rectfill_rgb(309, 173, rw, 8, $picker_r, 40, 40) if rw > 0
+    rect(308, 172, 192, 10, 5)
+    rectfill(308 + rw, 171, 3, 12, 7)
+    print_text("#{$picker_r}", 506, 173, 7)
 
     # G
-    print_text("G", 510, 154, 11)
-    rectfill(520, 153, 82, 10, 0)
-    gw = ($picker_g * 80) / 255
-    rectfill_rgb(521, 154, gw, 8, 40, $picker_g, 40) if gw > 0
-    rect(520, 153, 82, 10, 5)
-    rectfill(520 + gw, 152, 3, 12, 7)
-    print_text("#{$picker_g}", 606, 154, 7)
+    print_text("G", 294, 188, 11)
+    rectfill(308, 187, 192, 10, 0)
+    gw = ($picker_g * 190) / 255
+    rectfill_rgb(309, 188, gw, 8, 40, $picker_g, 40) if gw > 0
+    rect(308, 187, 192, 10, 5)
+    rectfill(308 + gw, 186, 3, 12, 7)
+    print_text("#{$picker_g}", 506, 188, 7)
 
     # B
-    print_text("B", 510, 170, 12)
-    rectfill(520, 169, 82, 10, 0)
-    bw = ($picker_b * 80) / 255
-    rectfill_rgb(521, 170, bw, 8, 40, 80, $picker_b) if bw > 0
-    rect(520, 169, 82, 10, 5)
-    rectfill(520 + bw, 168, 3, 12, 7)
-    print_text("#{$picker_b}", 606, 170, 7)
+    print_text("B", 294, 203, 12)
+    rectfill(308, 202, 192, 10, 0)
+    bw = ($picker_b * 190) / 255
+    rectfill_rgb(309, 203, bw, 8, 40, 80, $picker_b) if bw > 0
+    rect(308, 202, 192, 10, 5)
+    rectfill(308 + bw, 201, 3, 12, 7)
+    print_text("#{$picker_b}", 506, 203, 7)
 
-    # 32色プリセットスウォッチ (16x2, x: 510..622, y: 196..222)
-    print_text("PRESETS (32 COLORS)", 510, 186, 6)
+    # 32色プリセットスウォッチ (16x2, 1セル15x12, x: 294..534, y: 228..252)
+    print_text("PRESETS (32 COLORS):", 294, 218, 6)
     2.times do |s_row|
       16.times do |s_col|
         sw = PRESET_SWATCHES[s_row * 16 + s_col]
-        sx = 510 + s_col * 7
-        sy = 196 + s_row * 13
-        rectfill_rgb(sx, sy, 7, 12, sw[0], sw[1], sw[2])
+        sx = 294 + s_col * 15
+        sy = 228 + s_row * 13
+        rectfill_rgb(sx, sy, 15, 12, sw[0], sw[1], sw[2])
       end
     end
-    rect(509, 195, 114, 27, 5)
-  else
-    print_text("COLOR PICKER CLOSED", 512, 36, 6)
-    print_text("Press K or [PICK]", 512, 50, 11)
-    print_text("or Right-Click Swatch", 512, 64, 11)
+    rect(293, 227, 242, 27, 5)
+    print_text("Esc / [X] / Outside click to close", 314, 261, 11)
   end
-
-  # 右ペイン下部: 常時表示のショートカット一覧 (y: 230..328)
-  line(510, 228, 630, 228, 5)
-  print_text("SHORTCUTS", 510, 234, 10)
-  print_text("B:Pen F:Fill E:Eras", 510, 248, 6)
-  print_text("M:Sel Ctrl+A:All", 510, 260, 6)
-  print_text("Ctrl+C/X/V: Copy/Pst", 510, 272, 6)
-  print_text("H/V/R:Flip/Rot Z:Undo", 510, 284, 6)
-  print_text("G:Grid O:Onion P:Pal", 510, 296, 6)
-  print_text("Tab:Size S:Save", 510, 308, 6)
-  print_text("R-Click: Eyedropper", 510, 320, 11)
 
   # ============================================================================
   # 5. 下部ステータスバー (y: 340..360, 幅 640)
@@ -2159,7 +2195,7 @@ def draw
   elsif $is_read_only
     print_text("🔒 READ-ONLY: Direct PNG reference (view-only). Edit PNG in external tool.", 10, 346, 10)
   else
-    print_text("Ready. Bank #{$current_bank} | Left: Canvas(32x32) | Center: 1x Sheet(256x256) | Right: Color Picker", 10, 346, 6)
+    print_text("Ready. Bank #{$current_bank} | Left: Canvas(256x256) | Right: 1x Sheet(256x256) | K / [PICK]: Color Picker", 10, 346, 6)
   end
   print_text("FPS:#{fps}", 584, 346, 11)
 
