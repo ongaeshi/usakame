@@ -47,6 +47,9 @@ Ruby コードを生成・修正する前に、必ず以下のドキュメント
 * Usakame エンジンでは `Math.sin(x)`, `Math.cos(x)`, `Math.sqrt(x)` のほか、トップレベル関数 `sin(x)`, `cos(x)`, `sqrt(x)` も直接呼び出し可能です。
 * 乱数は `rand()`（0.0...1.0）、`rand(max)`（0...max）、`rand(min..max)` が利用可能です。
 
+### ⑤ スプライト・カスタムパレット（`@PALETTE` / `@SPRITE`）の生成
+* スプライトを作成する際、標準16色（パレット0番）だけでは表現しきれない固有色や滑らかな3〜4段階グラデーションが必要な場合は、積極的に **`@PALETTE <id>`（`id >= 1`、ベースパレットからのピンポイント差分定義）** と **`@SPRITE <id> [WxH] pal:<id>`** をセットで定義してください（詳細は [.agents/skills/usakame-sprite/SKILL.md](.agents/skills/usakame-sprite/SKILL.md) を参照）。
+
 ---
 
 ## 3. テストと動作確認
