@@ -833,6 +833,75 @@ pub fn format_tail_blocks(blocks: &[TailBlock]) -> String {
     out
 }
 
+pub fn update_sprite_header_palette(header: &str, pal_id: i32) -> String {
+    let (main_part, comment_part) = match header.find('#') {
+        Some(idx) => (&header[..idx], Some(&header[idx..])),
+        None => (header, None),
+    };
+    let mut tokens: Vec<String> = main_part
+        .split_whitespace()
+        .filter(|tok| {
+            !tok.starts_with("pal:")
+                && !tok.starts_with("p:")
+                && !tok.starts_with("pal=")
+                && !tok.starts_with("p=")
+        })
+        .map(|s| s.to_string())
+        .collect();
+    if pal_id > 0 {
+        tokens.push(format!("pal:{}", pal_id));
+    }
+    let mut out = tokens.join(" ");
+    if let Some(c) = comment_part {
+        if !out.is_empty() {
+            out.push_str("  ");
+        }
+        out.push_str(c);
+    }
+    out
+}
+
+pub const BUNDLE_DEFAULT_PALETTE_RGBA: [[u8; 4]; 16] = [
+    [0, 0, 0, 255],
+    [29, 43, 83, 255],
+    [126, 37, 83, 255],
+    [0, 135, 81, 255],
+    [171, 82, 54, 255],
+    [95, 87, 79, 255],
+    [194, 195, 199, 255],
+    [255, 241, 232, 255],
+    [255, 0, 77, 255],
+    [255, 163, 0, 255],
+    [255, 236, 39, 255],
+    [0, 228, 54, 255],
+    [41, 173, 255, 255],
+    [131, 118, 156, 255],
+    [255, 119, 168, 255],
+    [255, 204, 170, 255],
+];
+
+pub fn format_palette_diff_lines(pal: &[[u8; 4]; 16]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for idx in 0..16 {
+        let cur = pal[idx];
+        let base = BUNDLE_DEFAULT_PALETTE_RGBA[idx];
+        if cur[0] != base[0] || cur[1] != base[1] || cur[2] != base[2] {
+            lines.push(format!(
+                "{}: #{:02X}{:02X}{:02X}",
+                col_to_hex_char(idx as u8),
+                cur[0],
+                cur[1],
+                cur[2]
+            ));
+        }
+    }
+    if lines.is_empty() {
+        let c0 = pal[0];
+        lines.push(format!("0: #{:02X}{:02X}{:02X}", c0[0], c0[1], c0[2]));
+    }
+    lines
+}
+
 pub fn patch_tail_sprites_as_text<F>(
     tail_data: &str,
     bank_id: i32,
@@ -842,9 +911,84 @@ pub fn patch_tail_sprites_as_text<F>(
 where
     F: Fn(&str) -> Option<Vec<Option<u8>>>,
 {
+    patch_tail_sprites_and_palettes_as_text(tail_data, bank_id, bank_pixels, check_emoji, None, None)
+}
+
+pub fn patch_tail_sprites_and_palettes_as_text<F>(
+    tail_data: &str,
+    bank_id: i32,
+    bank_pixels: &[Option<u8>],
+    check_emoji: Option<&F>,
+    custom_palettes: Option<&std::collections::HashMap<i32, [[u8; 4]; 16]>>,
+    sprite_palettes: Option<&std::collections::HashMap<i32, i32>>,
+) -> String
+where
+    F: Fn(&str) -> Option<Vec<Option<u8>>>,
+{
     let mut blocks = parse_tail_blocks(tail_data);
 
     if bank_id == 0 {
+        // Update or insert @PALETTE blocks if custom_palettes is provided
+        if let Some(pal_map) = custom_palettes {
+            let mut sorted_pal_ids: Vec<i32> = pal_map
+                .keys()
+                .copied()
+                .filter(|&id| id >= 1 && id != 99)
+                .collect();
+            sorted_pal_ids.sort();
+
+            let mut handled_pals = std::collections::HashSet::new();
+
+            // 1. Update existing @PALETTE blocks in place
+            for b in &mut blocks {
+                if let TailBlock::Other { header, lines } = b {
+                    if let Some(rest) = header.trim().strip_prefix("@PALETTE") {
+                        let pid = rest
+                            .split_whitespace()
+                            .next()
+                            .and_then(|s| s.parse::<i32>().ok())
+                            .unwrap_or(1);
+                        if pid >= 1 && pid != 99 {
+                            if let Some(pal_rgba) = pal_map.get(&pid) {
+                                *header = format!("@PALETTE {}", pid);
+                                *lines = format_palette_diff_lines(pal_rgba);
+                                handled_pals.insert(pid);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2. Insert newly created @PALETTE blocks before the first @SPRITE (or at top)
+            for pid in sorted_pal_ids {
+                if handled_pals.contains(&pid) {
+                    continue;
+                }
+                if let Some(pal_rgba) = pal_map.get(&pid) {
+                    let is_modified = (0..16).any(|idx| {
+                        let c = pal_rgba[idx];
+                        let b = BUNDLE_DEFAULT_PALETTE_RGBA[idx];
+                        c[0] != b[0] || c[1] != b[1] || c[2] != b[2]
+                    });
+                    let is_referenced = sprite_palettes
+                        .map(|sp| sp.values().any(|&v| v == pid))
+                        .unwrap_or(false);
+                    if is_modified || is_referenced {
+                        let new_pal_block = TailBlock::Other {
+                            header: format!("@PALETTE {}", pid),
+                            lines: format_palette_diff_lines(pal_rgba),
+                        };
+                        let insert_pos = blocks
+                            .iter()
+                            .position(|b| matches!(b, TailBlock::Sprite { .. }))
+                            .unwrap_or(blocks.len());
+                        blocks.insert(insert_pos, new_pal_block);
+                        blocks.insert(insert_pos + 1, TailBlock::CommentOrBlank(String::new()));
+                    }
+                }
+            }
+        }
+
         // Also remove any existing @BANK 0 block so that bank 0 is represented cleanly by @SPRITE
         blocks.retain(|b| match b {
             TailBlock::Bank { id, .. } if *id == 0 => false,
@@ -880,6 +1024,11 @@ where
             } = b
             {
                 if *id >= 0 && *id <= 255 {
+                    if let Some(sp_pals) = sprite_palettes {
+                        if let Some(&pal_id) = sp_pals.get(id) {
+                            *header = update_sprite_header_palette(header, pal_id);
+                        }
+                    }
                     let w = dims.0 as usize;
                     let h = dims.1 as usize;
                     let slot_x = (*id as usize % 16) * 16;
@@ -975,9 +1124,17 @@ where
                     }
                     new_lines.push(row);
                 }
+                let assigned_pal = sprite_palettes
+                    .and_then(|sp| sp.get(&(slot_id as i32)).copied())
+                    .unwrap_or(0);
+                let header_str = if assigned_pal > 0 {
+                    format!("@SPRITE {} pal:{}", slot_id, assigned_pal)
+                } else {
+                    format!("@SPRITE {}", slot_id)
+                };
                 let new_block = TailBlock::Sprite {
                     id: slot_id as i32,
-                    header: format!("@SPRITE {}", slot_id),
+                    header: header_str,
                     dims: (16, 16),
                     emoji: None,
                     lines: new_lines,
@@ -1023,6 +1180,20 @@ pub fn patch_resource_sprites_as_text<F>(
 where
     F: Fn(&str) -> Option<Vec<Option<u8>>>,
 {
+    patch_resource_sprites_and_palettes_as_text(full_source, bank_id, bank_pixels, check_emoji, None, None)
+}
+
+pub fn patch_resource_sprites_and_palettes_as_text<F>(
+    full_source: &str,
+    bank_id: i32,
+    bank_pixels: &[Option<u8>],
+    check_emoji: Option<&F>,
+    custom_palettes: Option<&std::collections::HashMap<i32, [[u8; 4]; 16]>>,
+    sprite_palettes: Option<&std::collections::HashMap<i32, i32>>,
+) -> String
+where
+    F: Fn(&str) -> Option<Vec<Option<u8>>>,
+{
     let has_end = full_source.lines().any(|l| {
         let t = l.trim_end_matches(['\r', '\n']).trim();
         t == "__END__"
@@ -1031,15 +1202,36 @@ where
 
     if has_end {
         let (code_part, tail_part) = split_ruby_source_and_tail(full_source);
-        let patched_tail = patch_tail_sprites_as_text(tail_part, bank_id, bank_pixels, check_emoji);
+        let patched_tail = patch_tail_sprites_and_palettes_as_text(
+            tail_part,
+            bank_id,
+            bank_pixels,
+            check_emoji,
+            custom_palettes,
+            sprite_palettes,
+        );
         let trimmed_code = code_part.trim_end();
         format!("{}\n\n__END__\n{}", trimmed_code, patched_tail.trim_start())
     } else {
         let has_directive = full_source.lines().any(|l| l.trim().starts_with('@'));
         if has_directive {
-            patch_tail_sprites_as_text(full_source, bank_id, bank_pixels, check_emoji)
+            patch_tail_sprites_and_palettes_as_text(
+                full_source,
+                bank_id,
+                bank_pixels,
+                check_emoji,
+                custom_palettes,
+                sprite_palettes,
+            )
         } else {
-            let patched_tail = patch_tail_sprites_as_text("", bank_id, bank_pixels, check_emoji);
+            let patched_tail = patch_tail_sprites_and_palettes_as_text(
+                "",
+                bank_id,
+                bank_pixels,
+                check_emoji,
+                custom_palettes,
+                sprite_palettes,
+            );
             let trimmed_code = full_source.trim_end();
             if patched_tail.trim().is_empty() {
                 full_source.to_string()

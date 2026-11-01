@@ -4914,8 +4914,283 @@ fn register_engine_api(
         }),
     );
 
-    // save_resource_bank(path, bank_id = 0, format = nil):
-    // 指定ファイル（game.rb または .spr等）へ指定バンクのデータを非破壊パッチ保存する。
+    // get_palette_color(pal_id, col_idx): 指定パレットの色番号 col_idx (0..15) の [r, g, b, is_modified] を返す
+    let palettes_for_get_pal_col = palettes.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "get_palette_color",
+        Box::new(move |_vm, args| {
+            let pal_id = arg_i32(args, 0, 0);
+            let col_idx = (arg_i32(args, 1, 0).rem_euclid(16)) as usize;
+            let base = PALETTE_RGBA[col_idx];
+            let rgba = if pal_id <= 0 {
+                base
+            } else {
+                palettes_for_get_pal_col
+                    .borrow()
+                    .get(&pal_id)
+                    .map(|p| p[col_idx])
+                    .unwrap_or(base)
+            };
+            let is_mod = pal_id > 0
+                && (rgba[0] != base[0] || rgba[1] != base[1] || rgba[2] != base[2]);
+            Ok(Rc::new(RObject::array(vec![
+                Rc::new(RObject::integer(rgba[0] as i64)),
+                Rc::new(RObject::integer(rgba[1] as i64)),
+                Rc::new(RObject::integer(rgba[2] as i64)),
+                Rc::new(RObject::boolean(is_mod)),
+            ])))
+        }),
+    );
+
+    // set_palette_color(pal_id, col_idx, r, g, b): パレット色を変更 (pal_id >= 1)
+    let palettes_for_set_pal_col = palettes.clone();
+    let state_for_set_pal_col = draw_state.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "set_palette_color",
+        Box::new(move |_vm, args| {
+            let pal_id = arg_i32(args, 0, 1);
+            if pal_id <= 0 {
+                return Ok(Rc::new(RObject::boolean(false)));
+            }
+            let col_idx = (arg_i32(args, 1, 0).rem_euclid(16)) as usize;
+            let r = arg_i32(args, 2, 0).clamp(0, 255) as u8;
+            let g = arg_i32(args, 3, 0).clamp(0, 255) as u8;
+            let b = arg_i32(args, 4, 0).clamp(0, 255) as u8;
+            {
+                let mut pals = palettes_for_set_pal_col.borrow_mut();
+                let entry = pals.entry(pal_id).or_insert(PALETTE_RGBA);
+                entry[col_idx] = [r, g, b, 255];
+            }
+            {
+                let mut st = state_for_set_pal_col.borrow_mut();
+                if st.active_pal_bank == pal_id {
+                    st.palette_rgba[col_idx] = [r, g, b, 255];
+                }
+            }
+            Ok(Rc::new(RObject::boolean(true)))
+        }),
+    );
+
+    // copy_palette(src_pal_id, dst_pal_id): src_pal_id の16色を dst_pal_id (>= 1) に複製
+    let palettes_for_copy_pal = palettes.clone();
+    let state_for_copy_pal = draw_state.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "copy_palette",
+        Box::new(move |_vm, args| {
+            let src_id = arg_i32(args, 0, 0);
+            let dst_id = arg_i32(args, 1, 1);
+            if dst_id <= 0 {
+                return Ok(Rc::new(RObject::boolean(false)));
+            }
+            let src_pal = if src_id <= 0 {
+                PALETTE_RGBA
+            } else {
+                palettes_for_copy_pal
+                    .borrow()
+                    .get(&src_id)
+                    .copied()
+                    .unwrap_or(PALETTE_RGBA)
+            };
+            palettes_for_copy_pal.borrow_mut().insert(dst_id, src_pal);
+            let mut st = state_for_copy_pal.borrow_mut();
+            if st.active_pal_bank == dst_id {
+                st.palette_rgba = src_pal;
+            }
+            Ok(Rc::new(RObject::boolean(true)))
+        }),
+    );
+
+    // hsv_to_rgb(h_deg, s_pct, v_pct) -> [r, g, b]
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "hsv_to_rgb",
+        Box::new(|_vm, args| {
+            let h = arg_f32(args, 0, 0.0).rem_euclid(360.0);
+            let s = (arg_f32(args, 1, 100.0) / 100.0).clamp(0.0, 1.0);
+            let v = (arg_f32(args, 2, 100.0) / 100.0).clamp(0.0, 1.0);
+            let c = v * s;
+            let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+            let m = v - c;
+            let (r1, g1, b1) = if h < 60.0 {
+                (c, x, 0.0)
+            } else if h < 120.0 {
+                (x, c, 0.0)
+            } else if h < 180.0 {
+                (0.0, c, x)
+            } else if h < 240.0 {
+                (0.0, x, c)
+            } else if h < 300.0 {
+                (x, 0.0, c)
+            } else {
+                (c, 0.0, x)
+            };
+            let r = ((r1 + m) * 255.0).round().clamp(0.0, 255.0) as i64;
+            let g = ((g1 + m) * 255.0).round().clamp(0.0, 255.0) as i64;
+            let b = ((b1 + m) * 255.0).round().clamp(0.0, 255.0) as i64;
+            Ok(Rc::new(RObject::array(vec![
+                Rc::new(RObject::integer(r)),
+                Rc::new(RObject::integer(g)),
+                Rc::new(RObject::integer(b)),
+            ])))
+        }),
+    );
+
+    // rgb_to_hsv(r, g, b) -> [h_deg, s_pct, v_pct]
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "rgb_to_hsv",
+        Box::new(|_vm, args| {
+            let r = arg_i32(args, 0, 0).clamp(0, 255) as f32 / 255.0;
+            let g = arg_i32(args, 1, 0).clamp(0, 255) as f32 / 255.0;
+            let b = arg_i32(args, 2, 0).clamp(0, 255) as f32 / 255.0;
+            let max_c = r.max(g).max(b);
+            let min_c = r.min(g).min(b);
+            let delta = max_c - min_c;
+            let h = if delta < 1e-5 {
+                0.0
+            } else if (max_c - r).abs() < 1e-5 {
+                60.0 * (((g - b) / delta).rem_euclid(6.0))
+            } else if (max_c - g).abs() < 1e-5 {
+                60.0 * (((b - r) / delta) + 2.0)
+            } else {
+                60.0 * (((r - g) / delta) + 4.0)
+            };
+            let s = if max_c < 1e-5 { 0.0 } else { delta / max_c };
+            let v = max_c;
+            let h_deg = (h.round() as i64).rem_euclid(360);
+            let s_pct = (s * 100.0).round().clamp(0.0, 100.0) as i64;
+            let v_pct = (v * 100.0).round().clamp(0.0, 100.0) as i64;
+            Ok(Rc::new(RObject::array(vec![
+                Rc::new(RObject::integer(h_deg)),
+                Rc::new(RObject::integer(s_pct)),
+                Rc::new(RObject::integer(v_pct)),
+            ])))
+        }),
+    );
+
+    // rectfill_rgb(x, y, w, h, r, g, b): 任意のRGB値で塗りつぶし矩形を描画
+    let state_for_rect_rgb = draw_state.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "rectfill_rgb",
+        Box::new(move |_vm, args| {
+            if headless {
+                return Ok(Rc::new(RObject::nil()));
+            }
+            let x = arg_i32(args, 0, 0);
+            let y = arg_i32(args, 1, 0);
+            let w = arg_i32(args, 2, 16);
+            let h = arg_i32(args, 3, 16);
+            let r = arg_i32(args, 4, 255).clamp(0, 255) as u8;
+            let g = arg_i32(args, 5, 255).clamp(0, 255) as u8;
+            let b = arg_i32(args, 6, 255).clamp(0, 255) as u8;
+            if w > 0 && h > 0 {
+                let state = state_for_rect_rgb.borrow();
+                let sx = (x - state.cam_x) as f32;
+                let sy = (y - state.cam_y) as f32;
+                draw_rectangle(
+                    sx,
+                    sy,
+                    w as f32,
+                    h as f32,
+                    Color::from_rgba(r, g, b, 255),
+                );
+            }
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
+
+    // draw_hsv_picker(sv_x, sv_y, sv_w, sv_h, h_x, h_y, h_w, h_h, hue_deg):
+    // 2D 彩度・明度グラデーションボックスと色相バーを高速描画する
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "draw_hsv_picker",
+        Box::new(move |_vm, args| {
+            if headless {
+                return Ok(Rc::new(RObject::nil()));
+            }
+            let sv_x = arg_i32(args, 0, 0);
+            let sv_y = arg_i32(args, 1, 0);
+            let sv_w = arg_i32(args, 2, 80).max(1);
+            let sv_h = arg_i32(args, 3, 80).max(1);
+            let h_x = arg_i32(args, 4, 90);
+            let h_y = arg_i32(args, 5, 0);
+            let h_w = arg_i32(args, 6, 12).max(1);
+            let h_h = arg_i32(args, 7, 80).max(1);
+            let hue = arg_f32(args, 8, 0.0).rem_euclid(360.0);
+
+            let hsv_rgb = |hh: f32, ss: f32, vv: f32| -> Color {
+                let c = vv * ss;
+                let x = c * (1.0 - ((hh / 60.0) % 2.0 - 1.0).abs());
+                let m = vv - c;
+                let (r1, g1, b1) = if hh < 60.0 {
+                    (c, x, 0.0)
+                } else if hh < 120.0 {
+                    (x, c, 0.0)
+                } else if hh < 180.0 {
+                    (0.0, c, x)
+                } else if hh < 240.0 {
+                    (0.0, x, c)
+                } else if hh < 300.0 {
+                    (x, 0.0, c)
+                } else {
+                    (c, 0.0, x)
+                };
+                Color::new(r1 + m, g1 + m, b1 + m, 1.0)
+            };
+
+            let step = 2;
+            let mut dy = 0;
+            while dy < sv_h {
+                let bh = (sv_h - dy).min(step);
+                let v = 1.0 - (dy as f32 / (sv_h - 1).max(1) as f32);
+                let mut dx = 0;
+                while dx < sv_w {
+                    let bw = (sv_w - dx).min(step);
+                    let s = dx as f32 / (sv_w - 1).max(1) as f32;
+                    let col = hsv_rgb(hue, s, v);
+                    draw_rectangle(
+                        (sv_x + dx) as f32,
+                        (sv_y + dy) as f32,
+                        bw as f32,
+                        bh as f32,
+                        col,
+                    );
+                    dx += step;
+                }
+                dy += step;
+            }
+
+            let mut hy = 0;
+            while hy < h_h {
+                let bh = (h_h - hy).min(step);
+                let bar_hue = (hy as f32 / (h_h - 1).max(1) as f32) * 359.9;
+                let col = hsv_rgb(bar_hue, 1.0, 1.0);
+                draw_rectangle(
+                    h_x as f32,
+                    (h_y + hy) as f32,
+                    h_w as f32,
+                    bh as f32,
+                    col,
+                );
+                hy += step;
+            }
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
+
+    // save_resource_bank(path, bank_id = 0, format = nil, sprite_palettes = nil):
+    // 指定ファイル（game.rb または .spr等）へ指定バンクのデータ・パレットを非破壊パッチ保存する。
     // format が "text" / :text の場合は @SPRITE テキスト形式。
     // format が "b64" / :b64 / true の場合は @BANK <id> (Base64 PNG) 形式。
     // format が nil / false の場合は自動判定:
@@ -4923,6 +5198,7 @@ fn register_engine_api(
     //   - bank_id > 0: Base64 形式。
     let banks_for_save_bank = banks.clone();
     let emoji_for_save_bank = emoji_atlas.clone();
+    let palettes_for_save_bank = palettes.clone();
     mrb_define_cmethod(
         vm,
         obj_class.clone(),
@@ -4941,6 +5217,19 @@ fn register_engine_api(
                 RValue::String(s, _) => String::from_utf8(s.borrow().clone()).ok(),
                 RValue::Bool(true) => Some("b64".to_string()),
                 _ => None,
+            });
+            let sprite_pals_opt: Option<HashMap<i32, i32>> = args.get(3).and_then(|v| {
+                if let RValue::Hash(ref h_cell) = v.value {
+                    let mut map = HashMap::new();
+                    for (_, (k, val)) in h_cell.borrow().iter() {
+                        if let (RValue::Integer(kid), RValue::Integer(pid)) = (&k.value, &val.value) {
+                            map.insert(*kid as i32, *pid as i32);
+                        }
+                    }
+                    Some(map)
+                } else {
+                    None
+                }
             });
 
             let banks_ref = banks_for_save_bank.borrow();
@@ -4967,16 +5256,19 @@ fn register_engine_api(
             let new_content = if is_text_mode {
                 let pixels = bank.get_pixels();
                 let emoji_ref = emoji_for_save_bank.borrow();
+                let pals_ref = palettes_for_save_bank.borrow();
                 let checker = |em: &str| -> Option<Vec<Option<u8>>> {
                     emoji_ref.extract_sprite(em).map(|sp| {
                         sp.rgba.chunks_exact(4).map(rgba_to_palette_opt).collect()
                     })
                 };
-                bundle::patch_resource_sprites_as_text(
+                bundle::patch_resource_sprites_and_palettes_as_text(
                     &current_content,
                     bank_id,
                     &pixels,
                     Some(&checker),
+                    Some(&*pals_ref),
+                    sprite_pals_opt.as_ref(),
                 )
             } else {
                 let b64 = match bank.to_base64_png() {
@@ -5030,9 +5322,10 @@ fn register_engine_api(
         }),
     );
 
-    // export_bank_sprites_text(path_or_bank_id = 0, bank_id = 0):
-    // バンク内の非空スプライトを @SPRITE テキスト形式で生成して返す。
+    // export_bank_sprites_text(path_or_bank_id = 0, bank_id = 0, sprite_palettes = nil):
+    // バンク内の非空スプライトおよびカスタムパレットを @PALETTE / @SPRITE テキスト形式で生成して返す。
     let banks_for_export = banks.clone();
+    let palettes_for_export = palettes.clone();
     mrb_define_cmethod(
         vm,
         obj_class.clone(),
@@ -5050,6 +5343,19 @@ fn register_engine_api(
                 },
                 None => (None, 0),
             };
+            let sprite_pals_opt: Option<HashMap<i32, i32>> = args.get(2).and_then(|v| {
+                if let RValue::Hash(ref h_cell) = v.value {
+                    let mut map = HashMap::new();
+                    for (_, (k, val)) in h_cell.borrow().iter() {
+                        if let (RValue::Integer(kid), RValue::Integer(pid)) = (&k.value, &val.value) {
+                            map.insert(*kid as i32, *pid as i32);
+                        }
+                    }
+                    Some(map)
+                } else {
+                    None
+                }
+            });
 
             let banks_ref = banks_for_export.borrow();
             let pixels = if let Some(bank) = banks_ref.get(&bank_id) {
@@ -5058,14 +5364,28 @@ fn register_engine_api(
                 vec![None; BANK_PIXELS]
             };
 
+            let pals_ref = palettes_for_export.borrow();
             let current_content = path_str.and_then(|p| std::fs::read_to_string(p).ok());
             let exported = if let Some(ref content) = current_content {
                 let dummy_emoji: Option<&fn(&str) -> Option<Vec<Option<u8>>>> = None;
-                let patched = bundle::patch_tail_sprites_as_text(content, bank_id, &pixels, dummy_emoji);
+                let patched = bundle::patch_tail_sprites_and_palettes_as_text(
+                    content,
+                    bank_id,
+                    &pixels,
+                    dummy_emoji,
+                    Some(&*pals_ref),
+                    sprite_pals_opt.as_ref(),
+                );
                 let blocks = bundle::parse_tail_blocks(&patched);
                 let sprite_blocks: Vec<_> = blocks
                     .into_iter()
-                    .filter(|b| matches!(b, bundle::TailBlock::Sprite { .. }))
+                    .filter(|b| match b {
+                        bundle::TailBlock::Sprite { .. } => true,
+                        bundle::TailBlock::Other { header, .. } => {
+                            header.trim().starts_with("@PALETTE")
+                        }
+                        _ => false,
+                    })
                     .collect();
                 bundle::format_tail_blocks(&sprite_blocks)
             } else {

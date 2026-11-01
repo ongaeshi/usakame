@@ -196,16 +196,26 @@ def is_numeric_arg?(s)
 end
 
 $target_path = "game.rb"
-if ARGV && ARGV.size > 0 && ARGV[0]
-  # 第1引数が数値ならバンク番号、それ以外ならパス
-  if is_numeric_arg?(ARGV[0])
-    $current_bank = ARGV[0].to_i
-  else
-    $target_path = ARGV[0]
+$open_picker_on_start = false
+if ARGV && ARGV.size > 0
+  pos_args = []
+  ARGV.each do |arg|
+    if arg == "--picker" || arg == "-k"
+      $open_picker_on_start = true
+    elsif arg
+      pos_args << arg
+    end
   end
-end
-if ARGV && ARGV.size > 1 && ARGV[1]
-  $current_bank = ARGV[1].to_i
+  if pos_args.size > 0 && pos_args[0]
+    if is_numeric_arg?(pos_args[0])
+      $current_bank = pos_args[0].to_i
+    else
+      $target_path = pos_args[0]
+    end
+  end
+  if pos_args.size > 1 && pos_args[1]
+    $current_bank = pos_args[1].to_i
+  end
 end
 
 $save_path = $target_path
@@ -259,10 +269,134 @@ end
 load_source = ($save_path != $target_path && read_file($save_path)) ? $save_path : $target_path
 $is_read_only = is_resource_read_only(load_source) || is_resource_read_only($save_path) || is_resource_read_only($target_path)
 
-# パレット管理
+# パレット管理 & カラーピッカー
 $current_pal = 0
 $available_palettes = [0]
 $sprite_palettes = {}
+
+HEX_CHARS = ["0","1","2","3","4","5","6","7","8","9","A","B","C","D","E","F"]
+
+# 32色プリセット (上段: PICO-8標準16色, 下段: PICO-8拡張/裏パレット16色)
+PRESET_SWATCHES = [
+  # Row 0: Standard 16
+  [0, 0, 0],       [29, 43, 83],    [126, 37, 83],   [0, 135, 81],
+  [171, 82, 54],   [95, 87, 79],    [194, 195, 199], [255, 241, 232],
+  [255, 0, 77],    [255, 163, 0],   [255, 236, 39],  [0, 228, 54],
+  [41, 173, 255],  [131, 118, 156], [255, 119, 168], [255, 204, 170],
+  # Row 1: Extended 16 (Secret PICO-8 / Retro Harmony)
+  [41, 24, 20],    [17, 29, 53],    [66, 33, 54],    [18, 83, 89],
+  [116, 47, 41],   [73, 51, 59],    [162, 136, 121], [243, 239, 125],
+  [190, 18, 80],   [255, 108, 36],  [168, 231, 46],  [0, 181, 67],
+  [6, 90, 181],    [117, 70, 101],  [255, 110, 89],  [255, 157, 129]
+]
+
+$show_color_picker = false
+$picker_h = 0
+$picker_s = 100
+$picker_v = 100
+$picker_r = 255
+$picker_g = 0
+$picker_b = 77
+$picker_drag = nil # :sv, :hue, :r, :g, :b
+$col_clipboard = nil
+
+def byte_to_hex(n)
+  v = [[n.to_i, 0].max, 255].min
+  HEX_CHARS[(v / 16) % 16] + HEX_CHARS[v % 16]
+end
+
+def rgb_to_hex_str(r, g, b)
+  "#" + byte_to_hex(r) + byte_to_hex(g) + byte_to_hex(b)
+end
+
+def sync_picker_from_current_color
+  col_idx = $current_col || 0
+  info = get_palette_color($current_pal, col_idx)
+  if info
+    $picker_r = info[0]
+    $picker_g = info[1]
+    $picker_b = info[2]
+    hsv = rgb_to_hsv($picker_r, $picker_g, $picker_b)
+    if hsv
+      # 彩度0（白〜黒）のときは現在の色相を維持して使いやすくする
+      $picker_h = hsv[0] if hsv[1] > 0
+      $picker_s = hsv[1]
+      $picker_v = hsv[2]
+    end
+  end
+end
+
+def duplicate_current_palette
+  new_id = 1
+  while $available_palettes.include?(new_id) || new_id == 99
+    new_id += 1
+  end
+  src_id = $current_pal
+  copy_palette(src_id, new_id)
+  $available_palettes << new_id
+  $available_palettes.sort!
+  $current_pal = new_id
+  cur_spr_id = ($sel_x / 16) + ($sel_y / 16) * 16
+  $sprite_palettes[cur_spr_id] = $current_pal
+  sync_picker_from_current_color
+  sfx(:powerup)
+  notify("COPIED P#{src_id} -> P#{new_id} (ASSIGNED TO ##{cur_spr_id})")
+end
+
+def ensure_editable_palette
+  if $current_pal <= 0
+    new_id = 1
+    while $available_palettes.include?(new_id) || new_id == 99
+      new_id += 1
+    end
+    copy_palette(0, new_id)
+    $available_palettes << new_id
+    $available_palettes.sort!
+    $current_pal = new_id
+    cur_spr_id = ($sel_x / 16) + ($sel_y / 16) * 16
+    $sprite_palettes[cur_spr_id] = $current_pal
+    notify("AUTO-CREATED P#{new_id} FROM P0")
+  end
+end
+
+def apply_picker_rgb(r, g, b, update_hsv = false)
+  return if $is_read_only
+  $current_col = 8 if $current_col.nil?
+  ensure_editable_palette
+  $picker_r = [[r.to_i, 0].max, 255].min
+  $picker_g = [[g.to_i, 0].max, 255].min
+  $picker_b = [[b.to_i, 0].max, 255].min
+  if update_hsv
+    hsv = rgb_to_hsv($picker_r, $picker_g, $picker_b)
+    if hsv
+      $picker_h = hsv[0] if hsv[1] > 0
+      $picker_s = hsv[1]
+      $picker_v = hsv[2]
+    end
+  end
+  set_palette_color($current_pal, $current_col, $picker_r, $picker_g, $picker_b)
+  cur_spr_id = ($sel_x / 16) + ($sel_y / 16) * 16
+  $sprite_palettes[cur_spr_id] = $current_pal
+end
+
+def reset_current_palette_color
+  return if $current_pal <= 0
+  col_idx = $current_col || 0
+  base = get_palette_color(0, col_idx)
+  if base
+    apply_picker_rgb(base[0], base[1], base[2], true)
+    sfx(:click)
+    notify("RESET COL #{HEX_CHARS[col_idx]} TO PICO-8 BASE")
+  end
+end
+
+def reset_all_palette_colors
+  return if $current_pal <= 0
+  copy_palette(0, $current_pal)
+  sync_picker_from_current_color
+  sfx(:boom)
+  notify("RESET ALL P#{$current_pal} COLORS TO P0")
+end
 
 def sync_sprite_default_palette
   cur_spr_id = ($sel_x / 16) + ($sel_y / 16) * 16
@@ -270,6 +404,7 @@ def sync_sprite_default_palette
   if def_pal
     if $current_pal != def_pal
       $current_pal = def_pal
+      sync_picker_from_current_color
       notify("PALETTE: P#{$current_pal} (AUTO)")
     end
   end
@@ -278,11 +413,17 @@ end
 def reload_palettes(source)
   pals = load_resource_palettes(source)
   if pals && !pals.empty?
-    $available_palettes = pals
-    $current_pal = pals[0] unless $available_palettes.include?($current_pal)
+    filtered = []
+    pals.each do |pid|
+      filtered << pid if pid != 99
+    end
+    filtered << 0 unless filtered.include?(0)
+    $available_palettes = filtered
+    $current_pal = filtered[0] unless $available_palettes.include?($current_pal)
   end
   $sprite_palettes = load_resource_sprite_palettes(source) || {}
   sync_sprite_default_palette
+  sync_picker_from_current_color
 end
 
 def set_selection(gx, gy)
@@ -307,11 +448,16 @@ def cycle_palette(dir)
   end
   cur_spr_id = ($sel_x / 16) + ($sel_y / 16) * 16
   $sprite_palettes[cur_spr_id] = $current_pal
+  sync_picker_from_current_color
   sfx(:click)
   notify("PALETTE: P#{$current_pal}")
 end
 
 reload_palettes(load_source)
+if $open_picker_on_start
+  $show_color_picker = true
+  sync_picker_from_current_color
+end
 
 if $is_read_only
   # テクスチャ（PNG参照）から読み込んだ場合：リードオンリーモードなので減色処理は不要！
@@ -385,6 +531,10 @@ def switch_bank(new_bank)
   end
 
   reload_palettes(load_source)
+if $open_picker_on_start
+  $show_color_picker = true
+  sync_picker_from_current_color
+end
 end
 
 # ------------------------------------------------------------------------------
@@ -397,10 +547,10 @@ def save_to_target
     return
   end
 
-  if save_resource_bank($save_path, $current_bank)
+  if save_resource_bank($save_path, $current_bank, nil, $sprite_palettes)
     $last_target_mtime = file_mtime($save_path)
     sfx(:powerup)
-    notify("SAVED BANK #{$current_bank} TO #{$save_path}!")
+    notify("SAVED BANK #{$current_bank} & PALETTES TO #{$save_path}!")
   else
     sfx(:boom)
     notify("ERROR: FAILED TO SAVE #{$save_path}")
@@ -408,14 +558,14 @@ def save_to_target
 end
 
 def export_all
-  text = export_bank_sprites_text($save_path, $current_bank)
+  text = export_bank_sprites_text($save_path, $current_bank, $sprite_palettes)
   puts "\n# =================================================="
   puts "# 🐰 USAKAME BANK DATA (Bank #{$current_bank})"
   puts "# =================================================="
   puts text
   puts "# ==================================================\n"
   sfx(:powerup)
-  notify("EXPORTED @SPRITE DATA TO CONSOLE!")
+  notify("EXPORTED @PALETTE & @SPRITE DATA TO CONSOLE!")
 end
 
 # 塗りつぶし (選択領域 $edit_w x $edit_h 内での高速 DFS & 部分更新)
@@ -591,9 +741,15 @@ def update
     end
   end
 
-  # パレット切り替え (P / Shift+P)
+  # パレット切り替え (P / Shift+P) & カラーピッカー表示切替 (K)
   if btnp(:p)
     cycle_palette(btn(:shift) ? -1 : 1)
+  end
+  if btnp(:k)
+    $show_color_picker = !$show_color_picker
+    sync_picker_from_current_color if $show_color_picker
+    sfx(:click)
+    notify($show_color_picker ? "COLOR PICKER: OPEN" : "COLOR PICKER: CLOSED")
   end
 
   # ツールショートカット
@@ -622,9 +778,11 @@ def update
   wheel = mouse_wheel
   if wheel > 0.2
     $current_col = ($current_col.nil? ? 15 : ($current_col - 1) % 16)
+    sync_picker_from_current_color
     sfx(:cursor)
   elsif wheel < -0.2
     $current_col = ($current_col.nil? ? 0 : ($current_col + 1) % 16)
+    sync_picker_from_current_color
     sfx(:cursor)
   end
 
@@ -637,18 +795,114 @@ def update
     return
   end
 
-  # --- ミニマップ上でのドラッグ／クリック判定 ---
-  in_minimap = (mx >= $minimap_x && mx < $minimap_x + $minimap_size &&
-                my >= $minimap_y && my < $minimap_y + $minimap_size)
-  if in_minimap && (btn(:mouse_l) || btn(:mouse_r))
-    gx = ((mx - $minimap_x) / 8) * 16
-    gy = ((my - $minimap_y) / 8) * 16
-    gx = [[gx, 0].max, 256 - $edit_w].min
-    gy = [[gy, 0].max, 256 - $edit_h].min
-    set_selection(gx, gy)
+  # --- カラーピッカーまたはミニマップの操作 ---
+  if $show_color_picker
+    if !btn(:mouse_l)
+      $picker_drag = nil
+    end
+
+    if btnp(:mouse_l)
+      # [×] 閉じるボタン (x: 460..474, y: 28..42)
+      if mx >= 460 && mx <= 474 && my >= 28 && my <= 42
+        $show_color_picker = false
+        $picker_drag = nil
+        sfx(:click)
+      # SV 2Dボックス開始 (x: 344..428, y: 48..132)
+      elsif mx >= 344 && mx <= 428 && my >= 48 && my <= 132
+        $picker_drag = :sv
+      # Hue バー開始 (x: 434..446, y: 48..132)
+      elsif mx >= 434 && mx <= 446 && my >= 48 && my <= 132
+        $picker_drag = :hue
+      # R スライダー (x: 356..446, y: 138..150)
+      elsif mx >= 356 && mx <= 446 && my >= 138 && my <= 150
+        $picker_drag = :r
+      # G スライダー (x: 356..446, y: 154..166)
+      elsif mx >= 356 && mx <= 446 && my >= 154 && my <= 166
+        $picker_drag = :g
+      # B スライダー (x: 356..446, y: 170..182)
+      elsif mx >= 356 && mx <= 446 && my >= 170 && my <= 182
+        $picker_drag = :b
+      # 右側ユーティリティボタン群 (x: 450..474)
+      elsif mx >= 450 && mx <= 474
+        if my >= 48 && my <= 66 # [RST] 1色リセット
+          reset_current_palette_color
+        elsif my >= 70 && my <= 88 # [CPY] 色コピー
+          $col_clipboard = [$picker_r, $picker_g, $picker_b]
+          sfx(:coin)
+          notify("COPIED COLOR #{rgb_to_hex_str($picker_r, $picker_g, $picker_b)}")
+        elsif my >= 92 && my <= 110 # [PST] 色ペースト
+          if $col_clipboard
+            apply_picker_rgb($col_clipboard[0], $col_clipboard[1], $col_clipboard[2], true)
+            sfx(:powerup)
+            notify("PASTED COLOR #{rgb_to_hex_str($picker_r, $picker_g, $picker_b)}")
+          end
+        elsif my >= 114 && my <= 132 # [ALL] パレット全色リセット
+          reset_all_palette_colors
+        end
+      # 32色プリセットスウォッチ (x: 344..471, y: 198..225, 16列x2段, 1セル8x14)
+      elsif mx >= 344 && mx < 472 && my >= 198 && my < 226
+        sw_col = (mx - 344) / 8
+        sw_row = (my - 198) / 14
+        sw_idx = sw_row * 16 + sw_col
+        if sw_idx >= 0 && sw_idx < PRESET_SWATCHES.size
+          rgb = PRESET_SWATCHES[sw_idx]
+          apply_picker_rgb(rgb[0], rgb[1], rgb[2], true)
+          sfx(:select)
+          notify("PRESET: #{rgb_to_hex_str(rgb[0], rgb[1], rgb[2])}")
+        end
+      end
+    end
+
+    # ドラッグ中の連続更新
+    if btn(:mouse_l) && $picker_drag
+      if $picker_drag == :sv
+        $picker_s = (((mx - 344) * 100) / 83).clamp(0, 100)
+        $picker_v = (100 - (((my - 48) * 100) / 83)).clamp(0, 100)
+        rgb = hsv_to_rgb($picker_h, $picker_s, $picker_v)
+        apply_picker_rgb(rgb[0], rgb[1], rgb[2], false) if rgb
+      elsif $picker_drag == :hue
+        $picker_h = (((my - 48) * 359) / 83).clamp(0, 359)
+        rgb = hsv_to_rgb($picker_h, $picker_s, $picker_v)
+        apply_picker_rgb(rgb[0], rgb[1], rgb[2], false) if rgb
+      elsif $picker_drag == :r
+        nr = (((mx - 356) * 255) / 89).clamp(0, 255)
+        apply_picker_rgb(nr, $picker_g, $picker_b, true)
+      elsif $picker_drag == :g
+        ng = (((mx - 356) * 255) / 89).clamp(0, 255)
+        apply_picker_rgb($picker_r, ng, $picker_b, true)
+      elsif $picker_drag == :b
+        nb = (((mx - 356) * 255) / 89).clamp(0, 255)
+        apply_picker_rgb($picker_r, $picker_g, nb, true)
+      end
+    end
+  else
+    # --- ミニマップ上でのドラッグ／クリック判定 ---
+    in_minimap = (mx >= $minimap_x && mx < $minimap_x + $minimap_size &&
+                  my >= $minimap_y && my < $minimap_y + $minimap_size)
+    if in_minimap && (btn(:mouse_l) || btn(:mouse_r))
+      gx = ((mx - $minimap_x) / 8) * 16
+      gy = ((my - $minimap_y) / 8) * 16
+      gx = [[gx, 0].max, 256 - $edit_w].min
+      gy = [[gy, 0].max, 256 - $edit_h].min
+      set_selection(gx, gy)
+    end
   end
 
-  # --- ボタンクリック判定 (mouse_l / mouse_r) ---
+  # --- 4x4 パレットの右クリックで即座にカラーピッカーを起動 ---
+  if btnp(:mouse_r) && mx >= 220 && mx < 320 && my >= 88 && my < 188
+    col_idx = (mx - 220) / 25
+    row_idx = (my - 88) / 25
+    if col_idx >= 0 && col_idx < 4 && row_idx >= 0 && row_idx < 4
+      $current_col = row_idx * 4 + col_idx
+      $current_tool = :pen if $current_tool == :eraser
+      $show_color_picker = true
+      sync_picker_from_current_color
+      sfx(:select)
+      notify("EDITING P#{$current_pal} COL #{HEX_CHARS[$current_col]}")
+    end
+  end
+
+  # --- ボタンクリック判定 (mouse_l) ---
   if btnp(:mouse_l)
     # 1. ヘッダーボタン (y: 3..21)
     if my >= 3 && my <= 21
@@ -698,12 +952,19 @@ def update
       end
     end
 
-    # 2.5 パレット切り替え [< P0 >] (y: 66..82)
+    # 2.5 パレット操作バー [< P0 >] [+DUP] [PICK] (y: 66..82)
     if my >= 66 && my <= 82
-      if mx >= 266 && mx <= 282 # [<]
+      if mx >= 220 && mx <= 233 # [<]
         cycle_palette(-1)
-      elsif mx >= 310 && mx <= 328 # [>]
+      elsif mx >= 261 && mx <= 274 # [>]
         cycle_palette(1)
+      elsif mx >= 277 && mx <= 306 # [+DUP] パレット複製・新規作成
+        duplicate_current_palette
+      elsif mx >= 309 && mx <= 336 # [PICK] カラーピッカー開閉
+        $show_color_picker = !$show_color_picker
+        sync_picker_from_current_color if $show_color_picker
+        sfx(:click)
+        notify($show_color_picker ? "COLOR PICKER: OPEN" : "COLOR PICKER: CLOSED")
       end
     end
 
@@ -714,6 +975,7 @@ def update
       if col_idx >= 0 && col_idx < 4 && row_idx >= 0 && row_idx < 4
         $current_col = row_idx * 4 + col_idx
         $current_tool = :pen if $current_tool == :eraser
+        sync_picker_from_current_color
         sfx(:select)
       end
     end
@@ -778,7 +1040,7 @@ def update
   in_canvas = (mx >= $canvas_x && mx < $canvas_x + CANVAS_GRID * $cell_size &&
                my >= $canvas_y && my < $canvas_y + CANVAS_GRID * $cell_size)
 
-  if in_canvas
+  if in_canvas && $picker_drag.nil?
     if $is_read_only
       if btnp(:mouse_l) || btnp(:mouse_r)
         sfx(:boom)
@@ -798,6 +1060,7 @@ def update
           picked = get_bank_pixel($current_bank, gx, gy)
           if picked != $current_col
             $current_col = picked
+            sync_picker_from_current_color
             sfx(:pickup)
             col_name = picked ? COLOR_NAMES[picked] : "TRANS"
             notify("PICKED: #{col_name}")
@@ -819,6 +1082,7 @@ def update
               picked = get_bank_pixel($current_bank, gx, gy)
               $current_col = picked
               $current_tool = :pen
+              sync_picker_from_current_color
               sfx(:pickup)
               notify("PICKED: #{picked ? COLOR_NAMES[picked] : 'TRANS'}")
             end
@@ -1043,23 +1307,28 @@ def draw
   fps_label = ($anim_speed == 4 ? "FAST" : ($anim_speed == 6 ? "MID" : ($anim_speed == 12 ? "SLOW" : "NORM")))
   print_text(fps_label, 305, 52, 7)
 
-  # パレットヘッダー & [< P0 >] 切替ボタン (y: 66..82)
-  print_text("PALETTE", 220, 70, 6)
+  # パレット操作バー [<] [P0] [>] [+DUP] [PICK] (y: 66..80)
+  rectfill(220, 66, 13, 14, 2)
+  rect(220, 66, 13, 14, 6)
+  print_text("<", 224, 69, 7)
 
-  # [<] ボタン
-  rectfill(268, 66, 14, 14, 2)
-  rect(268, 66, 14, 14, 6)
-  print_text("<", 273, 69, 7)
+  rectfill(235, 66, 24, 14, 1)
+  rect(235, 66, 24, 14, 5)
+  print_text("P#{$current_pal}", 239, 69, 10)
 
-  # [P#{$current_pal}] 表示バッジ
-  rectfill(284, 66, 26, 14, 1)
-  rect(284, 66, 26, 14, 5)
-  print_text("P#{$current_pal}", 288, 69, 10)
+  rectfill(261, 66, 13, 14, 2)
+  rect(261, 66, 13, 14, 6)
+  print_text(">", 265, 69, 7)
 
-  # [>] ボタン
-  rectfill(312, 66, 14, 14, 2)
-  rect(312, 66, 14, 14, 6)
-  print_text(">", 317, 69, 7)
+  # [+DUP] 現在のパレットを複製して新規パレット作成
+  rectfill(277, 66, 29, 14, 3)
+  rect(277, 66, 29, 14, 11)
+  print_text("+DUP", 280, 69, 7)
+
+  # [PICK] カラーピッカー開閉ボタン
+  rectfill(309, 66, 27, 14, $show_color_picker ? 8 : 2)
+  rect(309, 66, 27, 14, $show_color_picker ? 7 : 6)
+  print_text("PICK", 311, 69, 7)
 
   # 16色グリッド (4x4, y: 88..188)
   pal_bank($current_pal)
@@ -1077,6 +1346,12 @@ def draw
       c_id = row * 4 + col_idx
       bx = 220 + col_idx * 25
       by = 88 + row * 25
+      # ベースパレット(P0)から変更されている差分カラーには右上に●マーカーを表示
+      col_info = get_palette_color($current_pal, c_id)
+      if col_info && col_info[3]
+        rectfill(bx + 17, by + 2, 3, 3, 7)
+        pset(bx + 18, by + 3, 0)
+      end
       if $current_col == c_id
         rect(bx - 1, by - 1, 24, 24, 7)
       else
@@ -1133,28 +1408,118 @@ def draw
   rect(346, 230, 12, 16, 5)
   print_text("→", 348, 234, 7)
 
-  # 5. 右ペイン: 256x256 バンクミニマップ (x: 342, y: 38, 幅128x高128)
-  print_text("BANK #{$current_bank} MINIMAP (256x256)", 342, 27, 6)
+  # 5. 右ペイン: カラーピッカー または 256x256 バンクミニマップ
+  if $show_color_picker
+    # パネル枠 (x: 340..476, y: 26..246)
+    rectfill(340, 26, 136, 220, 1)
+    rect(340, 26, 136, 220, 6)
 
-  rectfill($minimap_x - 1, $minimap_y - 1, $minimap_size + 2, $minimap_size + 2, 1)
-  rect($minimap_x - 1, $minimap_y - 1, $minimap_size + 2, $minimap_size + 2, 5)
+    act_col = $current_col || 0
+    hex_str = rgb_to_hex_str($picker_r, $picker_g, $picker_b)
+    print_text("P#{$current_pal}:#{HEX_CHARS[act_col]}", 344, 32, 10)
+    rectfill_rgb(384, 29, 14, 12, $picker_r, $picker_g, $picker_b)
+    rect(384, 29, 14, 12, 7)
+    print_text(hex_str, 402, 32, 7)
 
-  blt($minimap_x, $minimap_y, $current_bank, 0, 0, 256, 256, 0, 0.5, $current_pal)
+    # [×] 閉じるボタン
+    rectfill(460, 28, 14, 14, 8)
+    rect(460, 28, 14, 14, 7)
+    print_text("X", 464, 31, 7)
 
-  # 選択中スプライト領域の枠線表示 (ミニマップ上では $edit_w/2 x $edit_h/2 px)
-  sel_box_x = $minimap_x + $sel_x / 2
-  sel_box_y = $minimap_y + $sel_y / 2
-  sel_box_w = $edit_w / 2
-  sel_box_h = $edit_h / 2
-  rect(sel_box_x, sel_box_y, sel_box_w, sel_box_h, 7)
-  rect(sel_box_x - 1, sel_box_y - 1, sel_box_w + 2, sel_box_h + 2, 10)
+    # 2D HSV ボックス (84x84) & Hue レインボーバー (12x84)
+    draw_hsv_picker(344, 48, 84, 84, 434, 48, 12, 84, $picker_h)
+    rect(343, 47, 86, 86, 6)
+    rect(433, 47, 14, 86, 6)
 
-  # ミニマップ下部情報
-  print_text("Pos:(#{$sel_x},#{$sel_y})  Sprite ##{cur_spr_id} (#{$edit_w}x#{$edit_h})", 342, 172, 10)
-  print_text("Right-Click: Eyedropper (Pick Color)", 342, 186, 11)
-  print_text("Tab: Size  P: Pal  O: Onion  Space: Anim", 342, 200, 5)
-  print_text("Ctrl+C/V: Copy/Paste  H/V: Flip  R: Rot", 342, 214, 5)
-  print_text("Ctrl+Arrows: Move  Arrows: Shift px", 342, 228, 5)
+    # SV カーソル
+    sv_cx = 344 + ($picker_s * 83) / 100
+    sv_cy = 48 + ((100 - $picker_v) * 83) / 100
+    rect(sv_cx - 2, sv_cy - 2, 5, 5, 0)
+    rect(sv_cx - 1, sv_cy - 1, 3, 3, 7)
+
+    # Hue バーカーソル
+    h_cy = 48 + ($picker_h * 83) / 359
+    rect(432, h_cy - 1, 16, 3, 7)
+
+    # 右側ユーティリティボタン [RST] [CPY] [PST] [ALL]
+    rectfill(450, 48, 24, 18, 2)
+    rect(450, 48, 24, 18, 6)
+    print_text("RST", 453, 53, 7)
+
+    rectfill(450, 70, 24, 18, 2)
+    rect(450, 70, 24, 18, 6)
+    print_text("CPY", 453, 75, 7)
+
+    rectfill(450, 92, 24, 18, $col_clipboard ? 3 : 1)
+    rect(450, 92, 24, 18, $col_clipboard ? 11 : 5)
+    print_text("PST", 453, 97, $col_clipboard ? 7 : 5)
+
+    rectfill(450, 114, 24, 18, 2)
+    rect(450, 114, 24, 18, 8)
+    print_text("ALL", 453, 119, 8)
+
+    # RGB スライダー (x: 356..446, width 90)
+    # R
+    print_text("R", 345, 140, 8)
+    rectfill(356, 139, 90, 10, 0)
+    rw = ($picker_r * 88) / 255
+    rectfill_rgb(357, 140, rw, 8, $picker_r, 40, 40) if rw > 0
+    rect(356, 139, 90, 10, 5)
+    rectfill(356 + rw, 138, 3, 12, 7)
+    print_text("#{$picker_r}", 450, 140, 7)
+
+    # G
+    print_text("G", 345, 156, 11)
+    rectfill(356, 155, 90, 10, 0)
+    gw = ($picker_g * 88) / 255
+    rectfill_rgb(357, 156, gw, 8, 40, $picker_g, 40) if gw > 0
+    rect(356, 155, 90, 10, 5)
+    rectfill(356 + gw, 154, 3, 12, 7)
+    print_text("#{$picker_g}", 450, 156, 7)
+
+    # B
+    print_text("B", 345, 172, 12)
+    rectfill(356, 171, 90, 10, 0)
+    bw = ($picker_b * 88) / 255
+    rectfill_rgb(357, 172, bw, 8, 40, 80, $picker_b) if bw > 0
+    rect(356, 171, 90, 10, 5)
+    rectfill(356 + bw, 170, 3, 12, 7)
+    print_text("#{$picker_b}", 450, 172, 7)
+
+    # 32色プリセットスウォッチ (16x2, x: 344..472, y: 198..226)
+    print_text("PRESETS (32 COLORS)", 344, 188, 6)
+    2.times do |s_row|
+      16.times do |s_col|
+        sw = PRESET_SWATCHES[s_row * 16 + s_col]
+        sx = 344 + s_col * 8
+        sy = 198 + s_row * 14
+        rectfill_rgb(sx, sy, 8, 13, sw[0], sw[1], sw[2])
+      end
+    end
+    rect(343, 197, 129, 29, 5)
+    print_text("R-Click Cell / K:Close", 344, 232, 11)
+  else
+    print_text("BANK #{$current_bank} MINIMAP (256x256)", 342, 27, 6)
+
+    rectfill($minimap_x - 1, $minimap_y - 1, $minimap_size + 2, $minimap_size + 2, 1)
+    rect($minimap_x - 1, $minimap_y - 1, $minimap_size + 2, $minimap_size + 2, 5)
+
+    blt($minimap_x, $minimap_y, $current_bank, 0, 0, 256, 256, 0, 0.5, $current_pal)
+
+    # 選択中スプライト領域の枠線表示 (ミニマップ上では $edit_w/2 x $edit_h/2 px)
+    sel_box_x = $minimap_x + $sel_x / 2
+    sel_box_y = $minimap_y + $sel_y / 2
+    sel_box_w = $edit_w / 2
+    sel_box_h = $edit_h / 2
+    rect(sel_box_x, sel_box_y, sel_box_w, sel_box_h, 7)
+    rect(sel_box_x - 1, sel_box_y - 1, sel_box_w + 2, sel_box_h + 2, 10)
+
+    # ミニマップ下部情報
+    print_text("Pos:(#{$sel_x},#{$sel_y}) Spr##{cur_spr_id}(#{$edit_w}x#{$edit_h})", 342, 172, 10)
+    print_text("R-Click Swatch / [PICK]", 342, 186, 11)
+    print_text("Tab:Size P:Pal K:Picker", 342, 200, 5)
+    print_text("Ctrl+C/V:Copy H/V:Flip", 342, 214, 5)
+  end
 
   # 6. 下部ステータスバー (y: 250..270)
   rectfill(0, 250, 480, 20, 1)
@@ -1173,8 +1538,8 @@ def draw
   if $show_code_modal
     rectfill(30, 20, 420, 230, 0)
     rect(30, 20, 420, 230, 7)
-    print_text("--- SPRITE DATA PREVIEW (Click anywhere to close) ---", 40, 28, 10)
-    preview_text = export_bank_sprites_text($save_path, $current_bank)
+    print_text("--- SPRITE & PALETTE DATA PREVIEW (Click to close) ---", 40, 28, 10)
+    preview_text = export_bank_sprites_text($save_path, $current_bank, $sprite_palettes)
     lines = preview_text ? preview_text.split("\n") : []
     18.times do |i|
       break if i >= lines.size

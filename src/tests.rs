@@ -4171,3 +4171,78 @@ __END__
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+fn test_palette_color_picker_apis_and_save_palettes_in_ruby() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("usakame_test_save_pal_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let script_path = temp_dir.join("test_pal_save.rb");
+    let initial_content = r#"
+$saved = false
+def update
+  if !$saved
+    $saved = true
+    copy_palette(0, 1)
+    set_palette_color(1, 8, 228, 59, 68)
+    info = get_palette_color(1, 8)
+    raise "RGB mismatch" unless info[0] == 228 && info[1] == 59 && info[2] == 68 && info[3] == true
+    hsv = rgb_to_hsv(255, 0, 0)
+    rgb = hsv_to_rgb(hsv[0], hsv[1], hsv[2])
+    raise "HSV roundtrip mismatch" unless rgb[0] == 255 && rgb[1] == 0 && rgb[2] == 0
+    set_bank_pixel(0, 0, 0, 8)
+    save_resource_bank("SCRIPT_PATH_PLACEHOLDER", 0, nil, { 0 => 1 })
+  end
+end
+
+def draw
+  rectfill_rgb(10, 10, 8, 8, 228, 59, 68)
+  draw_hsv_picker(20, 20, 40, 40, 64, 20, 8, 40, 180)
+end
+
+__END__
+@SPRITE 0
+0000000000000000
+0000000000000000
+0000000000000000
+0000000000000000
+0000000000000000
+0000000000000000
+0000000000000000
+0000000000000000
+0000000000000000
+0000000000000000
+0000000000000000
+0000000000000000
+0000000000000000
+0000000000000000
+0000000000000000
+0000000000000000
+"#;
+    let path_str = script_path.to_str().unwrap().replace('\\', "/");
+    let script_code = initial_content.replace("SCRIPT_PATH_PLACEHOLDER", &path_str);
+    std::fs::write(&script_path, &script_code).unwrap();
+
+    let res = verify_ruby_script_file_headless(&script_path, 2, false);
+    assert!(res.is_ok(), "Verification failed: {:?}", res);
+
+    let after_content = std::fs::read_to_string(&script_path).unwrap();
+    assert!(
+        after_content.contains("@PALETTE 1"),
+        "Missing @PALETTE 1 in:\n{}",
+        after_content
+    );
+    assert!(
+        after_content.contains("8: #E43B44"),
+        "Missing pinpoint diff 8: #E43B44 in:\n{}",
+        after_content
+    );
+    assert!(
+        after_content.contains("@SPRITE 0 pal:1"),
+        "Missing pal:1 on @SPRITE 0 in:\n{}",
+        after_content
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
