@@ -1,0 +1,105 @@
+{
+  "name": "vscode-usakame",
+  "displayName": "Usakame Retro Engine",
+  "description": "Inline Sprite, Palette, Tilemap, Sound editors and Intellisense for Usakame (uk) Retro Game Engine",
+  "version": "0.1.0",
+  "publisher": "usakame",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Visualization",
+    "Snippets",
+    "Linters"
+  ],
+  "activationEvents": [
+    "onLanguage:ruby",
+    "onLanguage:usakame-spr",
+    "onLanguage:usakame-map"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "usakame-spr",
+        "aliases": [
+          "Usakame Sprite (.spr)"
+        ],
+        "extensions": [
+          ".spr"
+        ]
+      },
+      {
+        "id": "usakame-map",
+        "aliases": [
+          "Usakame Map (.map)"
+        ],
+        "extensions": [
+          ".map"
+        ]
+      }
+    ],
+    "commands": [
+      {
+        "command": "usakame.openSpriteEditor",
+        "title": "Usakame: Open Inline Sprite Editor"
+      },
+      {
+        "command": "usakame.openPaletteEditor",
+        "title": "Usakame: Open Inline Palette Editor"
+      },
+      {
+        "command": "usakame.openMapEditor",
+        "title": "Usakame: Open Inline Tilemap Editor"
+      },
+      {
+        "command": "usakame.openSoundEditor",
+        "title": "Usakame: Open Inline Sound (SFX) Editor"
+      },
+      {
+        "command": "usakame.togglePixelColoring",
+        "title": "Usakame: Toggle Inline @SPRITE Pixel Coloring"
+      },
+      {
+        "command": "usakame.insertResourceSection",
+        "title": "Usakame: Insert __END__ Resource Section"
+      },
+      {
+        "command": "usakame.runGame",
+        "title": "Usakame: Run Current Script (uk run)"
+      }
+    ],
+    "configuration": {
+      "title": "Usakame",
+      "properties": {
+        "usakame.enablePixelColoring": {
+          "type": "boolean",
+          "default": true,
+          "description": "Colorize 0..F characters directly inside @SPRITE blocks using their active @PALETTE colors."
+        },
+        "usakame.enableInlineSpriteIcons": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show mini sprite preview icons inline next to spr() and blt() calls."
+        },
+        "usakame.enableMrubyedgeLinter": {
+          "type": "boolean",
+          "default": true,
+          "description": "Warn on unsupported CRuby methods in mrubyedge (e.g. Array#sample, Array#shuffle, mset negative tile)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "node ./out/test/parser.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0"
+  }
+}

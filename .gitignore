@@ -1,2 +1,9 @@
 /target
 screenshots/
+
+# Node / VSCode Extension
+node_modules/
+out/
+.vscode-test/
+*.vsix
+

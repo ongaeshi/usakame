@@ -1,0 +1,17 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Usakame VSCode Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}/editors/vscode-usakame",
+        "${workspaceFolder}"
+      ],
+      "outFiles": [
+        "${workspaceFolder}/editors/vscode-usakame/out/**/*.js"
+      ]
+    }
+  ]
+}
