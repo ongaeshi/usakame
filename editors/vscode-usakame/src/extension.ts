@@ -132,6 +132,18 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.createTerminal('Usakame');
       term.show(true);
       term.sendText(`uk run "${filePath}"`);
+    }),
+
+    vscode.commands.registerCommand('usakame.saveActiveDocument', async () => {
+      await UsakameEditorPanel.currentPanel?.saveDocument();
+    }),
+
+    vscode.commands.registerCommand('usakame.undoActiveDocument', async () => {
+      await UsakameEditorPanel.currentPanel?.triggerUndo();
+    }),
+
+    vscode.commands.registerCommand('usakame.redoActiveDocument', async () => {
+      await UsakameEditorPanel.currentPanel?.triggerRedo();
     })
   );
 

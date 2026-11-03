@@ -64,6 +64,44 @@
       {
         "command": "usakame.runGame",
         "title": "Usakame: Run Current Script (uk run)"
+      },
+      {
+        "command": "usakame.saveActiveDocument",
+        "title": "Usakame: Save Active Studio Document"
+      },
+      {
+        "command": "usakame.undoActiveDocument",
+        "title": "Usakame: Undo Active Studio Document"
+      },
+      {
+        "command": "usakame.redoActiveDocument",
+        "title": "Usakame: Redo Active Studio Document"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "usakame.saveActiveDocument",
+        "key": "ctrl+s",
+        "mac": "cmd+s",
+        "when": "webviewFocus"
+      },
+      {
+        "command": "usakame.undoActiveDocument",
+        "key": "ctrl+z",
+        "mac": "cmd+z",
+        "when": "webviewFocus && !inputFocus"
+      },
+      {
+        "command": "usakame.redoActiveDocument",
+        "key": "ctrl+y",
+        "mac": "cmd+shift+z",
+        "when": "webviewFocus && !inputFocus"
+      },
+      {
+        "command": "usakame.redoActiveDocument",
+        "key": "ctrl+shift+z",
+        "mac": "cmd+y",
+        "when": "webviewFocus && !inputFocus"
       }
     ],
     "configuration": {

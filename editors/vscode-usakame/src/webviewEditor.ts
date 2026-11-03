@@ -16,6 +16,8 @@ export class UsakameEditorPanel {
   private targetUri: vscode.Uri;
   private disposables: vscode.Disposable[] = [];
   private isApplyingEdit = false;
+  private undoStack: string[] = [];
+  private redoStack: string[] = [];
 
   public static createOrShow(
     extensionUri: vscode.Uri,
@@ -117,7 +119,7 @@ export class UsakameEditorPanel {
     }
   }
 
-  private async saveDocument(): Promise<void> {
+  public async saveDocument(): Promise<void> {
     const doc = await this.getTargetDocument();
     if (!doc) {
       return;
@@ -126,32 +128,51 @@ export class UsakameEditorPanel {
     this.panel.webview.postMessage({ type: 'saveResult', success: saved });
   }
 
-  private async triggerUndo(): Promise<void> {
-    const doc = await this.getTargetDocument();
-    if (!doc) {
+  public recordUndoSnapshot(doc: vscode.TextDocument): void {
+    const currentText = doc.getText();
+    if (this.undoStack.length > 0 && this.undoStack[this.undoStack.length - 1] === currentText) {
       return;
     }
-    const prevVersion = doc.version;
-    await vscode.commands.executeCommand('undo');
-    if (doc.version === prevVersion) {
-      await vscode.window.showTextDocument(doc, { preserveFocus: false, preview: false });
-      await vscode.commands.executeCommand('undo');
-      this.panel.reveal(this.panel.viewColumn, false);
+    this.undoStack.push(currentText);
+    if (this.undoStack.length > 100) {
+      this.undoStack.shift();
     }
+    this.redoStack = [];
   }
 
-  private async triggerRedo(): Promise<void> {
+  public async triggerUndo(): Promise<void> {
     const doc = await this.getTargetDocument();
-    if (!doc) {
+    if (!doc || this.undoStack.length === 0) {
       return;
     }
-    const prevVersion = doc.version;
-    await vscode.commands.executeCommand('redo');
-    if (doc.version === prevVersion) {
-      await vscode.window.showTextDocument(doc, { preserveFocus: false, preview: false });
-      await vscode.commands.executeCommand('redo');
-      this.panel.reveal(this.panel.viewColumn, false);
+    const previousText = this.undoStack.pop()!;
+    this.redoStack.push(doc.getText());
+    await this.replaceDocumentText(doc, previousText);
+  }
+
+  public async triggerRedo(): Promise<void> {
+    const doc = await this.getTargetDocument();
+    if (!doc || this.redoStack.length === 0) {
+      return;
     }
+    const nextText = this.redoStack.pop()!;
+    this.undoStack.push(doc.getText());
+    await this.replaceDocumentText(doc, nextText);
+  }
+
+  private async replaceDocumentText(doc: vscode.TextDocument, newText: string): Promise<void> {
+    const fullRange = new vscode.Range(
+      doc.positionAt(0),
+      doc.positionAt(doc.getText().length)
+    );
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(doc.uri, fullRange, newText);
+
+    this.isApplyingEdit = true;
+    await vscode.workspace.applyEdit(edit);
+    this.isApplyingEdit = false;
+
+    await this.sendStateToWebview();
   }
 
   public async sendStateToWebview(
@@ -297,6 +318,7 @@ export class UsakameEditorPanel {
     paletteId: number,
     lines: string[]
   ): Promise<void> {
+    this.recordUndoSnapshot(doc);
     const parsed = await this.ensureEndSection(doc);
     const existing = parsed.sprites.get(id);
     const sizeStr = width === 16 && height === 16 && (!existing || !existing.explicitDims) ? '' : ` ${width}x${height}`;
@@ -328,6 +350,7 @@ export class UsakameEditorPanel {
     if (palId <= 0) {
       return;
     }
+    this.recordUndoSnapshot(doc);
     const parsed = await this.ensureEndSection(doc);
     const existing = parsed.paletteBlocks.get(palId);
 
@@ -361,6 +384,7 @@ export class UsakameEditorPanel {
     offsetY: number,
     rows: string[]
   ): Promise<void> {
+    this.recordUndoSnapshot(doc);
     const parsed = await this.ensureEndSection(doc);
     const existing = parsed.mapBlocks[mapIndex];
     const newBlockText = `@MAP ${offsetX} ${offsetY}\n${rows.join('\n')}`;
@@ -388,6 +412,7 @@ export class UsakameEditorPanel {
     id: number,
     specText: string
   ): Promise<void> {
+    this.recordUndoSnapshot(doc);
     const parsed = await this.ensureEndSection(doc);
     const existing = parsed.sfxBlocks.find((s) => s.kind === kind && s.id === id);
     const newBlockText = `@${kind} ${id}\n${specText.trim()}`;
@@ -1648,6 +1673,8 @@ export class UsakameEditorPanel {
 
     if (modifier && (e.key === 's' || e.key === 'S')) {
       e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
       vscode.postMessage({ type: 'save' });
       return;
     }
@@ -1660,15 +1687,19 @@ export class UsakameEditorPanel {
 
     if (modifier && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
       e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
       vscode.postMessage({ type: 'undo' });
     } else if (
       (modifier && (e.key === 'y' || e.key === 'Y')) ||
       (modifier && e.shiftKey && (e.key === 'z' || e.key === 'Z'))
     ) {
       e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
       vscode.postMessage({ type: 'redo' });
     }
-  });
+  }, true);
 
   document.getElementById('btn-global-undo').addEventListener('click', () => {
     vscode.postMessage({ type: 'undo' });
