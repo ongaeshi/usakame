@@ -58,10 +58,6 @@
         "title": "Usakame: Open Inline Sound (SFX) Editor"
       },
       {
-        "command": "usakame.togglePixelColoring",
-        "title": "Usakame: Toggle Inline @SPRITE Pixel Coloring"
-      },
-      {
         "command": "usakame.insertResourceSection",
         "title": "Usakame: Insert __END__ Resource Section"
       },
@@ -73,11 +69,6 @@
     "configuration": {
       "title": "Usakame",
       "properties": {
-        "usakame.enablePixelColoring": {
-          "type": "boolean",
-          "default": true,
-          "description": "Colorize 0..F characters directly inside @SPRITE blocks using their active @PALETTE colors."
-        },
         "usakame.enableInlineSpriteIcons": {
           "type": "boolean",
           "default": true,

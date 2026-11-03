@@ -101,13 +101,6 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     ),
 
-    vscode.commands.registerCommand('usakame.togglePixelColoring', async () => {
-      const cfg = vscode.workspace.getConfiguration('usakame');
-      const cur = cfg.get<boolean>('enablePixelColoring', true);
-      await cfg.update('enablePixelColoring', !cur, vscode.ConfigurationTarget.Global);
-      refreshActiveEditors();
-    }),
-
     vscode.commands.registerCommand('usakame.insertResourceSection', async () => {
       const editor = vscode.window.activeTextEditor;
       if (!editor) {

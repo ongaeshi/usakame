@@ -1,41 +1,21 @@
 import * as vscode from 'vscode';
 import {
-  DEFAULT_PALETTE_RGBA,
   encodeRgbaToScaledPngDataUri,
   extractBank0RegionRgba,
-  PALETTE_COLOR_NAMES,
-  PaletteRgba,
   ParsedUsakameDocument,
-  rgbaToHex,
 } from './parser';
 
-function isLightColor(r: number, g: number, b: number): boolean {
-  const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
-  return luminance > 140;
-}
-
 export class UsakameDecorator implements vscode.Disposable {
-  private colorDecorationTypes = new Map<string, vscode.TextEditorDecorationType>();
-  private transparentDotDecorationType: vscode.TextEditorDecorationType;
   private paletteSwatchDecorationTypes = new Map<string, vscode.TextEditorDecorationType>();
   private inlineIconDecorationTypes = new Map<string, vscode.TextEditorDecorationType>();
 
-  constructor() {
-    this.transparentDotDecorationType = vscode.window.createTextEditorDecorationType({
-      color: 'rgba(130, 140, 160, 0.35)',
-    });
-  }
+  constructor() {}
 
   public dispose(): void {
     this.clearAllDecorationTypes();
-    this.transparentDotDecorationType.dispose();
   }
 
   private clearAllDecorationTypes(): void {
-    for (const d of this.colorDecorationTypes.values()) {
-      d.dispose();
-    }
-    this.colorDecorationTypes.clear();
     for (const d of this.paletteSwatchDecorationTypes.values()) {
       d.dispose();
     }
@@ -44,19 +24,6 @@ export class UsakameDecorator implements vscode.Disposable {
       d.dispose();
     }
     this.inlineIconDecorationTypes.clear();
-  }
-
-  private getPixelColorDecorationType(hexColor: string, isLight: boolean): vscode.TextEditorDecorationType {
-    let dt = this.colorDecorationTypes.get(hexColor);
-    if (!dt) {
-      dt = vscode.window.createTextEditorDecorationType({
-        backgroundColor: hexColor,
-        color: isLight ? 'rgba(0,0,0,0.65)' : 'rgba(255,255,255,0.65)',
-        borderRadius: '1px',
-      });
-      this.colorDecorationTypes.set(hexColor, dt);
-    }
-    return dt;
   }
 
   private getSwatchDecorationType(hexColor: string): vscode.TextEditorDecorationType {
@@ -100,14 +67,9 @@ export class UsakameDecorator implements vscode.Disposable {
 
   public updateDecorations(editor: vscode.TextEditor, parsed: ParsedUsakameDocument): void {
     const config = vscode.workspace.getConfiguration('usakame');
-    const enablePixelColoring = config.get<boolean>('enablePixelColoring', true);
     const enableInlineIcons = config.get<boolean>('enableInlineSpriteIcons', true);
 
     // Clear previous ranges on all active decoration types
-    for (const dt of this.colorDecorationTypes.values()) {
-      editor.setDecorations(dt, []);
-    }
-    editor.setDecorations(this.transparentDotDecorationType, []);
     for (const dt of this.paletteSwatchDecorationTypes.values()) {
       editor.setDecorations(dt, []);
     }
@@ -117,70 +79,8 @@ export class UsakameDecorator implements vscode.Disposable {
 
     const doc = editor.document;
 
-    // 1. Pixel coloring inside @SPRITE and swatches inside @PALETTE
-    if (enablePixelColoring && parsed.hasEndMarker) {
-      const rangesByHex = new Map<string, { isLight: boolean; ranges: vscode.Range[] }>();
-      const dotRanges: vscode.Range[] = [];
-
-      for (const sp of parsed.sprites.values()) {
-        if (sp.emoji) {
-          continue;
-        }
-        const pal: PaletteRgba =
-          parsed.palettes.get(sp.paletteId) ||
-          parsed.palettes.get(parsed.defaultPaletteId) ||
-          DEFAULT_PALETTE_RGBA;
-
-        for (let lineNum = sp.startLine; lineNum <= sp.endLine && lineNum < doc.lineCount; lineNum++) {
-          const lineText = doc.lineAt(lineNum).text;
-          const trimmedCheck = lineText.trim();
-          if (!trimmedCheck || trimmedCheck.startsWith('#') || trimmedCheck.startsWith('@')) {
-            continue;
-          }
-
-          let col = 0;
-          while (col < lineText.length) {
-            const ch = lineText[col];
-            if (ch === '.') {
-              let endCol = col + 1;
-              while (endCol < lineText.length && lineText[endCol] === '.') {
-                endCol++;
-              }
-              dotRanges.push(new vscode.Range(lineNum, col, lineNum, endCol));
-              col = endCol;
-            } else if (/^[0-9a-fA-F]$/.test(ch)) {
-              const colorIdx = parseInt(ch, 16);
-              let endCol = col + 1;
-              while (
-                endCol < lineText.length &&
-                /^[0-9a-fA-F]$/.test(lineText[endCol]) &&
-                parseInt(lineText[endCol], 16) === colorIdx
-              ) {
-                endCol++;
-              }
-              const rgba = pal[colorIdx & 0x0f];
-              const hex = rgbaToHex(rgba);
-              let entry = rangesByHex.get(hex);
-              if (!entry) {
-                entry = { isLight: isLightColor(rgba[0], rgba[1], rgba[2]), ranges: [] };
-                rangesByHex.set(hex, entry);
-              }
-              entry.ranges.push(new vscode.Range(lineNum, col, lineNum, endCol));
-              col = endCol;
-            } else {
-              col++;
-            }
-          }
-        }
-      }
-
-      for (const [hex, entry] of rangesByHex.entries()) {
-        const dt = this.getPixelColorDecorationType(hex, entry.isLight);
-        editor.setDecorations(dt, entry.ranges);
-      }
-      editor.setDecorations(this.transparentDotDecorationType, dotRanges);
-
-      // Swatches on #RRGGBB inside @PALETTE blocks
+    // 1. Swatches on #RRGGBB inside @PALETTE blocks
+    if (parsed.hasEndMarker && parsed.paletteBlocks.size > 0) {
       const swatchRangesByHex = new Map<string, vscode.Range[]>();
       for (const palBlock of parsed.paletteBlocks.values()) {
         for (let lineNum = palBlock.headerLine; lineNum <= palBlock.endLine && lineNum < doc.lineCount; lineNum++) {

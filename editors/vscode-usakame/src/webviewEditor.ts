@@ -25,19 +25,21 @@ export class UsakameEditorPanel {
     initialId = 0,
     initialSubKind = 'SFX'
   ): void {
-    const column = vscode.ViewColumn.Beside;
+    const activeEditor = vscode.window.activeTextEditor;
+    const column = activeEditor?.viewColumn ?? vscode.ViewColumn.One;
 
     if (UsakameEditorPanel.currentPanel) {
       UsakameEditorPanel.currentPanel.targetUri = targetUri;
-      UsakameEditorPanel.currentPanel.panel.reveal(column, true);
+      UsakameEditorPanel.currentPanel.panel.reveal(column, false);
       UsakameEditorPanel.currentPanel.sendStateToWebview(initialTab, initialId, initialSubKind);
       return;
     }
 
+    const fileName = targetUri.path.split(/[\\/]/).pop() || 'game.rb';
     const panel = vscode.window.createWebviewPanel(
       'usakameEditor',
-      'Usakame Inline Studio',
-      { viewColumn: column, preserveFocus: true },
+      `Usakame Studio: ${fileName}`,
+      { viewColumn: column, preserveFocus: false },
       {
         enableScripts: true,
         retainContextWhenHidden: true,
@@ -115,6 +117,43 @@ export class UsakameEditorPanel {
     }
   }
 
+  private async saveDocument(): Promise<void> {
+    const doc = await this.getTargetDocument();
+    if (!doc) {
+      return;
+    }
+    const saved = await doc.save();
+    this.panel.webview.postMessage({ type: 'saveResult', success: saved });
+  }
+
+  private async triggerUndo(): Promise<void> {
+    const doc = await this.getTargetDocument();
+    if (!doc) {
+      return;
+    }
+    const prevVersion = doc.version;
+    await vscode.commands.executeCommand('undo');
+    if (doc.version === prevVersion) {
+      await vscode.window.showTextDocument(doc, { preserveFocus: false, preview: false });
+      await vscode.commands.executeCommand('undo');
+      this.panel.reveal(this.panel.viewColumn, false);
+    }
+  }
+
+  private async triggerRedo(): Promise<void> {
+    const doc = await this.getTargetDocument();
+    if (!doc) {
+      return;
+    }
+    const prevVersion = doc.version;
+    await vscode.commands.executeCommand('redo');
+    if (doc.version === prevVersion) {
+      await vscode.window.showTextDocument(doc, { preserveFocus: false, preview: false });
+      await vscode.commands.executeCommand('redo');
+      this.panel.reveal(this.panel.viewColumn, false);
+    }
+  }
+
   public async sendStateToWebview(
     switchTab?: EditorTabKind,
     selectId?: number,
@@ -189,6 +228,21 @@ export class UsakameEditorPanel {
 
     if (msg.type === 'requestSync') {
       await this.sendStateToWebview();
+      return;
+    }
+
+    if (msg.type === 'save') {
+      await this.saveDocument();
+      return;
+    }
+
+    if (msg.type === 'undo') {
+      await this.triggerUndo();
+      return;
+    }
+
+    if (msg.type === 'redo') {
+      await this.triggerRedo();
       return;
     }
 
@@ -585,7 +639,12 @@ export class UsakameEditorPanel {
       <button class="tab-btn" data-tab="map">🗺️ @MAP</button>
       <button class="tab-btn" data-tab="sound">🔊 @SFX / @MUSIC</button>
     </div>
-    <span class="badge" id="file-badge">game.rb</span>
+    <div style="display:flex; align-items:center; gap:8px;">
+      <button id="btn-global-undo" title="元に戻す (Ctrl+Z / Cmd+Z)" style="padding:4px 8px; font-size:12px;">↶ Undo</button>
+      <button id="btn-global-redo" title="やり直し (Ctrl+Y / Cmd+Shift+Z)" style="padding:4px 8px; font-size:12px;">↷ Redo</button>
+      <button id="btn-global-save" title="ファイルを保存 (Ctrl+S / Cmd+S)" style="padding:4px 10px; font-size:12px; font-weight:600; background:var(--accent); color:#000;">💾 Save</button>
+      <span class="badge" id="file-badge">game.rb</span>
+    </div>
   </header>
 
   <!-- ================= SPRITE EDITOR ================= -->
@@ -940,6 +999,7 @@ export class UsakameEditorPanel {
   // Canvas painting interaction
   const sprCanvas = document.getElementById('spr-canvas');
   let isDrawing = false;
+  let sprDirtyStroke = false;
   let rectStart = null;
 
   function getCanvasCell(e, sp) {
@@ -1003,10 +1063,11 @@ export class UsakameEditorPanel {
     }
 
     isDrawing = true;
+    sprDirtyStroke = false;
     if (setPixelChar(sp, x, y, ch)) {
+      sprDirtyStroke = true;
       drawSpriteToCanvas(sp, sprCanvas, 256, true);
       drawSpriteToCanvas(sp, document.getElementById('spr-preview'), 64, false);
-      commitSprite(sp);
     }
   });
 
@@ -1017,11 +1078,13 @@ export class UsakameEditorPanel {
     if (!isDrawing) return;
 
     if (state.currentTool === 'pen') {
-      const ch = state.currentColor === -1 ? '.' : state.currentColor.toString(16).toUpperCase();
+      const ch = (e.buttons === 2 || state.currentColor === -1)
+        ? '.'
+        : state.currentColor.toString(16).toUpperCase();
       if (setPixelChar(sp, x, y, ch)) {
+        sprDirtyStroke = true;
         drawSpriteToCanvas(sp, sprCanvas, 256, true);
         drawSpriteToCanvas(sp, document.getElementById('spr-preview'), 64, false);
-        commitSprite(sp);
       }
     }
   });
@@ -1043,6 +1106,12 @@ export class UsakameEditorPanel {
       }
       rectStart = null;
       renderSpriteEditor();
+      commitSprite(sp);
+      return;
+    }
+    if (sprDirtyStroke) {
+      sprDirtyStroke = false;
+      const sp = getActiveSprite();
       commitSprite(sp);
     }
   });
@@ -1311,6 +1380,8 @@ export class UsakameEditorPanel {
     }
   }
 
+  let mapDirtyStroke = false;
+
   function paintMapCell(e) {
     const m = getActiveMap();
     const r = mapCanvas.getBoundingClientRect();
@@ -1318,12 +1389,17 @@ export class UsakameEditorPanel {
     const cy = Math.max(0, Math.min(15, Math.floor(((e.clientY - r.top) / r.height) * 16)));
     const key = cx + ',' + cy;
     if (state.currentMapTile < 0 || e.buttons === 2) {
-      delete m.cells[key];
+      if (m.cells[key] !== undefined) {
+        delete m.cells[key];
+        mapDirtyStroke = true;
+      }
     } else {
-      m.cells[key] = state.currentMapTile;
+      if (m.cells[key] !== state.currentMapTile) {
+        m.cells[key] = state.currentMapTile;
+        mapDirtyStroke = true;
+      }
     }
     renderMapEditor();
-    commitMap(m);
   }
 
   function commitMap(m) {
@@ -1349,9 +1425,24 @@ export class UsakameEditorPanel {
     vscode.postMessage({ type: 'updateMap', mapIndex: m.index || 0, offsetX: m.offsetX || 0, offsetY: m.offsetY || 0, rows });
   }
 
-  mapCanvas.addEventListener('mousedown', (e) => { isMapDrawing = true; paintMapCell(e); });
-  mapCanvas.addEventListener('mousemove', (e) => { if (isMapDrawing) paintMapCell(e); });
-  window.addEventListener('mouseup', () => { isMapDrawing = false; });
+  mapCanvas.addEventListener('mousedown', (e) => {
+    isMapDrawing = true;
+    mapDirtyStroke = false;
+    paintMapCell(e);
+  });
+  mapCanvas.addEventListener('mousemove', (e) => {
+    if (isMapDrawing) paintMapCell(e);
+  });
+  window.addEventListener('mouseup', () => {
+    if (isMapDrawing) {
+      isMapDrawing = false;
+      if (mapDirtyStroke) {
+        mapDirtyStroke = false;
+        const m = getActiveMap();
+        commitMap(m);
+      }
+    }
+  });
   mapCanvas.addEventListener('contextmenu', e => e.preventDefault());
   document.getElementById('btn-map-eraser').addEventListener('click', () => {
     state.currentMapTile = -1;
@@ -1509,6 +1600,21 @@ export class UsakameEditorPanel {
 
   window.addEventListener('message', (event) => {
     const msg = event.data;
+    if (msg.type === 'saveResult') {
+      const saveBtn = document.getElementById('btn-global-save');
+      if (saveBtn) {
+        const orig = saveBtn.textContent;
+        saveBtn.textContent = '✓ Saved!';
+        saveBtn.style.background = '#28a745';
+        saveBtn.style.color = '#fff';
+        setTimeout(() => {
+          saveBtn.textContent = orig;
+          saveBtn.style.background = 'var(--accent)';
+          saveBtn.style.color = '#000';
+        }, 1200);
+      }
+      return;
+    }
     if (msg.type === 'syncDocument') {
       document.getElementById('file-badge').textContent = msg.fileName;
       state.defaultPaletteId = msg.defaultPaletteId || 0;
@@ -1533,6 +1639,45 @@ export class UsakameEditorPanel {
       }
       renderAll();
     }
+  });
+
+  // Global Shortcuts & Action buttons
+  window.addEventListener('keydown', (e) => {
+    const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+    const modifier = isMac ? e.metaKey : e.ctrlKey;
+
+    if (modifier && (e.key === 's' || e.key === 'S')) {
+      e.preventDefault();
+      vscode.postMessage({ type: 'save' });
+      return;
+    }
+
+    const target = e.target;
+    const isInput = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA');
+    if (isInput) {
+      return;
+    }
+
+    if (modifier && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
+      e.preventDefault();
+      vscode.postMessage({ type: 'undo' });
+    } else if (
+      (modifier && (e.key === 'y' || e.key === 'Y')) ||
+      (modifier && e.shiftKey && (e.key === 'z' || e.key === 'Z'))
+    ) {
+      e.preventDefault();
+      vscode.postMessage({ type: 'redo' });
+    }
+  });
+
+  document.getElementById('btn-global-undo').addEventListener('click', () => {
+    vscode.postMessage({ type: 'undo' });
+  });
+  document.getElementById('btn-global-redo').addEventListener('click', () => {
+    vscode.postMessage({ type: 'redo' });
+  });
+  document.getElementById('btn-global-save').addEventListener('click', () => {
+    vscode.postMessage({ type: 'save' });
   });
 
   initSoundEditor();
