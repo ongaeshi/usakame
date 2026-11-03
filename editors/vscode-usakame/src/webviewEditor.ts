@@ -698,7 +698,7 @@ export class UsakameEditorPanel {
       <button class="tool-btn active-tool" data-tool="pen">✏️ ペン</button>
       <button class="tool-btn" data-tool="fill">🪣 塗りつぶし</button>
       <button class="tool-btn" data-tool="rect">⬜ 矩形</button>
-      <button class="tool-btn" data-tool="eyedrop">💧 スポイト</button>
+      <button class="tool-btn" data-tool="eyedrop" title="スポイト (右クリックでも取得可能)">💧 スポイト</button>
       <button id="btn-flip-h">↔ 左右反転</button>
       <button id="btn-flip-v">↕ 上下反転</button>
       <button id="btn-shift-l">←</button>
@@ -1024,8 +1024,16 @@ export class UsakameEditorPanel {
   // Canvas painting interaction
   const sprCanvas = document.getElementById('spr-canvas');
   let isDrawing = false;
+  let isRightEyedropping = false;
   let sprDirtyStroke = false;
   let rectStart = null;
+
+  function pickSpriteColorAt(sp, x, y) {
+    if (x < 0 || x >= sp.width || y < 0 || y >= sp.height) return;
+    const picked = sp.lines[y] && sp.lines[y][x];
+    state.currentColor = (picked === '.' || picked === ' ' || !picked) ? -1 : parseInt(picked, 16);
+    renderPaletteSwatches();
+  }
 
   function getCanvasCell(e, sp) {
     const r = sprCanvas.getBoundingClientRect();
@@ -1061,16 +1069,22 @@ export class UsakameEditorPanel {
   sprCanvas.addEventListener('mousedown', (e) => {
     const sp = getActiveSprite();
     const { x, y } = getCanvasCell(e, sp);
-    const ch = (e.button === 2 || state.currentColor === -1)
+
+    // 右クリックでスポイト
+    if (e.button === 2) {
+      isRightEyedropping = true;
+      pickSpriteColorAt(sp, x, y);
+      return;
+    }
+
+    const ch = (state.currentColor === -1)
       ? '.'
       : state.currentColor.toString(16).toUpperCase();
 
     if (state.currentTool === 'eyedrop') {
-      const picked = sp.lines[y][x];
-      state.currentColor = (picked === '.' || picked === ' ') ? -1 : parseInt(picked, 16);
+      pickSpriteColorAt(sp, x, y);
       state.currentTool = 'pen';
       document.querySelectorAll('.tool-btn').forEach(b => b.classList.toggle('active-tool', b.dataset.tool === 'pen'));
-      renderPaletteSwatches();
       return;
     }
 
@@ -1100,10 +1114,17 @@ export class UsakameEditorPanel {
     const sp = getActiveSprite();
     const { x, y } = getCanvasCell(e, sp);
     document.getElementById('spr-cursor-info').textContent = '座標: (' + x + ', ' + y + ')';
+
+    // 右クリックドラッグ中のスポイト
+    if (isRightEyedropping || (e.buttons === 2 && !isDrawing)) {
+      pickSpriteColorAt(sp, x, y);
+      return;
+    }
+
     if (!isDrawing) return;
 
     if (state.currentTool === 'pen') {
-      const ch = (e.buttons === 2 || state.currentColor === -1)
+      const ch = (state.currentColor === -1)
         ? '.'
         : state.currentColor.toString(16).toUpperCase();
       if (setPixelChar(sp, x, y, ch)) {
@@ -1115,6 +1136,7 @@ export class UsakameEditorPanel {
   });
 
   window.addEventListener('mouseup', (e) => {
+    isRightEyedropping = false;
     if (!isDrawing) return;
     isDrawing = false;
     if (state.currentTool === 'rect' && rectStart) {
@@ -1407,13 +1429,26 @@ export class UsakameEditorPanel {
 
   let mapDirtyStroke = false;
 
+  function pickMapTileAt(m, cx, cy) {
+    const key = cx + ',' + cy;
+    const tid = m.cells[key];
+    if (tid !== undefined && tid >= 0) {
+      state.currentMapTile = tid;
+      document.getElementById('map-selected-tile-label').textContent = '#' + tid;
+    } else {
+      state.currentMapTile = -1;
+      document.getElementById('map-selected-tile-label').textContent = '消しゴム (.)';
+    }
+    renderMapEditor();
+  }
+
   function paintMapCell(e) {
     const m = getActiveMap();
     const r = mapCanvas.getBoundingClientRect();
     const cx = Math.max(0, Math.min(15, Math.floor(((e.clientX - r.left) / r.width) * 16)));
     const cy = Math.max(0, Math.min(15, Math.floor(((e.clientY - r.top) / r.height) * 16)));
     const key = cx + ',' + cy;
-    if (state.currentMapTile < 0 || e.buttons === 2) {
+    if (state.currentMapTile < 0) {
       if (m.cells[key] !== undefined) {
         delete m.cells[key];
         mapDirtyStroke = true;
@@ -1451,11 +1486,30 @@ export class UsakameEditorPanel {
   }
 
   mapCanvas.addEventListener('mousedown', (e) => {
+    const m = getActiveMap();
+    const r = mapCanvas.getBoundingClientRect();
+    const cx = Math.max(0, Math.min(15, Math.floor(((e.clientX - r.left) / r.width) * 16)));
+    const cy = Math.max(0, Math.min(15, Math.floor(((e.clientY - r.top) / r.height) * 16)));
+
+    // 右クリックでタイルをスポイト
+    if (e.button === 2) {
+      pickMapTileAt(m, cx, cy);
+      return;
+    }
+
     isMapDrawing = true;
     mapDirtyStroke = false;
     paintMapCell(e);
   });
   mapCanvas.addEventListener('mousemove', (e) => {
+    if (e.buttons === 2) {
+      const m = getActiveMap();
+      const r = mapCanvas.getBoundingClientRect();
+      const cx = Math.max(0, Math.min(15, Math.floor(((e.clientX - r.left) / r.width) * 16)));
+      const cy = Math.max(0, Math.min(15, Math.floor(((e.clientY - r.top) / r.height) * 16)));
+      pickMapTileAt(m, cx, cy);
+      return;
+    }
     if (isMapDrawing) paintMapCell(e);
   });
   window.addEventListener('mouseup', () => {
