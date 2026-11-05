@@ -672,11 +672,13 @@ pub fn parse_tail_blocks(tail_data: &str) -> Vec<TailBlock> {
 
             if let Some(rest) = stripped.strip_prefix("@SPRITE") {
                 let mut parts = rest.split_whitespace();
-                let mut id = 0;
+                let mut id = -1;
                 let mut dims = (16, 16);
                 let mut emoji = None;
                 if let Some(first) = parts.next() {
-                    id = first.parse::<i32>().unwrap_or(0);
+                    if let Ok(num) = first.parse::<i32>() {
+                        id = num;
+                    }
                 }
                 for tok in parts {
                     if tok.starts_with('#') {
@@ -1024,6 +1026,9 @@ where
             } = b
             {
                 if *id >= 0 && *id <= 255 {
+                    if lines.iter().any(|l| l.trim().starts_with("---")) {
+                        continue;
+                    }
                     if let Some(sp_pals) = sprite_palettes {
                         if let Some(&pal_id) = sp_pals.get(id) {
                             *header = update_sprite_header_palette(header, pal_id);

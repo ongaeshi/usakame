@@ -2338,7 +2338,7 @@ fn test_rabbit_knight_example_script() {
 #[test]
 fn test_bank_parse_and_sprite_sync() {
     let tail = "@SPRITE 0\n7777\n7777\n@SPRITE 1\n8888\n8888\n";
-    let (sprites, banks, _) = parse_tail_resources_full(tail, None);
+    let (sprites, banks, _, _, _) = parse_tail_resources_full(tail, None);
 
     assert!(sprites.contains_key(&0));
     assert!(sprites.contains_key(&1));
@@ -3050,7 +3050,7 @@ B: #78F878
 ...B...
 "#;
 
-    let (sprites, banks, palettes) = parse_tail_resources_full(tail, None);
+    let (sprites, banks, palettes, _, _) = parse_tail_resources_full(tail, None);
 
     // パレットのパース検証
     // パレット0は @PALETTE 0 で上書きされず標準 PALETTE_RGBA を維持
@@ -3211,7 +3211,7 @@ fn test_sprite_variable_size_32x32() {
         tail.push('\n');
     }
 
-    let (sprites, banks, _) = parse_tail_resources_full(&tail, None);
+    let (sprites, banks, _, _, _) = parse_tail_resources_full(&tail, None);
     let sp = sprites.get(&0).expect("Sprite 0 should exist");
     assert_eq!(sp.width, 32);
     assert_eq!(sp.height, 32);
@@ -3258,7 +3258,7 @@ fn test_sprite_variable_size_16x32_and_auto_detection() {
         tail.push_str("........................\n");
     }
 
-    let (sprites, banks, _) = parse_tail_resources_full(&tail, None);
+    let (sprites, banks, _, _, _) = parse_tail_resources_full(&tail, None);
 
     let sp4 = sprites.get(&4).expect("Sprite 4 should exist");
     assert_eq!(sp4.width, 16);
@@ -3288,7 +3288,7 @@ fn test_sprite_overlap_behavior() {
         tail.push('\n');
     }
 
-    let (sprites, banks, _) = parse_tail_resources_full(&tail, None);
+    let (sprites, banks, _, _, _) = parse_tail_resources_full(&tail, None);
     let bank0 = banks.get(&0).unwrap();
 
     // スロット1の原点 (16, 0) は ID 1 (色2) で上書きされている
@@ -4245,4 +4245,186 @@ __END__
     );
 
     let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_sprite_auto_packing_and_animation_parsing() {
+    let tail = r#"
+@SPRITE 0
+0123012301230123
+0123012301230123
+0123012301230123
+0123012301230123
+0123012301230123
+0123012301230123
+0123012301230123
+0123012301230123
+0123012301230123
+0123012301230123
+0123012301230123
+0123012301230123
+0123012301230123
+0123012301230123
+0123012301230123
+0123012301230123
+
+# 名前指定・マップエイリアス・絵文字
+@SPRITE :wall # 🧱
+
+# 8x8 小型スプライト（自動検出）
+@SPRITE :small
+11111111
+1......1
+1......1
+1......1
+1......1
+1......1
+1......1
+11111111
+
+# 絵文字アニメーション（2フレーム）
+@SPRITE :enemy 👾 💣
+
+# テキストアニメーション（2フレーム・サイズ不揃いのパディング）
+@SPRITE :anim
+3333
+3333
+---
+44444444
+44444444
+44444444
+
+@MAP 0 0
+# . #
+enemy small
+"#;
+
+    let (sprites, _banks, _palettes, name_table, map_aliases) = parse_tail_resources_full(tail, None);
+
+    // 1. スロット0は明示指定の 0
+    assert!(sprites.contains_key(&0));
+
+    // 2. 自動配置はスロット1から探索
+    // :wall は絵文字 🧱 で 16x16 -> スロット1
+    let wall_ids = name_table.get("wall").expect("name_table should have wall");
+    assert_eq!(wall_ids, &[1]);
+    assert_eq!(map_aliases.get(&'#'), Some(&1));
+
+    // 3. :small は 8x8 (スロット2)
+    let small_ids = name_table.get("small").expect("name_table should have small");
+    assert_eq!(small_ids, &[2]);
+    let sp_small = sprites.get(&2).expect("sprite 2 should exist");
+    assert_eq!(sp_small.width, 8);
+    assert_eq!(sp_small.height, 8);
+
+    // 4. :enemy は絵文字2フレーム -> スロット3, 4
+    let enemy_ids = name_table.get("enemy").expect("name_table should have enemy");
+    assert_eq!(enemy_ids, &[3, 4]);
+
+    // 5. :anim はテキスト2フレーム -> スロット5, 6
+    let anim_ids = name_table.get("anim").expect("name_table should have anim");
+    assert_eq!(anim_ids, &[5, 6]);
+    let sp_anim0 = sprites.get(&5).expect("sprite 5 should exist");
+    let sp_anim1 = sprites.get(&6).expect("sprite 6 should exist");
+    // フレーム0は幅4x高さ2、フレーム1は幅8x高さ3 => 最大幅8x最大高さ3にパディング統一される
+    assert_eq!(sp_anim0.width, 8);
+    assert_eq!(sp_anim0.height, 3);
+    assert_eq!(sp_anim1.width, 8);
+    assert_eq!(sp_anim1.height, 3);
+
+    // 6. @MAP のパース
+    let tilemap = parse_tail_map_with_symbols(tail, &map_aliases, &name_table);
+    // (0, 0) は '#' -> スロット1
+    assert_eq!(tilemap.get(0, 0), 1);
+    // (1, 0) は '.' -> 空セル (-1)
+    assert_eq!(tilemap.get(1, 0), -1);
+    // (2, 0) は '#' -> スロット1
+    assert_eq!(tilemap.get(2, 0), 1);
+    // (0, 1) は 'enemy' -> 0フレーム目 スロット3
+    assert_eq!(tilemap.get(0, 1), 3);
+    // (1, 1) は 'small' -> スロット2
+    assert_eq!(tilemap.get(1, 1), 2);
+}
+
+#[test]
+fn test_declarative_sprites_and_new_draw_apis_in_ruby() {
+    let script = r##"
+# 1. spr_id のテスト
+id_wall = spr_id(:wall)
+raise "wall id should be 1" unless id_wall == 1
+raise "hero frame 0 should be 2" unless spr_id(:hero, 0) == 2
+raise "hero frame 1 should be 3" unless spr_id(:hero, 1) == 3
+# loop = true (デフォルト)
+raise "hero loop frame 2 should be 2" unless spr_id(:hero, 2) == 2
+# loop = false (クランプ)
+raise "hero clamp frame 2 should be 3" unless spr_id(:hero, 2, false) == 3
+# Float フレーム番号
+raise "hero float frame 1.2 should be 3" unless spr_id(:hero, 1.2) == 3
+# 数値そのものを渡した場合
+raise "number passthrough" unless spr_id(99) == 99
+
+# 2. spr の描画呼び出し（headless でも例外なく実行できること）
+spr(:wall, 10, 20)
+spr(:hero, 10, 20, true) # flip_x
+spr(:hero, 10, 20, false, 1) # pal = 1
+spr(id_wall, 10, 20, false, false, 45, 1.5) # 旧互換シグネチャ
+spr("🧱", 10, 20)
+
+# 3. spr_ext / spr_ex / spr_rot のテスト
+spr_ext(:hero, 10, 20, 45, 1.5, 0.8) # Squash & Stretch
+spr_ex(:wall, 0, 0)
+spr_rot(:wall, 0, 0, 90)
+
+# 4. spr_clip のテスト
+spr_clip(:hero, 10, 20, 0, 0, 8, 8)
+
+# 5. blt での Symbol 指定
+blt(10, 20, :wall, 0, 0, 16, 16)
+
+# 6. @MAP と mget / mset の連携
+raise "mget(0, 0) should be wall id" unless mget(0, 0) == id_wall
+raise "mget(1, 0) should be nil" unless mget(1, 0).nil?
+
+# Symbol で mset
+mset(5, 5, :wall)
+raise "mset with symbol failed" unless mget(5, 5) == id_wall
+
+# 1文字エイリアスで mset
+mset(6, 6, "#")
+raise "mset with alias '#' failed" unless mget(6, 6) == id_wall
+
+# 空白セル消去
+mset(5, 5, nil)
+raise "mset with nil should clear" unless mget(5, 5).nil?
+
+$test_ok = true
+
+__END__
+@PALETTE 1
+# 1番パレット差分定義
+0: #000000
+1: #ffffff
+
+@SPRITE :wall # 🧱
+@SPRITE :hero 16x16 pal:1
+0000000000000000
+0111111111111110
+0111111111111110
+0111111111111110
+0000000000000000
+---
+0000000000000000
+0222222222222220
+0222222222222220
+0222222222222220
+0000000000000000
+
+@MAP
+# . #
+"##;
+
+    let (t, m) = cli::compile_ruby_script_str_with_filename(script, Some("test_decl_sprites.rb")).unwrap();
+    let rt = GameRuntime::new(&t, &m, true).expect("Runtime init should succeed");
+    let ok = rt.vm.globals.get("$test_ok").cloned();
+    assert_eq!(ok.map(|o| o.as_ref().clone()), Some(RObject::boolean(true)));
 }
