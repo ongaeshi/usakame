@@ -4296,17 +4296,17 @@ fn test_sprite_auto_packing_and_animation_parsing() {
 
 @MAP 0 0
 # @MAP セクション内で1文字エイリアス宣言
-# = :wall
+W = :wall
 E = :enemy
 S = :small
 
-# . #
+W . W
 E S
 
-# 2つ目の @MAP セクション: E と S は引き継ぎ、# だけ :anim (スロット5) に上書き
+# 2つ目の @MAP セクション: E と S は引き継ぎ、W だけ :anim (スロット5) に上書き
 @MAP 10 0
-# = :anim
-# E S
+W = :anim
+W E S
 "#;
 
     let (sprites, _banks, _palettes, name_table) = parse_tail_resources_full(tail, None);
@@ -4344,11 +4344,11 @@ E S
     // 6. @MAP のパース
     static EMPTY_ALIASES: std::sync::LazyLock<HashMap<char, i32>> = std::sync::LazyLock::new(HashMap::new);
     let (tilemap, map_aliases) = parse_tail_map_with_symbols(tail, &EMPTY_ALIASES, &name_table);
-    // (0, 0) は最初のマップの '#' -> スロット1
+    // (0, 0) は最初のマップの 'W' -> スロット1
     assert_eq!(tilemap.get(0, 0), 1);
     // (1, 0) は '.' -> 空セル (-1)
     assert_eq!(tilemap.get(1, 0), -1);
-    // (2, 0) は '#' -> スロット1
+    // (2, 0) は 'W' -> スロット1
     assert_eq!(tilemap.get(2, 0), 1);
     // (0, 1) は 'E' -> 0フレーム目 スロット3
     assert_eq!(tilemap.get(0, 1), 3);
@@ -4356,15 +4356,15 @@ E S
     assert_eq!(tilemap.get(1, 1), 2);
 
     // 2つ目のマップ (offset_x = 10, y = 0)
-    // (10, 0) は再定義された '#' -> :anim のスロット5
+    // (10, 0) は再定義された 'W' -> :anim のスロット5
     assert_eq!(tilemap.get(10, 0), 5);
     // (11, 0) は引き継がれた 'E' -> スロット3
     assert_eq!(tilemap.get(11, 0), 3);
     // (12, 0) は引き継がれた 'S' -> スロット2
     assert_eq!(tilemap.get(12, 0), 2);
 
-    // 最終的な map_aliases でも '#' がスロット5に更新されていること
-    assert_eq!(map_aliases.get(&'#'), Some(&5));
+    // 最終的な map_aliases でも 'W' がスロット5に更新されていること
+    assert_eq!(map_aliases.get(&'W'), Some(&5));
     assert_eq!(map_aliases.get(&'E'), Some(&3));
     assert_eq!(map_aliases.get(&'S'), Some(&2));
 }
@@ -4413,8 +4413,8 @@ mset(5, 5, :wall)
 raise "mset with symbol failed" unless mget(5, 5) == id_wall
 
 # 1文字エイリアスで mset
-mset(6, 6, "#")
-raise "mset with alias '#' failed" unless mget(6, 6) == id_wall
+mset(6, 6, "W")
+raise "mset with alias 'W' failed" unless mget(6, 6) == id_wall
 
 # 空白セル消去
 mset(5, 5, nil)
@@ -4443,8 +4443,8 @@ __END__
 0000000000000000
 
 @MAP
-# = :wall
-# . #
+W = :wall
+W . W
 "##;
 
     let (t, m) = cli::compile_ruby_script_str_with_filename(script, Some("test_decl_sprites.rb")).unwrap();
@@ -4460,7 +4460,7 @@ fn test_declarative_sprites_example_script() {
             .expect("examples/declarative_sprites.rb should compile");
     let mut rt = GameRuntime::new(&tail_data, &mrb_bytes, true)
         .expect("examples/declarative_sprites.rb should initialize");
-    // 1文字エイリアス行 ("################") が y=1 の壁タイル (ID 1) として正しくパースされていること
+    // 1文字エイリアス行 ("WWWWWWWWWWWWWWWW") が y=1 の壁タイル (ID 1) として正しくパースされていること
     assert_eq!(rt.tilemap.borrow().get(0, 1), 1);
     assert_eq!(rt.tilemap.borrow().get(15, 1), 1);
     for _ in 0..60 {

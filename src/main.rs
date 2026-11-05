@@ -1703,7 +1703,7 @@ fn try_resolve_alias_target(target_str: &str, names: &HashMap<String, Vec<i32>>)
     None
 }
 
-/// `@MAP` セクション内の1文字エイリアス宣言（例: `# = :wall`, `C = :chest  $ = :coin`）を解析する
+/// `@MAP` セクション内の1文字エイリアス宣言（例: `W = :wall`, `C = :chest  $ = :coin`）を解析する
 pub fn parse_alias_declarations(
     line: &str,
     names: &HashMap<String, Vec<i32>>,

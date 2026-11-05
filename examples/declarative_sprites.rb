@@ -3,17 +3,17 @@
 # ==============================================================================
 # [新記法・新APIデモ]
 # - @SPRITE :name による名前付き定義・2次元オートパッキング・アニメーション (--- / 複数絵文字)
-# - @MAP セクション内での1文字エイリアス宣言 ('# = :wall', '$ = :coin' 等) とシンボル指定
+# - @MAP セクション内での1文字エイリアス宣言 ('W = :wall', '$ = :coin' 等) とシンボル指定
 # - spr_id(:name, frame, loop) によるループ再生 & クランプ(loop=false)再生
 # - spr(:name, x, y, flip_x, pal) によるシンボル直接描画 & 一時パレットスワップ
 # - spr_ext / spr_rot による Squash & Stretch (縦横独立拡縮) と中心ピボット回転
 # - spr_clip & blt(:name) によるローカル切り抜き描画 (地面から出現する32x32ゴーレム等)
-# - mget / mset(:symbol) / mset("#") によるシンボル・エイリアス対応タイルマップ操作
+# - mget / mset(:symbol) / mset("W") によるシンボル・エイリアス対応タイルマップ操作
 #
 # 操作方法:
 #   矢印キー / WASD : プレイヤー (:hero) 移動 (移動時に Squash & Stretch)
 #   Z / Space       : 剣スラッシュ攻撃 (:slash の loop=false クランプ再生 & 敵ヒット)
-#   X / Enter       : 向いているマスの壁 ('#') を設置/撤去 + スライムの属性パレット切替
+#   X / Enter       : 向いているマスの壁 ('W') を設置/撤去 + スライムの属性パレット切替
 # ==============================================================================
 
 $t = 0
@@ -216,13 +216,13 @@ def update
     $slash_y = $py
   end
 
-  # --- 4. X / Enter: 壁エイリアス '#' の動的設置/撤去 + スライムパレット切替 ---
+  # --- 4. X / Enter: 壁エイリアス 'W' の動的設置/撤去 + スライムパレット切替 ---
   b5 = btn(5)
   if b5 && !$prev_btn5
     # スライムのパレットを切り替え
     $slime_pal_idx = ($slime_pal_idx + 1) % $SLIME_PALS.size
 
-    # プレイヤーの前方セルに壁 '#' をトグル配置 (外周壁は保護)
+    # プレイヤーの前方セルに壁 'W' をトグル配置 (外周壁は保護)
     tx = (cx + $dir_x).clamp(1, 14)
     ty = (cy + $dir_y).clamp(2, 8)
     target_tile = mget(tx, ty)
@@ -230,8 +230,8 @@ def update
       mdel(tx, ty)
       spawn_sparks(tx * 16 + 4, ty * 16 + 4, 5, 2)
     elsif target_tile.nil?
-      # 1文字エイリアス "#" を mset に直接渡して壁を設置！
-      mset(tx, ty, "#")
+      # 1文字エイリアス "W" を mset に直接渡して壁を設置！
+      mset(tx, ty, "W")
       spawn_sparks(tx * 16 + 4, ty * 16 + 4, 5, 1)
     end
   end
@@ -311,10 +311,10 @@ def draw
   mset(1, 2, torch_id)
   mset(14, 2, torch_id)
 
-  # タイルマップ一括描画 (@MAP で '#' や ':wall', 'coin' で配置したセル)
+  # タイルマップ一括描画 (@MAP で 'W' や ':wall', 'coin' で配置したセル)
   map(0, 0, 0, 0, 16, 10)
 
-  # プレイヤー前方のターゲットカーソル ('#' 壁トグル位置)
+  # プレイヤー前方のターゲットカーソル ('W' 壁トグル位置)
   cx = (($px + 8).to_i) / 16
   cy = (($py + 8).to_i) / 16
   tx = (cx + $dir_x).clamp(1, 14)
@@ -413,7 +413,7 @@ def draw
   spr(:spark, 232, 224)
 
   # フッター操作ガイド
-  print_text("ARROWS:MOVE  Z:SLASH(CLAMP)  X:WALL(#)/PAL", 4, 245, 6)
+  print_text("ARROWS:MOVE  Z:SLASH(CLAMP)  X:WALL(W)/PAL", 4, 245, 6)
 end
 
 __END__
@@ -629,22 +629,22 @@ AA7777AA
 
 # ==============================================================================
 # タイルマップ定義 (@MAP)
-# - 1文字エイリアス宣言 ('# = :wall', '$ = :coin', 'C = :chest', 'T = :torch')
+# - 1文字エイリアス宣言 ('W = :wall', '$ = :coin', 'C = :chest', 'T = :torch')
 # - スペース区切りシンボル名記法 ('wall', 'coin', 'chest') のハイブリッド実演
 # ==============================================================================
 @MAP 0 1
 # 1文字エイリアス（凡例）宣言
-# = :wall
+W = :wall
 $ = :coin
 C = :chest
 T = :torch
 
-################
-#T....$..$....T#
-#..##......##..#
-#..#...$....#..#
-#....C.........#
-#......##......#
-#..$...##......#
-#............C.#
+WWWWWWWWWWWWWWWW
+WT....$..$....TW
+W..WW......WW..W
+W..W...$....W..W
+W....C.........W
+W......WW......W
+W..$...WW......W
+W............C.W
 wall wall wall wall wall wall wall wall wall wall wall wall wall wall wall wall
