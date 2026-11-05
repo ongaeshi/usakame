@@ -757,7 +757,6 @@ pub fn decode_png_sheet_into_sprites(
 pub struct ParsedSpriteDef {
     pub explicit_id: Option<i32>,
     pub name: Option<String>,
-    pub map_alias: Option<char>,
     pub pal_id: Option<i32>,
     pub dims: Option<(u16, u16)>,
     pub emojis: Vec<String>,
@@ -861,7 +860,6 @@ pub fn parse_sprite_header(rest: &str) -> ParsedSpriteDef {
     let parts: Vec<&str> = rest.split_whitespace().collect();
     let mut explicit_id = None;
     let mut name = None;
-    let mut map_alias = None;
     let mut pal_id = None;
     let mut dims = None;
     let mut emojis = Vec::new();
@@ -890,6 +888,9 @@ pub fn parse_sprite_header(rest: &str) -> ParsedSpriteDef {
 
     while i < parts.len() {
         let tok = parts[i];
+        if tok.starts_with('#') {
+            break;
+        }
         if let Some(val_str) = tok
             .strip_prefix("pal:")
             .or_else(|| tok.strip_prefix("p:"))
@@ -903,22 +904,6 @@ pub fn parse_sprite_header(rest: &str) -> ParsedSpriteDef {
             dims = Some(d);
         } else if emoji::resolve_emoji_codepoint(tok).is_some() {
             emojis.push(tok.to_string());
-        } else if tok == "#" {
-            if map_alias.is_none()
-                && (i + 1 == parts.len()
-                    || emoji::resolve_emoji_codepoint(parts[i + 1]).is_some()
-                    || parts[i + 1].starts_with("pal:")
-                    || parts[i + 1].starts_with("p:")
-                    || parse_tile_dims(parts[i + 1]).is_some())
-            {
-                map_alias = Some('#');
-            } else {
-                break;
-            }
-        } else if tok.starts_with('#') {
-            break;
-        } else if map_alias.is_none() && tok.chars().count() == 1 {
-            map_alias = Some(tok.chars().next().unwrap());
         }
         i += 1;
     }
@@ -926,7 +911,6 @@ pub fn parse_sprite_header(rest: &str) -> ParsedSpriteDef {
     ParsedSpriteDef {
         explicit_id,
         name,
-        map_alias,
         pal_id,
         dims,
         emojis,
@@ -1090,14 +1074,12 @@ pub fn parse_tail_resources_full(
     HashMap<i32, BankData>,
     HashMap<i32, PaletteRgba>,
     HashMap<String, Vec<i32>>,
-    HashMap<char, i32>,
 ) {
     let palettes = parse_tail_palettes(data_section);
     let mut sprites = HashMap::new();
     let mut banks = HashMap::new();
     banks.insert(0, BankData::new(0));
     let mut name_table: HashMap<String, Vec<i32>> = HashMap::new();
-    let mut map_aliases: HashMap<char, i32> = HashMap::new();
     let mut emoji_atlas = emoji::EmojiAtlas::new();
 
     let mut parsed_resources: Vec<ParsedResource> = Vec::new();
@@ -1371,11 +1353,6 @@ pub fn parse_tail_resources_full(
                         name_table.insert(clean_name.clone(), assigned_ids.clone());
                         name_table.insert(format!(":{}", clean_name), assigned_ids.clone());
                     }
-                    if let Some(alias) = def.map_alias {
-                        if let Some(&first_id) = assigned_ids.first() {
-                            map_aliases.insert(alias, first_id);
-                        }
-                    }
                 }
             }
         }
@@ -1428,16 +1405,11 @@ pub fn parse_tail_resources_full(
                     name_table.insert(clean_name.clone(), assigned_ids.clone());
                     name_table.insert(format!(":{}", clean_name), assigned_ids.clone());
                 }
-                if let Some(alias) = def.map_alias {
-                    if let Some(&first_id) = assigned_ids.first() {
-                        map_aliases.insert(alias, first_id);
-                    }
-                }
             }
         }
     }
 
-    (sprites, banks, palettes, name_table, map_aliases)
+    (sprites, banks, palettes, name_table)
 }
 
 /// `__END__` 以降のスプライト定義をパースする（後方互換ラッパー）
@@ -1708,20 +1680,139 @@ impl MapObject {
     }
 }
 
-/// `__END__` 以降の `@MAP [offset_x] [offset_y]` セクションをパースして `Tilemap` を生成する（後方互換ラッパー）
-pub fn parse_tail_map(data_section: &str) -> Tilemap {
-    static EMPTY_ALIASES: std::sync::LazyLock<HashMap<char, i32>> = std::sync::LazyLock::new(HashMap::new);
-    static EMPTY_NAMES: std::sync::LazyLock<HashMap<String, Vec<i32>>> = std::sync::LazyLock::new(HashMap::new);
-    parse_tail_map_with_symbols(data_section, &EMPTY_ALIASES, &EMPTY_NAMES)
+fn try_resolve_alias_target(target_str: &str, names: &HashMap<String, Vec<i32>>) -> Option<i32> {
+    let clean = target_str.trim();
+    if clean.is_empty() {
+        return None;
+    }
+    // 1. 整数ID
+    if let Ok(id) = clean.parse::<i32>() {
+        return Some(id);
+    }
+    // 2. シンボルまたはスプライト名 (:wall or wall)
+    let sym_key = if let Some(stripped) = clean.strip_prefix(':') {
+        stripped
+    } else {
+        clean
+    };
+    if let Some(ids) = names.get(sym_key).or_else(|| names.get(&format!(":{}", sym_key))) {
+        if let Some(&first) = ids.first() {
+            return Some(first);
+        }
+    }
+    None
 }
 
-/// エイリアスおよびスプライト名テーブルを考慮して `Tilemap` を生成する
+/// `@MAP` セクション内の1文字エイリアス宣言（例: `# = :wall`, `C = :chest  $ = :coin`）を解析する
+pub fn parse_alias_declarations(
+    line: &str,
+    names: &HashMap<String, Vec<i32>>,
+    aliases: &mut HashMap<char, i32>,
+) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if !trimmed.contains('=') && !trimmed.contains(':') {
+        return false;
+    }
+
+    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+    let mut i = 0;
+    let mut found_any = false;
+    let mut all_valid = true;
+
+    while i < tokens.len() {
+        let tok = tokens[i];
+
+        // 1. "key=val" や "key:val"（1トークン内にある場合）
+        if let Some((lhs, rhs)) = tok.split_once('=').or_else(|| {
+            if tok.starts_with(':') {
+                None
+            } else {
+                tok.split_once(':')
+            }
+        }) {
+            let lhs_trim = lhs.trim();
+            let rhs_trim = rhs.trim();
+
+            if lhs_trim.chars().count() == 1 {
+                let alias_char = lhs_trim.chars().next().unwrap();
+                let target_str = if !rhs_trim.is_empty() {
+                    rhs_trim
+                } else if i + 1 < tokens.len() {
+                    i += 1;
+                    tokens[i]
+                } else {
+                    ""
+                };
+
+                if let Some(target_id) = try_resolve_alias_target(target_str, names) {
+                    aliases.insert(alias_char, target_id);
+                    found_any = true;
+                    i += 1;
+                    continue;
+                }
+            }
+        } else if tok.chars().count() == 1 && i + 1 < tokens.len() {
+            // 2. "key = val", "key : val", "key =val", "key :val"
+            let alias_char = tok.chars().next().unwrap();
+            let next_tok = tokens[i + 1];
+
+            if next_tok == "=" || next_tok == ":" {
+                if i + 2 < tokens.len() {
+                    let target_str = tokens[i + 2];
+                    if let Some(target_id) = try_resolve_alias_target(target_str, names) {
+                        aliases.insert(alias_char, target_id);
+                        found_any = true;
+                        i += 3;
+                        continue;
+                    }
+                }
+            } else if let Some(stripped) = next_tok.strip_prefix('=').or_else(|| next_tok.strip_prefix(':')) {
+                let target_str = if !stripped.is_empty() {
+                    stripped
+                } else if i + 2 < tokens.len() {
+                    tokens[i + 2]
+                } else {
+                    ""
+                };
+                if let Some(target_id) = try_resolve_alias_target(target_str, names) {
+                    aliases.insert(alias_char, target_id);
+                    found_any = true;
+                    i += if stripped.is_empty() { 3 } else { 2 };
+                    continue;
+                }
+            }
+        }
+
+        // 行末コメント（例: `# = :wall # 壁`）への対応
+        if found_any && tok.starts_with('#') {
+            break;
+        }
+
+        all_valid = false;
+        break;
+    }
+
+    found_any && all_valid
+}
+
+/// `__END__` 以降の `@MAP [offset_x] [offset_y]` セクションをパースして `Tilemap` を生成する（後方互換ラッパー）
+pub fn parse_tail_map(data_section: &str) -> Tilemap {
+    let (_, _, _, name_table) = parse_tail_resources_full(data_section, None);
+    static EMPTY_ALIASES: std::sync::LazyLock<HashMap<char, i32>> = std::sync::LazyLock::new(HashMap::new);
+    parse_tail_map_with_symbols(data_section, &EMPTY_ALIASES, &name_table).0
+}
+
+/// エイリアスおよびスプライト名テーブルを考慮して `Tilemap` と最新のエイリアステーブルを生成する
 pub fn parse_tail_map_with_symbols(
     data_section: &str,
-    aliases: &HashMap<char, i32>,
+    initial_aliases: &HashMap<char, i32>,
     names: &HashMap<String, Vec<i32>>,
-) -> Tilemap {
+) -> (Tilemap, HashMap<char, i32>) {
     let mut tilemap = Tilemap::new();
+    let mut aliases = initial_aliases.clone();
     let mut in_map = false;
     let mut offset_x = 0i32;
     let mut cur_y = 0i32;
@@ -1748,6 +1839,11 @@ pub fn parse_tail_map_with_symbols(
         } else if line.starts_with('@') {
             in_map = false;
         } else if in_map {
+            // エイリアス宣言行であれば aliases を更新して行カウントは進めない
+            if parse_alias_declarations(line, names, &mut aliases) {
+                continue;
+            }
+
             if line.starts_with('#') {
                 let is_hash_alias = aliases.contains_key(&'#');
                 let has_sep = line.contains(|c: char| c.is_ascii_whitespace() || c == ',');
@@ -1777,7 +1873,7 @@ pub fn parse_tail_map_with_symbols(
                     continue;
                 }
             }
-            tilemap.parse_row_line_with_symbols(offset_x, cur_y, line, aliases, names);
+            tilemap.parse_row_line_with_symbols(offset_x, cur_y, line, &aliases, names);
             cur_y += 1;
             if cur_y > tilemap.height {
                 tilemap.height = cur_y;
@@ -1785,7 +1881,7 @@ pub fn parse_tail_map_with_symbols(
         }
     }
 
-    tilemap
+    (tilemap, aliases)
 }
 
 /// Rubyグローバル変数 `$MAP`（文字列配列または2次元整数配列）から `Tilemap` に反映する
@@ -4626,7 +4722,7 @@ fn register_engine_api(
                 String::new()
             };
 
-            let (sprites, banks, _, _, _) = parse_tail_resources_full(&tail, p.parent());
+            let (sprites, banks, _, _) = parse_tail_resources_full(&tail, p.parent());
             let bank0_opt = banks.get(&0);
             let mut slot_list = Vec::with_capacity(num_slots);
 
@@ -4737,7 +4833,7 @@ fn register_engine_api(
                 String::new()
             };
 
-            let (sprites, banks, _, _, _) = parse_tail_resources_full(&tail, base_dir);
+            let (sprites, banks, _, _) = parse_tail_resources_full(&tail, base_dir);
             let has_bank_directive = tail.lines().any(|l| {
                 let t = l.trim();
                 t.starts_with("@BANK")
@@ -4853,7 +4949,7 @@ fn register_engine_api(
                 String::new()
             };
 
-            let (sprites, _, _, _, _) = parse_tail_resources_full(&tail, base_dir);
+            let (sprites, _, _, _) = parse_tail_resources_full(&tail, base_dir);
             let mut hash = mrubyedge::yamrb::value::RHash::default();
             for (id, sp) in &sprites {
                 let slot_x = *id as usize % 16;
@@ -4935,7 +5031,7 @@ fn register_engine_api(
                 path_str.clone()
             };
 
-            let (parsed_sprites, parsed_banks, _, _, _) = parse_tail_resources_full(&tail, base_dir);
+            let (parsed_sprites, parsed_banks, _, _) = parse_tail_resources_full(&tail, base_dir);
             let has_bank_directive = tail.lines().any(|l| {
                 let t = l.trim();
                 t.starts_with("@BANK")
@@ -8242,9 +8338,10 @@ impl GameRuntime {
         headless: bool,
         script_args: &[String],
     ) -> Result<Self, ScriptError> {
-        let (mut sprites_map, mut banks_map, palettes_map, sprite_names_map, map_aliases_map) =
+        let (mut sprites_map, mut banks_map, palettes_map, sprite_names_map) =
             parse_tail_resources_full(tail_data, None);
-        let tail_map = parse_tail_map_with_symbols(tail_data, &map_aliases_map, &sprite_names_map);
+        static EMPTY_ALIASES: std::sync::LazyLock<HashMap<char, i32>> = std::sync::LazyLock::new(HashMap::new);
+        let (tail_map, map_aliases_map) = parse_tail_map_with_symbols(tail_data, &EMPTY_ALIASES, &sprite_names_map);
         let tail_objects = parse_tail_objects(tail_data);
         let (mut sfx_map, mut music_map) = sound::parse_tail_sounds(tail_data);
 
@@ -8397,9 +8494,10 @@ impl GameRuntime {
     /// メソッド定義とスプライト・マップ定義をホットリロードする。
     /// ただしスクリプト上のトップレベル初期値や `@MAP` 自体が書き換えられた場合は新しい定義を採用する。
     pub fn hot_reload(&mut self, new_tail_data: &str, new_mrb_bytes: &[u8]) -> Result<(), ScriptError> {
-        let (mut new_sprites_map, mut new_banks_map, new_palettes_map, new_names_map, new_aliases_map) =
+        let (mut new_sprites_map, mut new_banks_map, new_palettes_map, new_names_map) =
             parse_tail_resources_full(new_tail_data, None);
-        let new_tail_map = parse_tail_map_with_symbols(new_tail_data, &new_aliases_map, &new_names_map);
+        static EMPTY_ALIASES: std::sync::LazyLock<HashMap<char, i32>> = std::sync::LazyLock::new(HashMap::new);
+        let (new_tail_map, new_aliases_map) = parse_tail_map_with_symbols(new_tail_data, &EMPTY_ALIASES, &new_names_map);
         let new_tail_objects = parse_tail_objects(new_tail_data);
         let (mut new_sfx_map, mut new_music_map) = sound::parse_tail_sounds(new_tail_data);
 

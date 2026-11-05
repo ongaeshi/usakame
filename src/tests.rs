@@ -2338,7 +2338,7 @@ fn test_rabbit_knight_example_script() {
 #[test]
 fn test_bank_parse_and_sprite_sync() {
     let tail = "@SPRITE 0\n7777\n7777\n@SPRITE 1\n8888\n8888\n";
-    let (sprites, banks, _, _, _) = parse_tail_resources_full(tail, None);
+    let (sprites, banks, _, _) = parse_tail_resources_full(tail, None);
 
     assert!(sprites.contains_key(&0));
     assert!(sprites.contains_key(&1));
@@ -3050,7 +3050,7 @@ B: #78F878
 ...B...
 "#;
 
-    let (sprites, banks, palettes, _, _) = parse_tail_resources_full(tail, None);
+    let (sprites, banks, palettes, _) = parse_tail_resources_full(tail, None);
 
     // パレットのパース検証
     // パレット0は @PALETTE 0 で上書きされず標準 PALETTE_RGBA を維持
@@ -3211,7 +3211,7 @@ fn test_sprite_variable_size_32x32() {
         tail.push('\n');
     }
 
-    let (sprites, banks, _, _, _) = parse_tail_resources_full(&tail, None);
+    let (sprites, banks, _, _) = parse_tail_resources_full(&tail, None);
     let sp = sprites.get(&0).expect("Sprite 0 should exist");
     assert_eq!(sp.width, 32);
     assert_eq!(sp.height, 32);
@@ -3258,7 +3258,7 @@ fn test_sprite_variable_size_16x32_and_auto_detection() {
         tail.push_str("........................\n");
     }
 
-    let (sprites, banks, _, _, _) = parse_tail_resources_full(&tail, None);
+    let (sprites, banks, _, _) = parse_tail_resources_full(&tail, None);
 
     let sp4 = sprites.get(&4).expect("Sprite 4 should exist");
     assert_eq!(sp4.width, 16);
@@ -3288,7 +3288,7 @@ fn test_sprite_overlap_behavior() {
         tail.push('\n');
     }
 
-    let (sprites, banks, _, _, _) = parse_tail_resources_full(&tail, None);
+    let (sprites, banks, _, _) = parse_tail_resources_full(&tail, None);
     let bank0 = banks.get(&0).unwrap();
 
     // スロット1の原点 (16, 0) は ID 1 (色2) で上書きされている
@@ -4268,8 +4268,8 @@ fn test_sprite_auto_packing_and_animation_parsing() {
 0123012301230123
 0123012301230123
 
-# 名前指定・マップエイリアス・絵文字
-@SPRITE :wall # 🧱
+# 名前指定・絵文字
+@SPRITE :wall 🧱
 
 # 8x8 小型スプライト（自動検出）
 @SPRITE :small
@@ -4295,11 +4295,21 @@ fn test_sprite_auto_packing_and_animation_parsing() {
 44444444
 
 @MAP 0 0
+# @MAP セクション内で1文字エイリアス宣言
+# = :wall
+E = :enemy
+S = :small
+
 # . #
-enemy small
+E S
+
+# 2つ目の @MAP セクション: E と S は引き継ぎ、# だけ :anim (スロット5) に上書き
+@MAP 10 0
+# = :anim
+# E S
 "#;
 
-    let (sprites, _banks, _palettes, name_table, map_aliases) = parse_tail_resources_full(tail, None);
+    let (sprites, _banks, _palettes, name_table) = parse_tail_resources_full(tail, None);
 
     // 1. スロット0は明示指定の 0
     assert!(sprites.contains_key(&0));
@@ -4308,7 +4318,6 @@ enemy small
     // :wall は絵文字 🧱 で 16x16 -> スロット1
     let wall_ids = name_table.get("wall").expect("name_table should have wall");
     assert_eq!(wall_ids, &[1]);
-    assert_eq!(map_aliases.get(&'#'), Some(&1));
 
     // 3. :small は 8x8 (スロット2)
     let small_ids = name_table.get("small").expect("name_table should have small");
@@ -4333,17 +4342,31 @@ enemy small
     assert_eq!(sp_anim1.height, 3);
 
     // 6. @MAP のパース
-    let tilemap = parse_tail_map_with_symbols(tail, &map_aliases, &name_table);
-    // (0, 0) は '#' -> スロット1
+    static EMPTY_ALIASES: std::sync::LazyLock<HashMap<char, i32>> = std::sync::LazyLock::new(HashMap::new);
+    let (tilemap, map_aliases) = parse_tail_map_with_symbols(tail, &EMPTY_ALIASES, &name_table);
+    // (0, 0) は最初のマップの '#' -> スロット1
     assert_eq!(tilemap.get(0, 0), 1);
     // (1, 0) は '.' -> 空セル (-1)
     assert_eq!(tilemap.get(1, 0), -1);
     // (2, 0) は '#' -> スロット1
     assert_eq!(tilemap.get(2, 0), 1);
-    // (0, 1) は 'enemy' -> 0フレーム目 スロット3
+    // (0, 1) は 'E' -> 0フレーム目 スロット3
     assert_eq!(tilemap.get(0, 1), 3);
-    // (1, 1) は 'small' -> スロット2
+    // (1, 1) は 'S' -> スロット2
     assert_eq!(tilemap.get(1, 1), 2);
+
+    // 2つ目のマップ (offset_x = 10, y = 0)
+    // (10, 0) は再定義された '#' -> :anim のスロット5
+    assert_eq!(tilemap.get(10, 0), 5);
+    // (11, 0) は引き継がれた 'E' -> スロット3
+    assert_eq!(tilemap.get(11, 0), 3);
+    // (12, 0) は引き継がれた 'S' -> スロット2
+    assert_eq!(tilemap.get(12, 0), 2);
+
+    // 最終的な map_aliases でも '#' がスロット5に更新されていること
+    assert_eq!(map_aliases.get(&'#'), Some(&5));
+    assert_eq!(map_aliases.get(&'E'), Some(&3));
+    assert_eq!(map_aliases.get(&'S'), Some(&2));
 }
 
 #[test]
@@ -4405,7 +4428,7 @@ __END__
 0: #000000
 1: #ffffff
 
-@SPRITE :wall # 🧱
+@SPRITE :wall 🧱
 @SPRITE :hero 16x16 pal:1
 0000000000000000
 0111111111111110
@@ -4420,6 +4443,7 @@ __END__
 0000000000000000
 
 @MAP
+# = :wall
 # . #
 "##;
 
