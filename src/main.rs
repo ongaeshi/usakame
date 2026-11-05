@@ -1750,15 +1750,29 @@ pub fn parse_tail_map_with_symbols(
         } else if in_map {
             if line.starts_with('#') {
                 let is_hash_alias = aliases.contains_key(&'#');
-                let is_map_data = is_hash_alias && line.split(|c: char| c.is_ascii_whitespace() || c == ',').all(|token| {
-                    let tok = token.trim();
-                    tok.is_empty()
-                        || tok == "." || tok == ".." || tok == "_" || tok == "-"
-                        || tok.parse::<i32>().is_ok()
-                        || names.contains_key(tok)
-                        || names.contains_key(&format!(":{}", tok))
-                        || (tok.chars().count() == 1 && aliases.contains_key(&tok.chars().next().unwrap()))
-                });
+                let has_sep = line.contains(|c: char| c.is_ascii_whitespace() || c == ',');
+                let is_map_data = is_hash_alias
+                    && if has_sep {
+                        line.split(|c: char| c.is_ascii_whitespace() || c == ',').all(|token| {
+                            let tok = token.trim();
+                            tok.is_empty()
+                                || tok == "."
+                                || tok == ".."
+                                || tok == "_"
+                                || tok == "-"
+                                || tok.parse::<i32>().is_ok()
+                                || names.contains_key(tok)
+                                || names.contains_key(&format!(":{}", tok))
+                                || (tok.chars().count() == 1
+                                    && aliases.contains_key(&tok.chars().next().unwrap()))
+                        })
+                    } else {
+                        line.chars().all(|ch| {
+                            matches!(ch, '.' | '_' | '-')
+                                || ch.is_ascii_hexdigit()
+                                || aliases.contains_key(&ch)
+                        })
+                    };
                 if !is_map_data {
                     continue;
                 }

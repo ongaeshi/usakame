@@ -4428,3 +4428,19 @@ __END__
     let ok = rt.vm.globals.get("$test_ok").cloned();
     assert_eq!(ok.map(|o| o.as_ref().clone()), Some(RObject::boolean(true)));
 }
+
+#[test]
+fn test_declarative_sprites_example_script() {
+    let (_, tail_data, mrb_bytes) =
+        cli::compile_ruby_script_file(std::path::Path::new("examples/declarative_sprites.rb"))
+            .expect("examples/declarative_sprites.rb should compile");
+    let mut rt = GameRuntime::new(&tail_data, &mrb_bytes, true)
+        .expect("examples/declarative_sprites.rb should initialize");
+    // 1文字エイリアス行 ("################") が y=1 の壁タイル (ID 1) として正しくパースされていること
+    assert_eq!(rt.tilemap.borrow().get(0, 1), 1);
+    assert_eq!(rt.tilemap.borrow().get(15, 1), 1);
+    for _ in 0..60 {
+        rt.call_update_result().expect("declarative_sprites update should succeed");
+        rt.call_draw_result().expect("declarative_sprites draw should succeed");
+    }
+}

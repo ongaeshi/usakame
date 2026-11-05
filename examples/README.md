@@ -47,6 +47,7 @@ AI コード生成や高度なゲーム制作で頻出する、mrubyedge に最�
 | サンプル名 | ファイル | 主な機能・API |
 |:---|:---|:---|
 | **総合機能デモ** | [`demo.rb`](demo.rb) | 描画プリミティブ、アニメーション、テキスト表示のショーケース。 |
+| **宣言的スプライト & 拡張描画デモ** | [`declarative_sprites.rb`](declarative_sprites.rb) | `@SPRITE :name`（自動パッキング・`---`/絵文字アニメ）、`spr_id`（ループ/クランプ）、`spr_ext`（Squash & Stretch）、`spr_clip`、エイリアス `@MAP`。 |
 | **サウンド・音楽デモ** | [`sound.rb`](sound.rb) | MML 音楽再生（`music`）、効果音（`sfx`）、音階再生（`play`）。 |
 | **タイルマップ描画** | [`tilemap.rb`](tilemap.rb) | `map()` を使ったタイルマップ描画とスクロール。 |
 | **マウス入力** | [`mouse.rb`](mouse.rb) | マウス座標（`mouse_x`, `mouse_y`）とクリック判定（`btn(BTN_MOUSE_LEFT)`）。 |
