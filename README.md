@@ -65,7 +65,7 @@ cd myapp
 uk run
 
 # 3. ゲームと内蔵エディタ（スプライト＆タイルマップ）を同時起動してリアルタイム編集
-uk run_with_edit
+uk run-with-edit
 # または単体でエディタを起動:
 uk edit spr game.rb
 uk edit map game.rb
@@ -87,7 +87,10 @@ uk check game.rb -g --frames 120   # -g (--gacha) で方向キー・パッドボ
 # 7. 内蔵サンプル集を任意のフォルダに展開（Pyxel の copy_examples 相当）
 uk examples ./examples
 
-# 8. ブラウザで実行（Server-Sent Events による自動ライブリロード対応）
+# 8. 既存プロジェクトの AGENTS.md や docs/ ドキュメントを最新版に更新
+uk update-docs
+
+# 9. ブラウザで実行（Server-Sent Events による自動ライブリロード対応）
 uk browser game.rb
 
 # 9. 配布用単一バイナリのビルド

@@ -9817,6 +9817,12 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        cli::CliAction::UpdateDocs { dir } => {
+            if let Err(err) = cli::cmd_update_docs(&dir) {
+                eprintln!("Error: {}", err);
+                std::process::exit(1);
+            }
+        }
         cli::CliAction::Edit { kind, target_path } => {
             if kind == cli::EditorKind::All {
                 let _ = cli::spawn_editor_processes(cli::EditorKind::Tilemap, &target_path);

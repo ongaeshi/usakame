@@ -65,7 +65,7 @@ AI コード生成や高度なゲーム制作で頻出する、mrubyedge に最�
 ```bash
 uk run examples/platformer.rb
 # またはエディタを同時に起動して編集:
-uk run_with_edit examples/rabbit_knight.rb
+uk run-with-edit examples/rabbit_knight.rb
 ```
 
 ### 2. 高速ヘッドレス検証

@@ -3612,7 +3612,16 @@ fn test_cli_parse_new_edit_examples_and_run_with_edit() {
         }
     );
 
-    // 6. uk run_with_edit & uk run --edit
+    // 6. uk run-with-edit & uk run_with_edit & uk run --edit
+    let act_rwe_kebab = cli::parse_cli_args(["uk", "run-with-edit", "my_app.rb"].map(String::from)).unwrap();
+    assert_eq!(
+        act_rwe_kebab,
+        cli::CliAction::RunWithEdit {
+            script_path: std::path::PathBuf::from("my_app.rb"),
+            script_args: Vec::new(),
+            editor_kind: cli::EditorKind::All,
+        }
+    );
     let act_rwe = cli::parse_cli_args(["uk", "run_with_edit", "my_app.rb"].map(String::from)).unwrap();
     assert_eq!(
         act_rwe,
@@ -3629,6 +3638,29 @@ fn test_cli_parse_new_edit_examples_and_run_with_edit() {
             script_path: std::path::PathBuf::from("my_app.rb"),
             script_args: Vec::new(),
             editor_kind: cli::EditorKind::Sprite,
+        }
+    );
+
+    // 7. uk update-docs & uk update_docs
+    let act_ud_default = cli::parse_cli_args(["uk", "update-docs"].map(String::from)).unwrap();
+    assert_eq!(
+        act_ud_default,
+        cli::CliAction::UpdateDocs {
+            dir: std::path::PathBuf::from("."),
+        }
+    );
+    let act_ud_target = cli::parse_cli_args(["uk", "update-docs", "my_sketchbook"].map(String::from)).unwrap();
+    assert_eq!(
+        act_ud_target,
+        cli::CliAction::UpdateDocs {
+            dir: std::path::PathBuf::from("my_sketchbook"),
+        }
+    );
+    let act_ud_snake = cli::parse_cli_args(["uk", "update_docs", "my_sketchbook"].map(String::from)).unwrap();
+    assert_eq!(
+        act_ud_snake,
+        cli::CliAction::UpdateDocs {
+            dir: std::path::PathBuf::from("my_sketchbook"),
         }
     );
 }
@@ -3738,6 +3770,56 @@ fn test_cmd_new_and_examples_archive_workflow() {
     assert_eq!(
         rt_sp.vm.globals.get("$spawn_ok").map(|o| o.as_ref().clone()),
         Some(RObject::boolean(true))
+    );
+
+    let _ = std::fs::remove_dir_all(&base_temp);
+}
+
+#[test]
+fn test_cmd_update_docs_workflow() {
+    let base_temp = std::env::temp_dir().join("uk_test_update_docs_workflow");
+    let _ = std::fs::remove_dir_all(&base_temp);
+    std::fs::create_dir_all(&base_temp).unwrap();
+
+    let project_dir = base_temp.join("my_existing_sketchbook");
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    // 既存のゲームスクリプトが存在する場合
+    let existing_game_rb = "# Custom Game\ndef update; end\ndef draw; end\n";
+    let game_rb_path = project_dir.join("game.rb");
+    std::fs::write(&game_rb_path, existing_game_rb).unwrap();
+
+    // cmd_update_docs を実行
+    let updated_files = cli::cmd_update_docs(&project_dir).expect("cmd_update_docs should succeed");
+
+    // game.rb はそのまま維持されていること
+    assert_eq!(
+        std::fs::read_to_string(&game_rb_path).unwrap(),
+        existing_game_rb
+    );
+
+    // AGENTS.md, docs/api.md, docs/mrubyedge_api.md が生成されていること
+    let agents_path = project_dir.join("AGENTS.md");
+    let api_path = project_dir.join("docs").join("api.md");
+    let mruby_path = project_dir.join("docs").join("mrubyedge_api.md");
+
+    assert!(agents_path.exists());
+    assert!(api_path.exists());
+    assert!(mruby_path.exists());
+
+    let agents_text = std::fs::read_to_string(&agents_path).unwrap();
+    assert!(agents_text.contains("MY_EXISTING_SKETCHBOOK"));
+    assert!(agents_text.contains("docs/mrubyedge_api.md"));
+    assert!(agents_text.contains("docs/api.md"));
+
+    assert_eq!(updated_files.len(), 3);
+
+    // 再度実行してもエラーにならず上書き更新できること
+    let updated_files2 = cli::cmd_update_docs(&project_dir).expect("second cmd_update_docs should succeed");
+    assert_eq!(updated_files2.len(), 3);
+    assert_eq!(
+        std::fs::read_to_string(&game_rb_path).unwrap(),
+        existing_game_rb
     );
 
     let _ = std::fs::remove_dir_all(&base_temp);
@@ -4000,7 +4082,6 @@ square c4 e4 g4
 
     let _ = std::fs::remove_dir_all(&base_temp);
 }
-
 
 #[test]
 fn test_cmd_check_cli_parsing_and_headless_verification() {

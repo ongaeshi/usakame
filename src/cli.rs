@@ -50,6 +50,8 @@ pub enum CliAction {
     },
     /// `uk examples [dest_dir]` (同梱サンプルコード群の展開)
     Examples { dest_dir: PathBuf },
+    /// `uk update-docs [dir]` (AGENTS.md および docs/ の最新化)
+    UpdateDocs { dir: PathBuf },
     /// `uk edit [spr|map|all] [script.rb]` (内蔵スプライト/タイルマップエディタ起動)
     Edit {
         kind: EditorKind,
@@ -62,7 +64,7 @@ pub enum CliAction {
         screenshot_path: Option<PathBuf>,
         screenshot_frames: u32,
     },
-    /// `uk run_with_edit [script.rb]` / `uk run --edit [script.rb]` (ゲームとエディタを同時起動)
+    /// `uk run-with-edit [script.rb]` / `uk run --edit [script.rb]` (ゲームとエディタを同時起動)
     RunWithEdit {
         script_path: PathBuf,
         script_args: Vec<String>,
@@ -130,9 +132,10 @@ USAGE:
         -e, --edit[=spr|map|all]        Launch editor(s) alongside the running game
         -s, --screenshot <out.png>      Auto-save screenshot and exit
         --frames <N>                    Frame count before auto-screenshot (default: 10)
-    uk run_with_edit [script.rb]        Run game and editors simultaneously with live sync
+    uk run-with-edit [script.rb]        Run game and editors simultaneously with live sync
     uk edit [spr|map|all] [script.rb]   Launch built-in Sprite / Tilemap Editor (default: spr)
     uk examples [dest_dir]              Extract bundled example scripts (default: ./examples)
+    uk update-docs [dir]                Update AGENTS.md and docs/ in current or specified directory
     uk check [script.rb] [options]      Headless syntax and runtime verification (default: game.rb)
         -f, --frames <N>                Simulated frame count to verify (default: 60)
         -g, --gacha, --mash             Enable random button mashing (d-pad & action keys)
@@ -220,10 +223,17 @@ where
                 .unwrap_or_else(|| PathBuf::from("examples"));
             Ok(CliAction::Examples { dest_dir })
         }
+        "update-docs" | "update_docs" => {
+            let dir = rest
+                .get(1)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
+            Ok(CliAction::UpdateDocs { dir })
+        }
         "edit" => parse_edit_args(&rest[1..], EditorKind::Sprite),
         "spr" => parse_edit_args(&rest[1..], EditorKind::Sprite),
         "map" => parse_edit_args(&rest[1..], EditorKind::Tilemap),
-        "run_with_edit" => parse_run_with_edit_args(&rest[1..]),
+        "run-with-edit" | "run_with_edit" => parse_run_with_edit_args(&rest[1..]),
         "run" => parse_run_args(&rest[1..]),
         "check" => parse_check_args(&rest[1..]),
         "build" => {
@@ -639,7 +649,7 @@ fn parse_run_with_edit_args(args: &[String]) -> Result<CliAction, String> {
                 break;
             }
             arg if arg.starts_with('-') => {
-                return Err(format!("Unknown option for `uk run_with_edit`: {}", arg));
+                return Err(format!("Unknown option for `uk run-with-edit`: {}", arg));
             }
             arg => {
                 if !kind_specified
@@ -1466,7 +1476,7 @@ const TEMPLATE_STARTER_CODE_RB: &str = r#"# ====================================
 # 🐰 {{PROJECT_TITLE}}
 # ------------------------------------------------------------------------------
 # Run:            uk run game.rb
-# Run + Editors:  uk run_with_edit game.rb
+# Run + Editors:  uk run-with-edit game.rb
 # Edit Sprites:   uk edit spr game.rb
 # Edit Tilemap:   uk edit map game.rb
 # Build EXE:      uk build game.rb
@@ -1706,7 +1716,7 @@ Usakame のスクリプト実行環境は軽量 Ruby VM **mrubyedge** です。�
   ```
 * **ゲームとエディタ（スプライト／タイルマップ）の同時起動**:
   ```bash
-  uk run_with_edit game.rb
+  uk run-with-edit game.rb
   ```
 * **スプライトエディタ／タイルマップエディタ単体起動**:
   ```bash
@@ -1776,19 +1786,7 @@ where
     fs::create_dir_all(dir)
         .map_err(|e| format!("Failed to create directory `{}`: {}", dir.display(), e))?;
 
-    let project_title = dir
-        .file_name()
-        .and_then(|s| s.to_str())
-        .filter(|s| !s.is_empty() && *s != ".")
-        .or_else(|| {
-            std::env::current_dir()
-                .ok()
-                .and_then(|c| c.file_name().and_then(|s| s.to_str()).map(String::from))
-                .as_deref()
-                .map(|_| "Usakame Game")
-        })
-        .unwrap_or("Usakame Game")
-        .to_uppercase();
+    let project_title = resolve_project_title(dir);
 
     let mut created_files = Vec::new();
 
@@ -1928,25 +1926,8 @@ where
 
     // 3. AI Agent Docs (default ON, skipped if --minimal)
     if !opts.minimal {
-        let agents_md_path = dir.join("AGENTS.md");
-        let agents_content = PROJECT_AGENTS_MD.replace("{{PROJECT_TITLE}}", &project_title);
-        fs::write(&agents_md_path, agents_content)
-            .map_err(|e| format!("Failed to write `{}`: {}", agents_md_path.display(), e))?;
-        created_files.push(agents_md_path);
-
-        let docs_dir = dir.join("docs");
-        fs::create_dir_all(&docs_dir)
-            .map_err(|e| format!("Failed to create `{}`: {}", docs_dir.display(), e))?;
-
-        let api_md_path = docs_dir.join("api.md");
-        fs::write(&api_md_path, EMBEDDED_API_MD)
-            .map_err(|e| format!("Failed to write `{}`: {}", api_md_path.display(), e))?;
-        created_files.push(api_md_path);
-
-        let mruby_md_path = docs_dir.join("mrubyedge_api.md");
-        fs::write(&mruby_md_path, EMBEDDED_MRUBYEDGE_API_MD)
-            .map_err(|e| format!("Failed to write `{}`: {}", mruby_md_path.display(), e))?;
-        created_files.push(mruby_md_path);
+        let docs = write_project_docs(dir, &project_title)?;
+        created_files.extend(docs);
     }
 
     // 4. Reference examples (--with-refs)
@@ -1973,10 +1954,69 @@ where
         println!("  cd {}", dir.display());
     }
     println!("  uk run                 # Run the game with live hot-reload");
-    println!("  uk run_with_edit       # Run the game + Sprite & Tilemap Editors together");
+    println!("  uk run-with-edit       # Run the game + Sprite & Tilemap Editors together");
     println!("  uk edit                # Open Sprite Editor (or `uk edit map` for Tilemap)");
 
     Ok(created_files)
+}
+
+/// プロジェクトディレクトリからプロジェクト表示用タイトル（大文字）を推測する
+pub fn resolve_project_title(dir: &Path) -> String {
+    dir.file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty() && *s != ".")
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .and_then(|c| c.file_name().and_then(|s| s.to_str()).map(String::from))
+                .as_deref()
+                .map(|_| "Usakame Game")
+        })
+        .unwrap_or("Usakame Game")
+        .to_uppercase()
+}
+
+/// プロジェクトディレクトリに AGENTS.md および docs/ ディレクトリ（api.md, mrubyedge_api.md）を書き込む
+pub fn write_project_docs(dir: &Path, project_title: &str) -> Result<Vec<PathBuf>, String> {
+    let mut written_files = Vec::new();
+
+    fs::create_dir_all(dir)
+        .map_err(|e| format!("Failed to create directory `{}`: {}", dir.display(), e))?;
+
+    let agents_md_path = dir.join("AGENTS.md");
+    let agents_content = PROJECT_AGENTS_MD.replace("{{PROJECT_TITLE}}", project_title);
+    fs::write(&agents_md_path, agents_content)
+        .map_err(|e| format!("Failed to write `{}`: {}", agents_md_path.display(), e))?;
+    written_files.push(agents_md_path);
+
+    let docs_dir = dir.join("docs");
+    fs::create_dir_all(&docs_dir)
+        .map_err(|e| format!("Failed to create `{}`: {}", docs_dir.display(), e))?;
+
+    let api_md_path = docs_dir.join("api.md");
+    fs::write(&api_md_path, EMBEDDED_API_MD)
+        .map_err(|e| format!("Failed to write `{}`: {}", api_md_path.display(), e))?;
+    written_files.push(api_md_path);
+
+    let mruby_md_path = docs_dir.join("mrubyedge_api.md");
+    fs::write(&mruby_md_path, EMBEDDED_MRUBYEDGE_API_MD)
+        .map_err(|e| format!("Failed to write `{}`: {}", mruby_md_path.display(), e))?;
+    written_files.push(mruby_md_path);
+
+    Ok(written_files)
+}
+
+/// `uk update-docs [dir]` の実装（既存プロジェクトの AGENTS.md および docs/ を最新化）
+pub fn cmd_update_docs(dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let project_title = resolve_project_title(dir);
+    let files = write_project_docs(dir, &project_title)?;
+
+    println!("✨ Updated AGENTS.md and docs/ in `{}`:", dir.display());
+    for f in &files {
+        println!("  - {}", f.display());
+    }
+
+    Ok(files)
 }
 
 /// `uk generate "<prompt>" [-o <script.rb>]` の実装
