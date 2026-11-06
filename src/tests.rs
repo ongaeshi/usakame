@@ -4468,3 +4468,377 @@ fn test_declarative_sprites_example_script() {
         rt.call_draw_result().expect("declarative_sprites draw should succeed");
     }
 }
+
+fn get_global_i64(vm: &VM, name: &str) -> Option<i64> {
+    match &vm.globals.get(name)?.value {
+        RValue::Integer(n) => Some(*n),
+        _ => None,
+    }
+}
+
+fn get_global_bool(vm: &VM, name: &str) -> Option<bool> {
+    match &vm.globals.get(name)?.value {
+        RValue::Bool(b) => Some(*b),
+        _ => None,
+    }
+}
+
+#[test]
+fn test_btnp_edge_trigger_behavior() {
+    let script = r#"
+$down = []
+$pressed = []
+$default_pressed = []
+
+def update
+  $down << btn(4)
+  $pressed << btnp(4)
+  $default_pressed << btnp() # id=0 (Left)
+end
+
+def draw
+end
+"#;
+    let (t, m) = cli::compile_ruby_script_str_with_filename(script, Some("test_btnp.rb")).unwrap();
+    let mut rt = GameRuntime::new(&t, &m, true).expect("init should succeed");
+
+    // Frame 1: Button A (4) pressed
+    rt.input_state.borrow_mut().set_frame_buttons(vec![ButtonId::A]);
+    rt.call_update_result().unwrap();
+
+    // Frame 2: Button A (4) held down
+    rt.input_state.borrow_mut().set_frame_buttons(vec![ButtonId::A]);
+    rt.call_update_result().unwrap();
+
+    // Frame 3: Button A released
+    rt.input_state.borrow_mut().set_frame_buttons(vec![]);
+    rt.call_update_result().unwrap();
+
+    // Frame 4: Button A pressed again, plus Button Left (0) pressed
+    rt.input_state.borrow_mut().set_frame_buttons(vec![ButtonId::A, ButtonId::Left]);
+    rt.call_update_result().unwrap();
+
+    let down_arr = match &rt.vm.globals.get("$down").unwrap().value {
+        RValue::Array(a) => a.borrow().iter().map(|o| o.as_ref() == &RObject::boolean(true)).collect::<Vec<_>>(),
+        _ => panic!("$down should be array"),
+    };
+    let pressed_arr = match &rt.vm.globals.get("$pressed").unwrap().value {
+        RValue::Array(a) => a.borrow().iter().map(|o| o.as_ref() == &RObject::boolean(true)).collect::<Vec<_>>(),
+        _ => panic!("$pressed should be array"),
+    };
+    let def_pressed_arr = match &rt.vm.globals.get("$default_pressed").unwrap().value {
+        RValue::Array(a) => a.borrow().iter().map(|o| o.as_ref() == &RObject::boolean(true)).collect::<Vec<_>>(),
+        _ => panic!("$default_pressed should be array"),
+    };
+
+    assert_eq!(down_arr, vec![true, true, false, true]);
+    assert_eq!(pressed_arr, vec![true, false, false, true]);
+    assert_eq!(def_pressed_arr, vec![false, false, false, true]);
+}
+
+#[test]
+fn test_scene_single_class_and_duck_typing() {
+    let script = r#"
+class App
+  def initialize
+    @count = 0
+  end
+
+  def update
+    @count += 1
+    $count = @count
+  end
+
+  def draw
+    cls(1)
+  end
+end
+
+run App.new
+"#;
+    let (t, m) = cli::compile_ruby_script_str_with_filename(script, Some("test_scene_app.rb")).unwrap();
+    let mut rt = GameRuntime::new(&t, &m, true).expect("init should succeed");
+
+    assert!(rt.current_scene.is_none());
+    assert!(rt.next_scene.borrow().is_some());
+
+    rt.call_update_result().unwrap();
+    assert!(rt.current_scene.is_some());
+    assert_eq!(get_global_i64(&rt.vm, "$count"), Some(1));
+
+    rt.call_update_result().unwrap();
+    assert_eq!(get_global_i64(&rt.vm, "$count"), Some(2));
+
+    rt.call_draw_result().unwrap();
+
+    // Partial duck typing test: update-only and draw-only objects
+    let partial_script = r#"
+class UpdateOnly
+  def update
+    $updated = true
+  end
+end
+
+class DrawOnly
+  def draw
+    $drawn = true
+  end
+end
+"#;
+    let (t2, m2) = cli::compile_ruby_script_str_with_filename(partial_script, Some("test_partial.rb")).unwrap();
+    let mut rt2 = GameRuntime::new(&t2, &m2, true).unwrap();
+
+    // 手動で UpdateOnly をセット
+    let update_only_class = rt2.vm.consts.get("UpdateOnly").unwrap().clone();
+    let u_obj = mrb_funcall(&mut rt2.vm, Some(update_only_class), "new", &[]).unwrap();
+    *rt2.next_scene.borrow_mut() = Some(NextSceneRequest { scene: u_obj, reset_state: true });
+
+    // update のみ定義されたオブジェクトでも draw でクラッシュしない
+    rt2.call_update_result().unwrap();
+    rt2.call_draw_result().unwrap();
+    assert_eq!(get_global_bool(&rt2.vm, "$updated"), Some(true));
+
+    // DrawOnly をセット
+    let draw_only_class = rt2.vm.consts.get("DrawOnly").unwrap().clone();
+    let d_obj = mrb_funcall(&mut rt2.vm, Some(draw_only_class), "new", &[]).unwrap();
+    *rt2.next_scene.borrow_mut() = Some(NextSceneRequest { scene: d_obj, reset_state: true });
+
+    // draw のみ定義されたオブジェクトでも update でクラッシュしない
+    rt2.call_update_result().unwrap();
+    rt2.call_draw_result().unwrap();
+    assert_eq!(get_global_bool(&rt2.vm, "$drawn"), Some(true));
+}
+
+#[test]
+fn test_scene_transitions_and_pause_screen_state_preservation() {
+    let script = r#"
+class PauseScene
+  def initialize(prev_scene)
+    @prev_scene = prev_scene
+  end
+
+  def update
+    if btnp(4) # Aボタンで復帰
+      run @prev_scene, reset_state: false
+    end
+  end
+
+  def draw
+    # ポーズ中は背景を描画した上にオーバーレイを描画可能
+    @prev_scene.draw
+    print_text("PAUSE", 100, 100, 7)
+  end
+end
+
+class GameScene
+  def initialize
+    @x = 100
+    @score = 50
+  end
+
+  def update
+    @x += 1
+    if btnp(4) # Aボタンでポーズ
+      run PauseScene.new(self)
+    end
+    $game_x = @x
+    $game_score = @score
+  end
+
+  def draw
+    cls(3)
+    print_text("GAME", @x, 50, 7)
+  end
+end
+
+run GameScene.new
+"#;
+    let (t, m) = cli::compile_ruby_script_str_with_filename(script, Some("test_pause.rb")).unwrap();
+    let mut rt = GameRuntime::new(&t, &m, true).expect("init should succeed");
+
+    // 1フレーム目: GameScene 開始 (x=101)
+    rt.input_state.borrow_mut().set_frame_buttons(vec![]);
+    rt.call_update_result().unwrap();
+    assert_eq!(get_global_i64(&rt.vm, "$game_x"), Some(101));
+
+    // 2フレーム目: ボタンA (4) 押下 -> PauseScene へ遷移予約
+    rt.input_state.borrow_mut().set_frame_buttons(vec![ButtonId::A]);
+    rt.call_update_result().unwrap();
+    assert_eq!(get_global_i64(&rt.vm, "$game_x"), Some(102));
+    assert!(rt.next_scene.borrow().is_some());
+
+    // 3フレーム目: ボタンA 押しっぱなし -> PauseScene に昇格するが btnp(4) は false なのでポーズ維持
+    rt.input_state.borrow_mut().set_frame_buttons(vec![ButtonId::A]);
+    rt.call_update_result().unwrap();
+    // ポーズ中なので GameScene の update は走らず $game_x は 102 のまま
+    assert_eq!(get_global_i64(&rt.vm, "$game_x"), Some(102));
+
+    // 4フレーム目: ボタンA 離す
+    rt.input_state.borrow_mut().set_frame_buttons(vec![]);
+    rt.call_update_result().unwrap();
+    assert_eq!(get_global_i64(&rt.vm, "$game_x"), Some(102));
+
+    // 5フレーム目: ボタンA 再押下 -> GameScene へ復帰予約
+    rt.input_state.borrow_mut().set_frame_buttons(vec![ButtonId::A]);
+    rt.call_update_result().unwrap();
+
+    // 6フレーム目: ボタンA 離して GameScene 復帰確認 (x が 103 に進む、score 50 も保持)
+    rt.input_state.borrow_mut().set_frame_buttons(vec![]);
+    rt.call_update_result().unwrap();
+    assert_eq!(get_global_i64(&rt.vm, "$game_x"), Some(103));
+    assert_eq!(get_global_i64(&rt.vm, "$game_score"), Some(50));
+}
+
+#[test]
+fn test_scene_delayed_transition_and_reset_state() {
+    let script = r#"
+class SceneB
+  def update
+    $scene = :b
+  end
+  def draw
+  end
+end
+
+class SceneA
+  def update
+    $scene = :a
+    camera(20, 30)
+    clip(5, 5, 50, 50)
+    pal(1, 2)
+    if $to_b_no_reset
+      run SceneB.new, reset_state: false
+    elsif $to_b_with_reset
+      run SceneB.new # default reset_state: true
+    end
+  end
+  def draw
+  end
+end
+
+run SceneA.new
+"#;
+    let (t, m) = cli::compile_ruby_script_str_with_filename(script, Some("test_reset_state.rb")).unwrap();
+    let mut rt = GameRuntime::new(&t, &m, true).expect("init should succeed");
+
+    // Frame 1: SceneA enters
+    rt.call_update_result().unwrap();
+    assert_eq!(rt.draw_state.borrow().cam_x, 20);
+    assert_eq!(rt.draw_state.borrow().cam_y, 30);
+    assert!(rt.draw_state.borrow().clip.is_some());
+    assert_eq!(rt.draw_state.borrow().pal_map[1], 2);
+
+    // Frame 2: transition to SceneB with reset_state: false
+    rt.vm.globals.insert("$to_b_no_reset".to_string(), Rc::new(RObject::boolean(true)));
+    rt.call_update_result().unwrap();
+    // 遅延遷移なのでこのフレーム終了時点では next_scene にあり、ステートはまだ保持されている
+    assert!(rt.next_scene.borrow().is_some());
+
+    // Frame 3: SceneB に昇格。reset_state: false なのでステートが引き継がれている
+    rt.call_update_result().unwrap();
+    let sym_name = match &rt.vm.globals.get("$scene").unwrap().value {
+        RValue::Symbol(s) => s.name.clone(),
+        _ => String::new(),
+    };
+    assert_eq!(sym_name, "b");
+    assert_eq!(rt.draw_state.borrow().cam_x, 20);
+    assert_eq!(rt.draw_state.borrow().cam_y, 30);
+    assert!(rt.draw_state.borrow().clip.is_some());
+    assert_eq!(rt.draw_state.borrow().pal_map[1], 2);
+
+    // 次に reset_state: true での遷移テスト
+    let scene_b_class = rt.vm.consts.get("SceneB").unwrap().clone();
+    let b_obj = mrb_funcall(&mut rt.vm, Some(scene_b_class), "new", &[]).unwrap();
+    *rt.next_scene.borrow_mut() = Some(NextSceneRequest { scene: b_obj, reset_state: true });
+
+    // フレーム昇格時に reset_scene_draw_state が呼ばれる
+    rt.call_update_result().unwrap();
+    assert_eq!(rt.draw_state.borrow().cam_x, 0);
+    assert_eq!(rt.draw_state.borrow().cam_y, 0);
+    assert!(rt.draw_state.borrow().clip.is_none());
+    assert_eq!(rt.draw_state.borrow().pal_map[1], 1); // デフォルトに戻る
+}
+
+#[test]
+fn test_scene_hot_reload_preserves_instance_variables_and_updates_methods() {
+    let script_v1 = r#"
+class PlayerScene
+  def initialize
+    @x = 10
+  end
+
+  def update
+    @x += 1
+    $x = @x
+  end
+
+  def draw
+  end
+end
+
+run PlayerScene.new
+"#;
+    let (t1, m1) = cli::compile_ruby_script_str_with_filename(script_v1, Some("test_hr_scene.rb")).unwrap();
+    let mut rt = GameRuntime::new(&t1, &m1, true).expect("init should succeed");
+
+    // 3フレーム実行: @x は 10 -> 11 -> 12 -> 13
+    rt.call_update_result().unwrap();
+    rt.call_update_result().unwrap();
+    rt.call_update_result().unwrap();
+    assert_eq!(get_global_i64(&rt.vm, "$x"), Some(13));
+
+    // v2: update のロジックを @x += 100 に変更、initialize の初期値は @x = 999 に変更
+    let script_v2 = r#"
+class PlayerScene
+  def initialize
+    @x = 999
+  end
+
+  def update
+    @x += 100
+    $x = @x
+  end
+
+  def draw
+  end
+end
+
+run PlayerScene.new
+"#;
+    let (t2, m2) = cli::compile_ruby_script_str_with_filename(script_v2, Some("test_hr_scene.rb")).unwrap();
+    rt.hot_reload(&t2, &m2).expect("hot reload should succeed");
+
+    // ホットリロード後、既存の @x (13) が維持され、新しい update ロジック (+100) が反映される
+    rt.call_update_result().unwrap();
+    assert_eq!(get_global_i64(&rt.vm, "$x"), Some(113));
+
+    // リスタート（restart）時は完全に先頭からやり直し (@x = 999 -> 1フレームで 1099)
+    rt.restart(&t2, &m2).expect("restart should succeed");
+    rt.call_update_result().unwrap();
+    assert_eq!(get_global_i64(&rt.vm, "$x"), Some(1099));
+}
+
+#[test]
+fn test_fallback_top_level_update_and_draw() {
+    let script = r#"
+$count = 0
+def update
+  $count += 1
+end
+
+def draw
+  cls(2)
+end
+"#;
+    let (t, m) = cli::compile_ruby_script_str_with_filename(script, Some("test_fallback.rb")).unwrap();
+    let mut rt = GameRuntime::new(&t, &m, true).expect("init should succeed");
+
+    // run が呼ばれなかった場合、current_scene も next_scene も None
+    assert!(rt.current_scene.is_none());
+    assert!(rt.next_scene.borrow().is_none());
+
+    rt.call_update_result().unwrap();
+    assert_eq!(get_global_i64(&rt.vm, "$count"), Some(1));
+    rt.call_draw_result().unwrap();
+}
+

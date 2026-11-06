@@ -4166,6 +4166,149 @@ fn register_rand_extension(vm: &mut VM) {
     }
 }
 
+#[derive(Clone)]
+pub struct NextSceneRequest {
+    pub scene: Rc<RObject>,
+    pub reset_state: bool,
+}
+
+fn parse_reset_state_arg(vm: &VM, args: &[Rc<RObject>], index: usize) -> bool {
+    // 1. vm.get_kwargs() / vm.kargs (キーワード引数: reset_state: true / false) をチェック
+    if let Some(kwargs) = vm.get_kwargs() {
+        if let Some(val) = kwargs.get("reset_state") {
+            return match &val.value {
+                RValue::Bool(b) => *b,
+                RValue::Nil => false,
+                _ => true,
+            };
+        }
+    }
+    if let Some(ref kargs) = *vm.kargs.borrow() {
+        for (sym, val) in kargs.iter() {
+            if sym.name == "reset_state" {
+                return match &val.value {
+                    RValue::Bool(b) => *b,
+                    RValue::Nil => false,
+                    _ => true,
+                };
+            }
+        }
+    }
+
+    // 2. 位置引数 (args[index]) をチェック
+    let arg = match args.get(index) {
+        Some(a) => a,
+        None => return true,
+    };
+    match &arg.value {
+        RValue::Bool(b) => *b,
+        RValue::Nil => false,
+        RValue::Hash(hash_cell) => {
+            let hash = hash_cell.borrow();
+            for (_k_obj, (k, v)) in hash.iter() {
+                let key_str = match &k.value {
+                    RValue::Symbol(s) => s.name.clone(),
+                    RValue::String(s, _) => String::from_utf8_lossy(&s.borrow()).to_string(),
+                    _ => continue,
+                };
+                if key_str == "reset_state" {
+                    return match &v.value {
+                        RValue::Bool(b) => *b,
+                        RValue::Nil => false,
+                        _ => true,
+                    };
+                }
+            }
+            true
+        }
+        _ => true,
+    }
+}
+
+fn class_has_method(class: &Rc<mrubyedge::yamrb::value::RClass>, name: &str) -> bool {
+    let mut cur = Some(class.clone());
+    while let Some(c) = cur {
+        if c.module.procs.borrow().contains_key(name) {
+            return true;
+        }
+        for mixed in c.module.mixed_in_modules.borrow().iter() {
+            if mixed.procs.borrow().contains_key(name) {
+                return true;
+            }
+        }
+        cur = c.super_class.clone();
+    }
+    false
+}
+
+fn object_has_method(obj: &Rc<RObject>, name: &str) -> bool {
+    if let Some(ref sc) = *obj.singleton_class.borrow() {
+        if class_has_method(sc, name) {
+            return true;
+        }
+    }
+    match &obj.value {
+        RValue::Instance(inst) => class_has_method(&inst.class, name),
+        _ => false,
+    }
+}
+
+fn rebind_object_to_vm(obj: &Rc<RObject>, vm: &VM) -> Rc<RObject> {
+    match &obj.value {
+        RValue::Instance(inst) => {
+            let class_name = &inst.class.module.sym_id.name;
+            let target_class = if let Some(c_obj) = vm.consts.get(class_name) {
+                if let RValue::Class(ref c) = c_obj.value {
+                    Some(c.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let mut new_obj = (**obj).clone();
+            if let Some(new_class) = target_class {
+                new_obj.value = RValue::Instance(mrubyedge::yamrb::value::RInstance {
+                    class: new_class,
+                    ref_count: inst.ref_count,
+                });
+            }
+
+            let mut new_ivars = mrubyedge::yamrb::value::RHashMap::default();
+            for (k, v) in obj.ivar.borrow().iter() {
+                new_ivars.insert(k.clone(), rebind_object_to_vm(v, vm));
+            }
+            *new_obj.ivar.borrow_mut() = new_ivars;
+
+            Rc::new(new_obj)
+        }
+        RValue::Array(arr) => {
+            let new_items = arr
+                .borrow()
+                .iter()
+                .map(|item| rebind_object_to_vm(item, vm))
+                .collect();
+            let mut new_obj = (**obj).clone();
+            new_obj.value = RValue::Array(RefCell::new(new_items));
+            Rc::new(new_obj)
+        }
+        RValue::Hash(hash_map) => {
+            let mut new_map = mrubyedge::yamrb::value::RHashMap::default();
+            for (k, (rk, rv)) in hash_map.borrow().iter() {
+                new_map.insert(
+                    k.clone(),
+                    (rebind_object_to_vm(rk, vm), rebind_object_to_vm(rv, vm)),
+                );
+            }
+            let mut new_obj = (**obj).clone();
+            new_obj.value = RValue::Hash(RefCell::new(new_map));
+            Rc::new(new_obj)
+        }
+        _ => obj.clone(),
+    }
+}
+
 fn register_engine_api(
     vm: &mut VM,
     sprites: Rc<RefCell<HashMap<i32, SpriteData>>>,
@@ -4184,6 +4327,8 @@ fn register_engine_api(
     input_state: Rc<RefCell<InputState>>,
     sprite_names: Rc<RefCell<HashMap<String, Vec<i32>>>>,
     map_aliases: Rc<RefCell<HashMap<char, i32>>>,
+    next_scene: Rc<RefCell<Option<NextSceneRequest>>>,
+    is_hot_reloading: Rc<RefCell<bool>>,
     headless: bool,
 ) {
     register_numeric_extensions(vm);
@@ -4191,6 +4336,45 @@ fn register_engine_api(
     register_string_format_extensions(vm);
     register_rand_extension(vm);
     let obj_class = vm.object_class.clone();
+
+    // run / scene: オブジェクト指向のシーン管理（遅延切り替え）
+    let next_scene_for_run = next_scene.clone();
+    let is_hot_reloading_for_run = is_hot_reloading.clone();
+    let scene_runner = Rc::new(move |vm_caller: &mut VM, args: &[Rc<RObject>]| {
+        if *is_hot_reloading_for_run.borrow() {
+            // ホットリロードのためのスクリプト再評価中はトップレベルの run(App.new) 呼び出しを無視
+            return Ok(Rc::new(RObject::nil()));
+        }
+        let scene_obj = match args.get(0) {
+            Some(obj) => obj.clone(),
+            None => {
+                return Err(mrubyedge::Error::ArgumentError(
+                    "run / scene requires a scene object".to_string(),
+                ));
+            }
+        };
+        let reset_state = parse_reset_state_arg(vm_caller, args, 1);
+        *next_scene_for_run.borrow_mut() = Some(NextSceneRequest {
+            scene: scene_obj,
+            reset_state,
+        });
+        Ok(Rc::new(RObject::nil()))
+    });
+
+    let run_fn = scene_runner.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "run",
+        Box::new(move |vm, args| run_fn(vm, args)),
+    );
+    let scene_fn = scene_runner;
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "scene",
+        Box::new(move |vm, args| scene_fn(vm, args)),
+    );
 
     // restart / reset: ゲームの先頭からのリスタートを要求する
     let restart_flag_for_restart = restart_requested.clone();
@@ -6723,7 +6907,12 @@ fn register_engine_api(
             obj_class.clone(),
             "btn",
             Box::new(move |_vm, args| {
-                let pressed = parse_button_arg(args, 0)
+                let btn = if args.is_empty() {
+                    Some(ButtonId::Left)
+                } else {
+                    parse_button_arg(args, 0)
+                };
+                let pressed = btn
                     .map(|b| {
                         let st = input_state_for_btn.borrow();
                         if st.override_enabled {
@@ -6742,7 +6931,12 @@ fn register_engine_api(
             obj_class.clone(),
             "btnp",
             Box::new(move |_vm, args| {
-                let pressed = parse_button_arg(args, 0)
+                let btn = if args.is_empty() {
+                    Some(ButtonId::Left)
+                } else {
+                    parse_button_arg(args, 0)
+                };
+                let pressed = btn
                     .map(|b| {
                         let st = input_state_for_btnp.borrow();
                         if st.override_enabled {
@@ -7834,7 +8028,12 @@ fn register_engine_api(
         obj_class.clone(),
         "btn",
         Box::new(move |_vm, args| {
-            let pressed = parse_button_arg(args, 0)
+            let btn = if args.is_empty() {
+                Some(ButtonId::Left)
+            } else {
+                parse_button_arg(args, 0)
+            };
+            let pressed = btn
                 .map(|b| {
                     let st = input_state_for_btn.borrow();
                     if st.override_enabled {
@@ -7855,7 +8054,12 @@ fn register_engine_api(
         obj_class.clone(),
         "btnp",
         Box::new(move |_vm, args| {
-            let pressed = parse_button_arg(args, 0)
+            let btn = if args.is_empty() {
+                Some(ButtonId::Left)
+            } else {
+                parse_button_arg(args, 0)
+            };
+            let pressed = btn
                 .map(|b| {
                     let st = input_state_for_btnp.borrow();
                     if st.override_enabled {
@@ -8304,6 +8508,9 @@ pub fn render_error_overlay(err: &ScriptError) {
 
 pub struct GameRuntime {
     pub vm: VM,
+    pub current_scene: Option<Rc<RObject>>,
+    pub next_scene: Rc<RefCell<Option<NextSceneRequest>>>,
+    pub is_hot_reloading: Rc<RefCell<bool>>,
     pub sprites: Rc<RefCell<HashMap<i32, SpriteData>>>,
     pub banks: Rc<RefCell<HashMap<i32, BankData>>>,
     pub active_spr_bank: Rc<RefCell<i32>>,
@@ -8388,6 +8595,8 @@ impl GameRuntime {
         let input_state = Rc::new(RefCell::new(InputState::new()));
         let sprite_names = Rc::new(RefCell::new(sprite_names_map));
         let map_aliases = Rc::new(RefCell::new(map_aliases_map));
+        let next_scene = Rc::new(RefCell::new(None));
+        let is_hot_reloading = Rc::new(RefCell::new(false));
 
         register_engine_api(
             &mut vm,
@@ -8407,6 +8616,8 @@ impl GameRuntime {
             input_state.clone(),
             sprite_names.clone(),
             map_aliases.clone(),
+            next_scene.clone(),
+            is_hot_reloading.clone(),
             headless,
         );
         register_sound_api(&mut vm, sound_bank.clone());
@@ -8441,6 +8652,9 @@ impl GameRuntime {
 
         Ok(Self {
             vm,
+            current_scene: None,
+            next_scene,
+            is_hot_reloading,
             sprites,
             banks,
             active_spr_bank,
@@ -8529,6 +8743,8 @@ impl GameRuntime {
             (id, spec, bank.pending_commands.len())
         };
 
+        *self.is_hot_reloading.borrow_mut() = true;
+
         let temp_tilemap = Rc::new(RefCell::new(new_tail_map));
         {
             let mut ds = self.draw_state.borrow_mut();
@@ -8559,11 +8775,16 @@ impl GameRuntime {
             self.input_state.clone(),
             self.sprite_names.clone(),
             self.map_aliases.clone(),
+            self.next_scene.clone(),
+            self.is_hot_reloading.clone(),
             self.headless,
         );
         register_sound_api(&mut new_vm, self.sound_bank.clone());
 
-        if let Err(_) = new_vm.run() {
+        let run_res = new_vm.run();
+        *self.is_hot_reloading.borrow_mut() = false;
+
+        if let Err(_) = run_res {
             return Err(ScriptError::from_vm(&mut new_vm, "top-level reload"));
         }
 
@@ -8625,6 +8846,8 @@ impl GameRuntime {
             self.input_state.clone(),
             self.sprite_names.clone(),
             self.map_aliases.clone(),
+            self.next_scene.clone(),
+            self.is_hot_reloading.clone(),
             self.headless,
         );
 
@@ -8650,15 +8873,63 @@ impl GameRuntime {
             }
         }
 
+        // ホットリロード時に現在のシーンインスタンス（およびインスタンス変数）を維持し、新VMのクラス定義に再束縛する
+        if let Some(ref current) = self.current_scene {
+            self.current_scene = Some(rebind_object_to_vm(current, &new_vm));
+        }
+        if let Some(ref mut req) = *self.next_scene.borrow_mut() {
+            req.scene = rebind_object_to_vm(&req.scene, &new_vm);
+        }
+
         self.vm = new_vm;
         self.initial_globals = new_initial_globals;
         Ok(())
     }
 
+    /// シーン切り替え時に描画ステート（camera, clip, pal, palt）を初期状態にリセットする
+    pub fn reset_scene_draw_state(&mut self) {
+        let mut state = self.draw_state.borrow_mut();
+        state.set_camera(0, 0);
+        state.reset_clip();
+        state.reset_pal();
+        state.reset_palt();
+        let bank_id = state.active_pal_bank;
+        if let Some(pal) = self.palettes.borrow().get(&bank_id) {
+            state.palette_rgba = *pal;
+        } else {
+            state.palette_rgba = PALETTE_RGBA;
+        }
+        if !self.headless {
+            apply_gl_scissor(None);
+        }
+    }
+
+    /// フレーム先頭で予約された next_scene を current_scene に昇格させる
+    pub fn apply_pending_scene_transition(&mut self) {
+        let req_opt = self.next_scene.borrow_mut().take();
+        if let Some(req) = req_opt {
+            self.current_scene = Some(req.scene);
+            if req.reset_state {
+                self.reset_scene_draw_state();
+            }
+        }
+    }
+
     pub fn call_update_result(&mut self) -> Result<(), ScriptError> {
-        mrb_funcall(&mut self.vm, None, "update", &[])
-            .map(|_| ())
-            .map_err(|_| ScriptError::from_vm(&mut self.vm, "update"))
+        self.apply_pending_scene_transition();
+        if let Some(ref scene) = self.current_scene {
+            if object_has_method(scene, "update") {
+                mrb_funcall(&mut self.vm, Some(scene.clone()), "update", &[])
+                    .map(|_| ())
+                    .map_err(|_| ScriptError::from_vm(&mut self.vm, "update"))
+            } else {
+                Ok(())
+            }
+        } else {
+            mrb_funcall(&mut self.vm, None, "update", &[])
+                .map(|_| ())
+                .map_err(|_| ScriptError::from_vm(&mut self.vm, "update"))
+        }
     }
 
     pub fn call_update(&mut self) {
@@ -8671,9 +8942,19 @@ impl GameRuntime {
         if !self.headless {
             apply_gl_scissor(self.draw_state.borrow().clip);
         }
-        let res = mrb_funcall(&mut self.vm, None, "draw", &[])
-            .map(|_| ())
-            .map_err(|_| ScriptError::from_vm(&mut self.vm, "draw"));
+        let res = if let Some(ref scene) = self.current_scene {
+            if object_has_method(scene, "draw") {
+                mrb_funcall(&mut self.vm, Some(scene.clone()), "draw", &[])
+                    .map(|_| ())
+                    .map_err(|_| ScriptError::from_vm(&mut self.vm, "draw"))
+            } else {
+                Ok(())
+            }
+        } else {
+            mrb_funcall(&mut self.vm, None, "draw", &[])
+                .map(|_| ())
+                .map_err(|_| ScriptError::from_vm(&mut self.vm, "draw"))
+        };
         if !self.headless {
             apply_gl_scissor(None);
         }
