@@ -9229,6 +9229,8 @@ async fn run_native_with_hot_reload(
     let mut cur_virt_w = SCREEN_WIDTH as u32;
     let mut cur_virt_h = SCREEN_HEIGHT as u32;
 
+    miniquad::window::set_ime_enabled(false);
+
     if current_error.is_none() {
         let initial_config = parse_config_from_source(&initial_source);
         match GameRuntime::new_with_args(&initial_tail, &initial_mrb, false, &script_args) {
@@ -9282,6 +9284,7 @@ async fn run_native_with_hot_reload(
                                 new_rt.draw_state.borrow_mut().screen_h = cfg.screen_height as i32;
                             }
                             new_rt.preload_audio().await;
+                            miniquad::window::set_ime_enabled(false);
                             println!("[uk run] Restarted `{}`", script_path.display());
                             current_error = None;
                             error_overlay_frames = 0;
@@ -9343,6 +9346,7 @@ async fn run_native_with_hot_reload(
                             match rt.hot_reload(&new_tail, &new_mrb) {
                                 Ok(()) => {
                                     rt.preload_audio().await;
+                                    miniquad::window::set_ime_enabled(false);
                                     println!("[uk run] Hot-reloaded `{}`", script_path.display());
                                     current_error = None;
                                     error_overlay_frames = 0;
@@ -9371,6 +9375,7 @@ async fn run_native_with_hot_reload(
                                                 new_rt.draw_state.borrow_mut().screen_h = cfg.screen_height as i32;
                                             }
                                             new_rt.preload_audio().await;
+                                            miniquad::window::set_ime_enabled(false);
                                             println!("[uk run] Restarted `{}`", script_path.display());
                                             current_error = None;
                                             error_overlay_frames = 0;
@@ -9413,6 +9418,7 @@ async fn run_native_with_hot_reload(
                                         new_rt.draw_state.borrow_mut().screen_h = cfg.screen_height as i32;
                                     }
                                     new_rt.preload_audio().await;
+                                    miniquad::window::set_ime_enabled(false);
                                     println!("[uk run] Restarted `{}`", script_path.display());
                                     current_error = None;
                                     error_overlay_frames = 0;
@@ -9578,6 +9584,7 @@ async fn run_embedded_game_with_args(
         let cfg = runtime.config.borrow();
         (cfg.screen_width, cfg.screen_height)
     };
+    miniquad::window::set_ime_enabled(false);
     let (mut render_target, mut virtual_camera) = create_virtual_screen(virt_w, virt_h);
     runtime.preload_audio().await;
     let mut reload_banner_frames: u32 = 0;
@@ -10041,6 +10048,7 @@ fn window_conf_wasm() -> Conf {
 #[cfg(target_arch = "wasm32")]
 #[macroquad::main(window_conf_wasm)]
 async fn main() {
+    miniquad::window::set_ime_enabled(false);
     // `uk browser` サーバーから配信される `/__uk_bundle.bin` を優先取得し、無ければ埋め込みデータへフォールバック
     let (tail_data, mrb_bytes) = match macroquad::file::load_file("__uk_bundle.bin").await {
         Ok(bytes) => bundle::unpack_bundle_from_bytes(&bytes).unwrap_or_else(|| {
