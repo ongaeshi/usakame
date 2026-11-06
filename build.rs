@@ -1,7 +1,7 @@
 use std::env;
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
@@ -12,6 +12,8 @@ fn main() {
     println!("cargo:rerun-if-changed=examples");
     println!("cargo:rerun-if-changed=docs");
     println!("cargo:rerun-if-changed=AGENTS.md");
+
+    setup_git_version();
 
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR not set");
     let dest_path = Path::new(&out_dir).join("game.mrb");
@@ -87,4 +89,77 @@ fn build_examples_archive(examples_dir: &Path, archive_out_path: &Path) {
         .expect("Failed to finish compressing examples archive");
     fs::write(archive_out_path, compressed).expect("Failed to write examples_archive.bin");
 }
+
+fn setup_git_version() {
+    let commit_hash = env::var("UK_COMMIT_HASH").ok().or_else(|| {
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "--short", "HEAD"])
+            .output()
+            .ok()?;
+        if output.status.success() {
+            let s = String::from_utf8(output.stdout).ok()?.trim().to_string();
+            if !s.is_empty() {
+                return Some(s);
+            }
+        }
+        None
+    });
+
+    let commit_date = env::var("UK_COMMIT_DATE").ok().or_else(|| {
+        let output = std::process::Command::new("git")
+            .args(["log", "-1", "--date=short", "--format=%cd"])
+            .output()
+            .ok()?;
+        if output.status.success() {
+            let s = String::from_utf8(output.stdout).ok()?.trim().to_string();
+            if !s.is_empty() {
+                return Some(s);
+            }
+        }
+        None
+    });
+
+    if let Some(hash) = commit_hash {
+        println!("cargo:rustc-env=UK_COMMIT_HASH={}", hash);
+    }
+    if let Some(date) = commit_date {
+        println!("cargo:rustc-env=UK_COMMIT_DATE={}", date);
+    }
+
+    // git の HEAD や参照の更新を検知して再ビルド
+    let git_dir_path = std::process::Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .output()
+        .ok()
+        .and_then(|output| {
+            if output.status.success() {
+                String::from_utf8(output.stdout).ok().map(|s| s.trim().to_string())
+            } else {
+                None
+            }
+        })
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(".git"));
+
+    if git_dir_path.exists() {
+        let head_path = git_dir_path.join("HEAD");
+        if head_path.exists() {
+            println!("cargo:rerun-if-changed={}", head_path.display());
+            if let Ok(head_content) = fs::read_to_string(&head_path) {
+                if let Some(ref_path) = head_content.strip_prefix("ref: ") {
+                    let ref_path = ref_path.trim();
+                    let target_ref = git_dir_path.join(ref_path);
+                    if target_ref.exists() {
+                        println!("cargo:rerun-if-changed={}", target_ref.display());
+                    }
+                }
+            }
+        }
+        let packed_refs = git_dir_path.join("packed-refs");
+        if packed_refs.exists() {
+            println!("cargo:rerun-if-changed={}", packed_refs.display());
+        }
+    }
+}
+
 

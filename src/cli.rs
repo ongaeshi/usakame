@@ -146,8 +146,26 @@ USAGE:
     );
 }
 
+pub fn version_string() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    let hash = option_env!("UK_COMMIT_HASH");
+    let date = option_env!("UK_COMMIT_DATE");
+
+    match (hash, date) {
+        (Some(h), Some(d)) if !h.is_empty() && !d.is_empty() => {
+            format!("uk {} ({} {})", version, h, d)
+        }
+        (Some(h), _) if !h.is_empty() => {
+            format!("uk {} ({})", version, h)
+        }
+        _ => {
+            format!("uk {}", version)
+        }
+    }
+}
+
 pub fn print_version() {
-    println!("uk {}", env!("CARGO_PKG_VERSION"));
+    println!("{}", version_string());
 }
 
 /// コマンドライン引数および自身のバイナリ末尾バンドル状態から実行アクションを決定する。

@@ -587,6 +587,26 @@ fn test_cli_arg_parsing() {
             script_path: std::path::PathBuf::from("my_game.rb"),
         }
     );
+
+    assert_eq!(
+        cli::parse_cli_args(["uk", "--version"].map(String::from)).unwrap(),
+        cli::CliAction::Version
+    );
+    assert_eq!(
+        cli::parse_cli_args(["uk", "-V"].map(String::from)).unwrap(),
+        cli::CliAction::Version
+    );
+    assert_eq!(
+        cli::parse_cli_args(["uk", "version"].map(String::from)).unwrap(),
+        cli::CliAction::Version
+    );
+
+    let ver = cli::version_string();
+    assert!(ver.starts_with("uk 0.1.0"));
+    if option_env!("UK_COMMIT_HASH").is_some() {
+        assert!(ver.contains('('));
+        assert!(ver.contains(')'));
+    }
 }
 
 #[test]
