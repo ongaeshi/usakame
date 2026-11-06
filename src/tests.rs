@@ -4842,3 +4842,18 @@ end
     rt.call_draw_result().unwrap();
 }
 
+#[test]
+fn test_scene_manager_example_script() {
+    let (_, tail_data, mrb_bytes) =
+        cli::compile_ruby_script_file(std::path::Path::new("examples/scene_manager.rb"))
+            .expect("examples/scene_manager.rb should compile");
+
+    let mut runtime =
+        GameRuntime::new(&tail_data, &mrb_bytes, true).expect("scene_manager example should initialize");
+
+    for _ in 0..20 {
+        runtime.call_update_result().expect("call_update should succeed");
+        runtime.call_draw_result().expect("call_draw should succeed");
+    }
+}
+
