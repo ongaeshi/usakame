@@ -498,6 +498,8 @@ fn test_cli_arg_parsing() {
             script_args: Vec::new(),
             screenshot_path: None,
             screenshot_frames: 10,
+            start_frame: 1,
+            gacha: false,
         }
     );
 
@@ -509,6 +511,8 @@ fn test_cli_arg_parsing() {
             script_args: vec!["target.spr".to_string()],
             screenshot_path: None,
             screenshot_frames: 10,
+            start_frame: 1,
+            gacha: false,
         }
     );
 
@@ -524,6 +528,54 @@ fn test_cli_arg_parsing() {
             script_args: vec!["target.spr".to_string()],
             screenshot_path: Some(std::path::PathBuf::from("out.png")),
             screenshot_frames: 5,
+            start_frame: 1,
+            gacha: false,
+        }
+    );
+
+    // --gif オプション指定時、フレーム数省略時はデフォルト 180 フレーム (3.0秒) になる
+    let run_with_gif_default = cli::parse_cli_args(
+        ["uk", "run", "game.rb", "--gif", "demo.gif"].map(String::from),
+    )
+    .unwrap();
+    assert_eq!(
+        run_with_gif_default,
+        cli::CliAction::Run {
+            script_path: std::path::PathBuf::from("game.rb"),
+            script_args: Vec::new(),
+            screenshot_path: Some(std::path::PathBuf::from("demo.gif")),
+            screenshot_frames: 180,
+            start_frame: 1,
+            gacha: false,
+        }
+    );
+
+    // --gif, --frames, --start-frame, -g の組み合わせ
+    let run_with_gif_options = cli::parse_cli_args(
+        [
+            "uk",
+            "run",
+            "game.rb",
+            "--gif",
+            "play.gif",
+            "--frames",
+            "300",
+            "--start-frame",
+            "60",
+            "-g",
+        ]
+        .map(String::from),
+    )
+    .unwrap();
+    assert_eq!(
+        run_with_gif_options,
+        cli::CliAction::Run {
+            script_path: std::path::PathBuf::from("game.rb"),
+            script_args: Vec::new(),
+            screenshot_path: Some(std::path::PathBuf::from("play.gif")),
+            screenshot_frames: 300,
+            start_frame: 60,
+            gacha: true,
         }
     );
 
@@ -4956,5 +5008,110 @@ fn test_scene_manager_example_script() {
         runtime.call_update_result().expect("call_update should succeed");
         runtime.call_draw_result().expect("call_draw should succeed");
     }
+}
+
+#[test]
+fn test_gif_recorder_ring_buffer_and_reset() {
+    let mut rec = GifRecorder::new(4, 2, 3);
+    assert!(rec.is_empty());
+
+    // 4x2 = 8px * 4bytes = 32bytes
+    // push_rgba_flipped は上下反転を正立化して格納する
+    for step in 1u8..=5u8 {
+        let mut frame = vec![0u8; 32];
+        // 下段 (OpenGL 座標で上側になる行: y=1) に step の値を入れる
+        for x in 0..4 {
+            let p = (1 * 4 + x) * 4;
+            frame[p] = step;
+            frame[p + 3] = 255;
+        }
+        rec.push_rgba_flipped(&frame, 4, 2);
+    }
+
+    // max_frames = 3 のため最新の 3, 4, 5 が残っているはず
+    assert_eq!(rec.len(), 3);
+    assert_eq!(rec.frames[0][0], 3); // 正立化により y=1 が先頭行 (y=0) へ移動している
+    assert_eq!(rec.frames[1][0], 4);
+    assert_eq!(rec.frames[2][0], 5);
+
+    // F8 相当の reset でバッファがクリアされ manual_recording が立つ
+    rec.reset(4, 2);
+    assert!(rec.is_empty());
+    assert!(rec.manual_recording);
+}
+
+#[test]
+fn test_encode_gif_frames_and_diff_optimization() {
+    let w = 16usize;
+    let h = 16usize;
+    let mut base_frame = vec![0u8; w * h * 4];
+    for px in base_frame.chunks_exact_mut(4) {
+        px.copy_from_slice(&[29, 43, 83, 255]); // パレット1番風の紺色背景
+    }
+
+    // 10フレーム分用意し、中央の 2x2 ピクセルだけが移動するアニメーションを作る
+    let mut anim_frames = Vec::new();
+    for i in 0..10 {
+        let mut f = base_frame.clone();
+        let dot_x = 2 + (i % 5) * 2;
+        let dot_y = 6;
+        for dy in 0..2 {
+            for dx in 0..2 {
+                let p = ((dot_y + dy) * w + (dot_x + dx)) * 4;
+                f[p..p + 4].copy_from_slice(&[255, 0, 77, 255]);
+            }
+        }
+        anim_frames.push(f);
+    }
+
+    let (gif_bytes, out_w, out_h, count) =
+        encode_gif_frames(&anim_frames, w, h, 2).expect("GIF encode should succeed");
+    assert_eq!(out_w, 32);
+    assert_eq!(out_h, 32);
+    assert_eq!(count, 10);
+    assert!(gif_bytes.starts_with(b"GIF89a"), "GIF header must be GIF89a");
+    // GIF logical screen width / height (little endian at bytes 6..10)
+    let hdr_w = u16::from_le_bytes([gif_bytes[6], gif_bytes[7]]);
+    let hdr_h = u16::from_le_bytes([gif_bytes[8], gif_bytes[9]]);
+    assert_eq!(hdr_w, 32);
+    assert_eq!(hdr_h, 32);
+
+    // 完全に静止した10フレームは1フレームに結合されるため、アニメーション版よりさらに小さくなる
+    let static_frames = vec![base_frame.clone(); 10];
+    let (static_gif, _, _, _) =
+        encode_gif_frames(&static_frames, w, h, 2).expect("Static GIF encode should succeed");
+    assert!(static_gif.starts_with(b"GIF89a"));
+    assert!(
+        static_gif.len() < gif_bytes.len(),
+        "Static frames should be merged into a smaller GIF ({} vs {})",
+        static_gif.len(),
+        gif_bytes.len()
+    );
+}
+
+#[test]
+fn test_save_gif_from_recorder_custom_path() {
+    let mut rec = GifRecorder::new(8, 8, 10);
+    for i in 0..4u8 {
+        let mut f = vec![0u8; 8 * 8 * 4];
+        for px in f.chunks_exact_mut(4) {
+            px.copy_from_slice(&[i * 40, 100, 200, 255]);
+        }
+        rec.push_rgba_upright(&f, 8, 8);
+    }
+
+    let tmp_path = std::env::temp_dir().join(format!(
+        "usakame_test_gif_{}.gif",
+        std::process::id()
+    ));
+    let (saved_path, out_w, out_h, num_frames, _secs) =
+        save_gif_from_recorder(&mut rec, 2, Some(&tmp_path)).expect("save_gif_from_recorder should succeed");
+
+    assert_eq!(out_w, 16);
+    assert_eq!(out_h, 16);
+    assert_eq!(num_frames, 4);
+    let data = std::fs::read(&saved_path).expect("saved GIF file should exist");
+    assert!(data.starts_with(b"GIF89a"));
+    let _ = std::fs::remove_file(&tmp_path);
 }
 

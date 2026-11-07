@@ -63,6 +63,8 @@ pub enum CliAction {
         script_args: Vec<String>,
         screenshot_path: Option<PathBuf>,
         screenshot_frames: u32,
+        start_frame: u32,
+        gacha: bool,
     },
     /// `uk run-with-edit [script.rb]` / `uk run --edit [script.rb]` (ゲームとエディタを同時起動)
     RunWithEdit {
@@ -130,8 +132,11 @@ USAGE:
     uk generate <prompt> [-o <file>]    Generate or overwrite script from prompt via LLM API
     uk run [script.rb] [options]        Run script natively with live hot-reload (default: game.rb)
         -e, --edit[=spr|map|all]        Launch editor(s) alongside the running game
-        -s, --screenshot <out.png>      Auto-save screenshot and exit
-        --frames <N>                    Frame count before auto-screenshot (default: 10)
+        -s, --screenshot <out.png|.gif> Auto-save screenshot (PNG) or video (GIF) and exit
+        --gif <out.gif>                 Auto-save GIF animation and exit (default: 180 frames = 3s)
+        -f, --frames <N>                Frame count for auto-capture (default: 10 for PNG, 180 for GIF)
+        --start-frame <N>               Frame number to start GIF recording from (default: 1)
+        -g, --gacha, --mash             Enable random button mashing during auto-capture
     uk run-with-edit [script.rb]        Run game and editors simultaneously with live sync
     uk edit [spr|map|all] [script.rb]   Launch built-in Sprite / Tilemap Editor (default: spr)
     uk examples [dest_dir]              Extract bundled example scripts (default: ./examples)
@@ -204,6 +209,8 @@ where
                 script_args: Vec::new(),
                 screenshot_path: None,
                 screenshot_frames: 10,
+                start_frame: 1,
+                gacha: false,
             });
         }
 
@@ -679,7 +686,9 @@ fn parse_run_args(args: &[String]) -> Result<CliAction, String> {
     let mut script_path: Option<PathBuf> = None;
     let mut script_args = Vec::new();
     let mut screenshot_path: Option<PathBuf> = None;
-    let mut screenshot_frames: u32 = 10;
+    let mut frames_opt: Option<u32> = None;
+    let mut start_frame: u32 = 1;
+    let mut gacha: bool = false;
     let mut with_edit: Option<EditorKind> = None;
 
     let mut i = 0;
@@ -702,14 +711,39 @@ fn parse_run_args(args: &[String]) -> Result<CliAction, String> {
                     .ok_or_else(|| "Missing argument for --screenshot".to_string())?;
                 screenshot_path = Some(PathBuf::from(s));
             }
-            "--frames" | "--screenshot-frames" => {
+            "--gif" => {
+                i += 1;
+                let s = args
+                    .get(i)
+                    .ok_or_else(|| "Missing argument for --gif".to_string())?;
+                let mut p = PathBuf::from(s);
+                if p.extension().is_none() {
+                    p.set_extension("gif");
+                }
+                screenshot_path = Some(p);
+            }
+            "-f" | "--frames" | "--screenshot-frames" | "--gif-frames" => {
                 i += 1;
                 let f = args
                     .get(i)
                     .ok_or_else(|| "Missing argument for --frames".to_string())?;
-                screenshot_frames = f
+                let parsed = f
                     .parse::<u32>()
                     .map_err(|_| format!("Invalid frame count: {}", f))?;
+                frames_opt = Some(parsed.max(1));
+            }
+            "--start-frame" | "--skip-frames" => {
+                i += 1;
+                let f = args
+                    .get(i)
+                    .ok_or_else(|| "Missing argument for --start-frame".to_string())?;
+                let parsed = f
+                    .parse::<u32>()
+                    .map_err(|_| format!("Invalid start frame: {}", f))?;
+                start_frame = parsed.max(1);
+            }
+            "-g" | "--gacha" | "--mash" | "--fuzz" => {
+                gacha = true;
             }
             "--" => {
                 i += 1;
@@ -742,11 +776,21 @@ fn parse_run_args(args: &[String]) -> Result<CliAction, String> {
         });
     }
 
+    let is_gif = screenshot_path
+        .as_ref()
+        .and_then(|p| p.extension())
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("gif"))
+        .unwrap_or(false);
+    let screenshot_frames = frames_opt.unwrap_or(if is_gif { 180 } else { 10 });
+
     Ok(CliAction::Run {
         script_path,
         script_args,
         screenshot_path,
         screenshot_frames,
+        start_frame,
+        gacha,
     })
 }
 

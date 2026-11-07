@@ -9210,6 +9210,427 @@ pub fn save_screenshot_from_render_target(
     Ok((filepath, out_w, out_h))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub const DEFAULT_GIF_MAX_FRAMES: usize = 300; // 30fps * 10秒 = 300フレーム (60fps換算で600フレーム分)
+#[cfg(not(target_arch = "wasm32"))]
+pub const GIF_CAPTURE_INTERVAL: u64 = 2; // 60fpsの2フレームに1回 (30fps) キャプチャ
+
+#[cfg(not(target_arch = "wasm32"))]
+pub struct GifRecorder {
+    pub width: usize,
+    pub height: usize,
+    pub max_frames: usize,
+    pub frames: std::collections::VecDeque<Vec<u8>>,
+    pub manual_recording: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl GifRecorder {
+    pub fn new(width: usize, height: usize, max_frames: usize) -> Self {
+        Self {
+            width,
+            height,
+            max_frames: max_frames.max(1),
+            frames: std::collections::VecDeque::with_capacity(max_frames.clamp(1, 1024)),
+            manual_recording: false,
+        }
+    }
+
+    pub fn reset(&mut self, width: usize, height: usize) {
+        self.width = width;
+        self.height = height;
+        self.frames.clear();
+        self.manual_recording = true;
+    }
+
+    pub fn ensure_size(&mut self, width: usize, height: usize) {
+        if self.width != width || self.height != height {
+            self.width = width;
+            self.height = height;
+            self.frames.clear();
+        }
+    }
+
+    /// OpenGL RenderTarget 由来の「上下反転した RGBA バイト列」を正立させながらリングバッファへ追加する。
+    /// リングバッファ満杯時は最古の Vec<u8> を pop して再利用することでヒープ再確保を抑える。
+    pub fn push_rgba_flipped(&mut self, rgba: &[u8], width: usize, height: usize) {
+        let expected_len = width * height * 4;
+        if rgba.len() != expected_len || width == 0 || height == 0 {
+            return;
+        }
+        self.ensure_size(width, height);
+
+        let mut buf = if self.frames.len() >= self.max_frames {
+            let mut reused = self.frames.pop_front().unwrap_or_default();
+            reused.resize(expected_len, 0);
+            reused
+        } else {
+            vec![0u8; expected_len]
+        };
+
+        let row_bytes = width * 4;
+        for y in 0..height {
+            let src_start = (height - 1 - y) * row_bytes;
+            let dst_start = y * row_bytes;
+            buf[dst_start..dst_start + row_bytes]
+                .copy_from_slice(&rgba[src_start..src_start + row_bytes]);
+        }
+
+        self.frames.push_back(buf);
+    }
+
+    /// 既に正立している RGBA バイト列をリングバッファへ追加する（主にテスト用）。
+    pub fn push_rgba_upright(&mut self, rgba: &[u8], width: usize, height: usize) {
+        let expected_len = width * height * 4;
+        if rgba.len() != expected_len || width == 0 || height == 0 {
+            return;
+        }
+        self.ensure_size(width, height);
+
+        let mut buf = if self.frames.len() >= self.max_frames {
+            let mut reused = self.frames.pop_front().unwrap_or_default();
+            reused.resize(expected_len, 0);
+            reused
+        } else {
+            vec![0u8; expected_len]
+        };
+        buf.copy_from_slice(rgba);
+        self.frames.push_back(buf);
+    }
+
+    pub fn push_render_target_frame(&mut self, render_target: &RenderTarget) {
+        let image = render_target.texture.get_texture_data();
+        let width = image.width as usize;
+        let height = image.height as usize;
+        self.push_rgba_flipped(&image.bytes, width, height);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.frames.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.frames.len()
+    }
+
+    pub fn duration_secs(&self) -> f32 {
+        (self.frames.len() as f32) / 30.0
+    }
+}
+
+/// 正立済み RGBA フレーム列 (`width` x `height`) を `scale` 倍にニアレストネイバー拡大し、
+/// フレーム間差分クロップ・透過マスク・30FPS 正確ディレイ (`[3, 3, 4]` センチ秒周期) を適用して
+/// アニメーション GIF バイト列へエンコードする。
+/// 戻り値: `(gif_bytes, out_w, out_h, captured_frame_count)`
+#[cfg(not(target_arch = "wasm32"))]
+pub fn encode_gif_frames(
+    frames: &[Vec<u8>],
+    width: usize,
+    height: usize,
+    scale: usize,
+) -> Result<(Vec<u8>, usize, usize, usize), String> {
+    if frames.is_empty() {
+        return Err("No frames to encode into GIF".to_string());
+    }
+    if width == 0 || height == 0 {
+        return Err("Invalid frame dimensions for GIF".to_string());
+    }
+    let expected_len = width * height * 4;
+    for (i, f) in frames.iter().enumerate() {
+        if f.len() != expected_len {
+            return Err(format!(
+                "Invalid RGBA buffer length at frame {}: expected {}, got {}",
+                i,
+                expected_len,
+                f.len()
+            ));
+        }
+    }
+
+    let scale = scale.max(1);
+    let out_w = width * scale;
+    let out_h = height * scale;
+    if out_w > u16::MAX as usize || out_h > u16::MAX as usize {
+        return Err(format!("Scaled GIF dimensions too large: {}x{}", out_w, out_h));
+    }
+
+    // 1. 同一フレーム結合 & 差分バウンディングボックス算出
+    struct PreparedFrame {
+        frame_idx: usize,
+        prev_idx: Option<usize>,
+        delay_cs: u16,
+        min_vx: usize,
+        min_vy: usize,
+        crop_vw: usize,
+        crop_vh: usize,
+    }
+
+    let mut prepared: Vec<PreparedFrame> = Vec::with_capacity(frames.len());
+    for idx in 0..frames.len() {
+        // 30FPS 正確な周期: 30ms, 30ms, 40ms (3フレームで100ms = 0.1秒)
+        let delay_cs: u16 = if idx % 3 == 2 { 4 } else { 3 };
+
+        if idx == 0 {
+            prepared.push(PreparedFrame {
+                frame_idx: 0,
+                prev_idx: None,
+                delay_cs,
+                min_vx: 0,
+                min_vy: 0,
+                crop_vw: width,
+                crop_vh: height,
+            });
+            continue;
+        }
+
+        let prev = &frames[idx - 1];
+        let curr = &frames[idx];
+
+        let mut min_vx = width;
+        let mut min_vy = height;
+        let mut max_vx = 0usize;
+        let mut max_vy = 0usize;
+        let mut changed = false;
+
+        for y in 0..height {
+            let row_offset = y * width * 4;
+            for x in 0..width {
+                let p = row_offset + x * 4;
+                if curr[p..p + 3] != prev[p..p + 3] {
+                    if x < min_vx {
+                        min_vx = x;
+                    }
+                    if x > max_vx {
+                        max_vx = x;
+                    }
+                    if y < min_vy {
+                        min_vy = y;
+                    }
+                    if y > max_vy {
+                        max_vy = y;
+                    }
+                    changed = true;
+                }
+            }
+        }
+
+        if !changed {
+            // 前のフレームと完全一致する場合は前フレームの delay を加算してフレーム自体を省略
+            if let Some(last) = prepared.last_mut() {
+                last.delay_cs = last.delay_cs.saturating_add(delay_cs);
+                continue;
+            }
+        }
+
+        prepared.push(PreparedFrame {
+            frame_idx: idx,
+            prev_idx: Some(idx - 1),
+            delay_cs,
+            min_vx,
+            min_vy,
+            crop_vw: max_vx - min_vx + 1,
+            crop_vh: max_vy - min_vy + 1,
+        });
+    }
+
+    // 2. 全フレームのユニーク RGB 色数を調査（最大255色以内ならグローバルパレット高速パスを使用）
+    // インデックス 0 は差分透過色用として予約
+    let mut color_to_index: std::collections::HashMap<[u8; 3], u8> =
+        std::collections::HashMap::with_capacity(64);
+    let mut global_palette: Vec<u8> = vec![0, 0, 0]; // index 0 = 透過用ダミー黒
+    let mut fits_in_global_palette = true;
+
+    'scan: for f in frames {
+        for px in f.chunks_exact(4) {
+            let rgb = [px[0], px[1], px[2]];
+            if !color_to_index.contains_key(&rgb) {
+                let next_idx = global_palette.len() / 3;
+                if next_idx >= 256 {
+                    fits_in_global_palette = false;
+                    break 'scan;
+                }
+                color_to_index.insert(rgb, next_idx as u8);
+                global_palette.extend_from_slice(&rgb);
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    {
+        let init_palette: &[u8] = if fits_in_global_palette {
+            &global_palette
+        } else {
+            &[]
+        };
+        let mut encoder = gif::Encoder::new(&mut out, out_w as u16, out_h as u16, init_palette)
+            .map_err(|e| format!("GIF Encoder init error: {:?}", e))?;
+        encoder
+            .set_repeat(gif::Repeat::Infinite)
+            .map_err(|e| format!("GIF set_repeat error: {:?}", e))?;
+
+        for pf in &prepared {
+            let curr = &frames[pf.frame_idx];
+            let prev_opt = pf.prev_idx.map(|pi| &frames[pi]);
+            let left = (pf.min_vx * scale) as u16;
+            let top = (pf.min_vy * scale) as u16;
+            let f_w = (pf.crop_vw * scale) as u16;
+            let f_h = (pf.crop_vh * scale) as u16;
+
+            if fits_in_global_palette {
+                let mut indexed_pixels = vec![0u8; (f_w as usize) * (f_h as usize)];
+                let stride = f_w as usize;
+
+                for vy in 0..pf.crop_vh {
+                    let src_y = pf.min_vy + vy;
+                    let src_row = src_y * width * 4;
+                    for vx in 0..pf.crop_vw {
+                        let src_x = pf.min_vx + vx;
+                        let p = src_row + src_x * 4;
+                        let rgb = [curr[p], curr[p + 1], curr[p + 2]];
+
+                        let color_idx = if let Some(prev) = prev_opt {
+                            if prev[p..p + 3] == rgb {
+                                0u8 // 未変更ピクセルは透過インデックス 0
+                            } else {
+                                *color_to_index.get(&rgb).unwrap_or(&1)
+                            }
+                        } else {
+                            *color_to_index.get(&rgb).unwrap_or(&1)
+                        };
+
+                        if scale == 1 {
+                            indexed_pixels[vy * stride + vx] = color_idx;
+                        } else {
+                            let base_dy = vy * scale;
+                            let base_dx = vx * scale;
+                            for sy in 0..scale {
+                                let dst_row = (base_dy + sy) * stride + base_dx;
+                                indexed_pixels[dst_row..dst_row + scale].fill(color_idx);
+                            }
+                        }
+                    }
+                }
+
+                let gif_frame = gif::Frame {
+                    delay: pf.delay_cs,
+                    dispose: gif::DisposalMethod::Keep,
+                    transparent: if prev_opt.is_some() { Some(0) } else { None },
+                    needs_user_input: false,
+                    top,
+                    left,
+                    width: f_w,
+                    height: f_h,
+                    interlaced: false,
+                    palette: None,
+                    buffer: std::borrow::Cow::Owned(indexed_pixels),
+                };
+                encoder
+                    .write_frame(&gif_frame)
+                    .map_err(|e| format!("GIF write_frame error: {:?}", e))?;
+            } else {
+                // 256色を超えるフレームが含まれる場合のフォールバック（NeuQuant 量子化）
+                let mut sub_rgba = vec![0u8; (f_w as usize) * (f_h as usize) * 4];
+                let stride_bytes = (f_w as usize) * 4;
+
+                for vy in 0..pf.crop_vh {
+                    let src_y = pf.min_vy + vy;
+                    let src_row = src_y * width * 4;
+                    for vx in 0..pf.crop_vw {
+                        let src_x = pf.min_vx + vx;
+                        let p = src_row + src_x * 4;
+                        let px = if let Some(prev) = prev_opt {
+                            if prev[p..p + 3] == curr[p..p + 3] {
+                                [0, 0, 0, 0] // 透過
+                            } else {
+                                [curr[p], curr[p + 1], curr[p + 2], 255]
+                            }
+                        } else {
+                            [curr[p], curr[p + 1], curr[p + 2], 255]
+                        };
+
+                        let base_dy = vy * scale;
+                        let base_dx = vx * scale;
+                        for sy in 0..scale {
+                            let dst_row_start = (base_dy + sy) * stride_bytes;
+                            for sx in 0..scale {
+                                let target = dst_row_start + (base_dx + sx) * 4;
+                                sub_rgba[target..target + 4].copy_from_slice(&px);
+                            }
+                        }
+                    }
+                }
+
+                let mut gif_frame = gif::Frame::from_rgba_speed(f_w, f_h, &mut sub_rgba, 10);
+                gif_frame.left = left;
+                gif_frame.top = top;
+                gif_frame.delay = pf.delay_cs;
+                gif_frame.dispose = gif::DisposalMethod::Keep;
+                encoder
+                    .write_frame(&gif_frame)
+                    .map_err(|e| format!("GIF write_frame (quantized) error: {:?}", e))?;
+            }
+        }
+    }
+
+    Ok((out, out_w, out_h, frames.len()))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn save_gif_from_recorder(
+    recorder: &mut GifRecorder,
+    scale: usize,
+    custom_path: Option<&std::path::Path>,
+) -> Result<(String, usize, usize, usize, f32), String> {
+    if recorder.is_empty() {
+        return Err("GIF buffer is empty".to_string());
+    }
+    let duration_secs = recorder.duration_secs();
+    let frame_vec: Vec<Vec<u8>> = recorder.frames.iter().cloned().collect();
+    let (gif_bytes, out_w, out_h, num_frames) =
+        encode_gif_frames(&frame_vec, recorder.width, recorder.height, scale)?;
+
+    let filepath = if let Some(p) = custom_path {
+        if let Some(parent) = p.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create GIF output dir: {}", e))?;
+            }
+        }
+        p.to_string_lossy().into_owned()
+    } else {
+        let dir = std::path::Path::new("screenshots");
+        if !dir.exists() {
+            std::fs::create_dir_all(dir)
+                .map_err(|e| format!("Failed to create screenshots dir: {}", e))?;
+        }
+
+        let mut filepath = String::new();
+        for i in 1..=9999 {
+            let candidate = format!("screenshots/screenshot_{:03}.gif", i);
+            if !std::path::Path::new(&candidate).exists() {
+                filepath = candidate;
+                break;
+            }
+        }
+        if filepath.is_empty() {
+            filepath = format!(
+                "screenshots/screenshot_{}.gif",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+            );
+        }
+        filepath
+    };
+
+    std::fs::write(&filepath, gif_bytes)
+        .map_err(|e| format!("Failed to write GIF file: {}", e))?;
+
+    recorder.manual_recording = false;
+    Ok((filepath, out_w, out_h, num_frames, duration_secs))
+}
+
 // ==========================================
 // ネイティブ環境エントリポイント (`uk` CLI)
 // ==========================================
@@ -9223,6 +9644,8 @@ async fn run_native_with_hot_reload(
     initial_error: Option<ScriptError>,
     screenshot_path: Option<std::path::PathBuf>,
     screenshot_frames: u32,
+    start_frame: u32,
+    gacha: bool,
 ) {
     let mut current_error: Option<ScriptError> = initial_error;
     let mut runtime_opt: Option<Box<GameRuntime>> = None;
@@ -9256,6 +9679,28 @@ async fn run_native_with_hot_reload(
     if let Some(ref mut rt) = runtime_opt {
         rt.preload_audio().await;
     }
+
+    let is_auto_gif = screenshot_path
+        .as_ref()
+        .map(|p| {
+            p.extension()
+                .and_then(|e| e.to_str())
+                .map(|s| s.eq_ignore_ascii_case("gif"))
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    let max_gif_frames = if is_auto_gif {
+        ((screenshot_frames as usize) / (GIF_CAPTURE_INTERVAL as usize) + 2)
+            .max(DEFAULT_GIF_MAX_FRAMES)
+    } else {
+        DEFAULT_GIF_MAX_FRAMES
+    };
+    let mut gif_recorder = GifRecorder::new(cur_virt_w as usize, cur_virt_h as usize, max_gif_frames);
+    let mut fuzzer = InputFuzzer::new(0xdeadbeef);
+    let start_frame_u64 = (start_frame.max(1)) as u64;
+    let end_frame_u64 = start_frame_u64
+        .saturating_add(screenshot_frames.max(1) as u64)
+        .saturating_sub(1);
 
     let mut last_snapshot = bundle::get_script_and_resources_snapshot(&script_path);
     let mut frame_count: u64 = 0;
@@ -9479,6 +9924,11 @@ async fn run_native_with_hot_reload(
                 render_error_screen(err);
             }
         } else if let Some(ref mut rt) = runtime_opt {
+            if gacha {
+                let btns = fuzzer.next_frame();
+                rt.input_state.borrow_mut().set_frame_buttons(btns);
+            }
+
             if let Err(err) = rt.call_update_result() {
                 if current_error.as_ref() != Some(&err) {
                     eprintln!("{}", err.full_message);
@@ -9508,31 +9958,95 @@ async fn run_native_with_hot_reload(
             );
             reload_banner_frames = reload_banner_frames.saturating_sub(1);
 
+            if is_key_pressed(KeyCode::F8) {
+                gif_recorder.reset(cur_virt_w as usize, cur_virt_h as usize);
+                println!("[gif] Recording start point reset (F8)");
+                reload_banner_text = "GIF REC START (F8)".to_string();
+                reload_banner_frames = 60;
+            }
+
+            if frame_count >= start_frame_u64
+                && (frame_count - start_frame_u64).is_multiple_of(GIF_CAPTURE_INTERVAL)
+            {
+                gif_recorder.push_render_target_frame(&render_target);
+            }
+
             if let Some(ref auto_path) = screenshot_path {
-                if frame_count >= screenshot_frames as u64 {
+                if frame_count >= end_frame_u64 {
                     let scale = rt
                         .config
                         .borrow()
                         .window_scale
                         .round()
                         .max(1.0) as usize;
-                    match save_screenshot_from_render_target(&render_target, scale, Some(auto_path)) {
-                        Ok((path, out_w, out_h)) => {
-                            println!(
-                                "[screenshot] Auto saved to {} ({}x{}, {}x) after {} frames",
-                                path, out_w, out_h, scale, frame_count
-                            );
-                            std::process::exit(0);
+                    if is_auto_gif {
+                        if gif_recorder.is_empty() {
+                            gif_recorder.push_render_target_frame(&render_target);
                         }
-                        Err(err) => {
-                            eprintln!("[screenshot] Auto screenshot failed: {}", err);
-                            std::process::exit(1);
+                        match save_gif_from_recorder(&mut gif_recorder, scale, Some(auto_path)) {
+                            Ok((path, out_w, out_h, num_frames, secs)) => {
+                                println!(
+                                    "[gif] Auto saved to {} ({}x{}, {}x, {} frames / {:.1}s) at frame {}",
+                                    path, out_w, out_h, scale, num_frames, secs, frame_count
+                                );
+                                std::process::exit(0);
+                            }
+                            Err(err) => {
+                                eprintln!("[gif] Auto GIF recording failed: {}", err);
+                                std::process::exit(1);
+                            }
+                        }
+                    } else {
+                        match save_screenshot_from_render_target(
+                            &render_target,
+                            scale,
+                            Some(auto_path),
+                        ) {
+                            Ok((path, out_w, out_h)) => {
+                                println!(
+                                    "[screenshot] Auto saved to {} ({}x{}, {}x) after {} frames",
+                                    path, out_w, out_h, scale, frame_count
+                                );
+                                std::process::exit(0);
+                            }
+                            Err(err) => {
+                                eprintln!("[screenshot] Auto screenshot failed: {}", err);
+                                std::process::exit(1);
+                            }
                         }
                     }
                 }
             }
 
-            if is_key_pressed(KeyCode::F12) {
+            let shift_down = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+            let save_gif_pressed =
+                is_key_pressed(KeyCode::F9) || (is_key_pressed(KeyCode::F12) && shift_down);
+            let save_png_pressed = is_key_pressed(KeyCode::F12) && !shift_down;
+
+            if save_gif_pressed {
+                let scale = rt
+                    .config
+                    .borrow()
+                    .window_scale
+                    .round()
+                    .max(1.0) as usize;
+                if gif_recorder.is_empty() {
+                    gif_recorder.push_render_target_frame(&render_target);
+                }
+                match save_gif_from_recorder(&mut gif_recorder, scale, None) {
+                    Ok((path, out_w, out_h, num_frames, secs)) => {
+                        println!(
+                            "[gif] Saved to {} ({}x{}, {}x, {} frames / {:.1}s)",
+                            path, out_w, out_h, scale, num_frames, secs
+                        );
+                        reload_banner_text = format!("GIF SAVED: {} ({:.1}s)", path, secs);
+                        reload_banner_frames = 90;
+                    }
+                    Err(err) => {
+                        eprintln!("[gif] Failed: {}", err);
+                    }
+                }
+            } else if save_png_pressed {
                 let scale = rt
                     .config
                     .borrow()
@@ -9587,10 +10101,14 @@ async fn run_embedded_game_with_args(
     miniquad::window::set_ime_enabled(false);
     let (mut render_target, mut virtual_camera) = create_virtual_screen(virt_w, virt_h);
     runtime.preload_audio().await;
+    let mut gif_recorder = GifRecorder::new(virt_w as usize, virt_h as usize, DEFAULT_GIF_MAX_FRAMES);
+    let mut frame_count: u64 = 0;
     let mut reload_banner_frames: u32 = 0;
     let mut reload_banner_text: String = String::new();
 
     loop {
+        frame_count = frame_count.wrapping_add(1);
+
         if is_key_pressed(KeyCode::F3) {
             let mut cfg = runtime.config.borrow_mut();
             cfg.show_fps = !cfg.show_fps;
@@ -9638,7 +10156,46 @@ async fn run_embedded_game_with_args(
         );
         reload_banner_frames = reload_banner_frames.saturating_sub(1);
 
-        if is_key_pressed(KeyCode::F12) {
+        if is_key_pressed(KeyCode::F8) {
+            gif_recorder.reset(virt_w as usize, virt_h as usize);
+            println!("[gif] Recording start point reset (F8)");
+            reload_banner_text = "GIF REC START (F8)".to_string();
+            reload_banner_frames = 60;
+        }
+
+        if frame_count.is_multiple_of(GIF_CAPTURE_INTERVAL) {
+            gif_recorder.push_render_target_frame(&render_target);
+        }
+
+        let shift_down = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+        let save_gif_pressed =
+            is_key_pressed(KeyCode::F9) || (is_key_pressed(KeyCode::F12) && shift_down);
+        let save_png_pressed = is_key_pressed(KeyCode::F12) && !shift_down;
+
+        if save_gif_pressed {
+            let scale = runtime
+                .config
+                .borrow()
+                .window_scale
+                .round()
+                .max(1.0) as usize;
+            if gif_recorder.is_empty() {
+                gif_recorder.push_render_target_frame(&render_target);
+            }
+            match save_gif_from_recorder(&mut gif_recorder, scale, None) {
+                Ok((path, out_w, out_h, num_frames, secs)) => {
+                    println!(
+                        "[gif] Saved to {} ({}x{}, {}x, {} frames / {:.1}s)",
+                        path, out_w, out_h, scale, num_frames, secs
+                    );
+                    reload_banner_text = format!("GIF SAVED: {} ({:.1}s)", path, secs);
+                    reload_banner_frames = 90;
+                }
+                Err(err) => {
+                    eprintln!("[gif] Failed: {}", err);
+                }
+            }
+        } else if save_png_pressed {
             let scale = runtime
                 .config
                 .borrow()
@@ -9967,6 +10524,8 @@ fn main() {
                     initial_error,
                     None,
                     10,
+                    1,
+                    false,
                 ),
             );
         }
@@ -9975,6 +10534,8 @@ fn main() {
             script_args,
             screenshot_path,
             screenshot_frames,
+            start_frame,
+            gacha,
         } => {
             let compile_res = cli::compile_ruby_script_file(&script_path);
             let initial_error = match &compile_res {
@@ -10006,6 +10567,8 @@ fn main() {
                     initial_error,
                     screenshot_path,
                     screenshot_frames,
+                    start_frame,
+                    gacha,
                 ),
             );
         }
