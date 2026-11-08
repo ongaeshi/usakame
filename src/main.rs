@@ -10367,7 +10367,7 @@ fn main() {
         } => {
             if let Err(err) = cli::cmd_generate(
                 &prompt,
-                &output_path,
+                output_path.as_deref(),
                 model.as_deref(),
                 api_key.as_deref(),
             ) {

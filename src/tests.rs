@@ -3600,8 +3600,23 @@ fn test_cli_parse_new_edit_examples_and_run_with_edit() {
         act_gen,
         cli::CliAction::Generate {
             prompt: "space shooter".to_string(),
-            output_path: std::path::PathBuf::from("stage2.rb"),
+            output_path: Some(std::path::PathBuf::from("stage2.rb")),
             model: Some("gpt-4o".to_string()),
+            api_key: None,
+        }
+    );
+
+    // 2.6 uk generate "<prompt>" (without -o)
+    let act_gen_auto = cli::parse_cli_args(
+        ["uk", "generate", "space shooter"].map(String::from),
+    )
+    .unwrap();
+    assert_eq!(
+        act_gen_auto,
+        cli::CliAction::Generate {
+            prompt: "space shooter".to_string(),
+            output_path: None,
+            model: None,
             api_key: None,
         }
     );
@@ -5114,4 +5129,108 @@ fn test_save_gif_from_recorder_custom_path() {
     assert!(data.starts_with(b"GIF89a"));
     let _ = std::fs::remove_file(&tmp_path);
 }
+
+#[test]
+fn test_cmd_generate_filename_from_prompt_and_non_overwriting() {
+    // 1. extract_filename_from_ruby_code の抽出テスト（LLMによる命名提案）
+    assert_eq!(
+        cli::extract_filename_from_ruby_code("# filename: moon_rabbit.rb\nputs 'hello'"),
+        Some("moon_rabbit".to_string())
+    );
+    assert_eq!(
+        cli::extract_filename_from_ruby_code("# File: \"space_shooter.rb\"\ncls(0)"),
+        Some("space_shooter".to_string())
+    );
+    assert_eq!(
+        cli::extract_filename_from_ruby_code("// filename: `breakout`\nupdate"),
+        Some("breakout".to_string())
+    );
+    assert_eq!(
+        cli::extract_filename_from_ruby_code("# script: ninja_dash.rb\n"),
+        Some("ninja_dash".to_string())
+    );
+    assert_eq!(
+        cli::extract_filename_from_ruby_code("# Some random comment without filename\ncls(0)"),
+        None
+    );
+
+    // 2. prompt_to_file_stem の変換テスト（フォールバック用）
+    assert_eq!(cli::prompt_to_file_stem("space shooter"), "space_shooter");
+    assert_eq!(cli::prompt_to_file_stem("Space Shooter!"), "space_shooter");
+    assert_eq!(cli::prompt_to_file_stem("ブロック崩し"), "ブロック崩し");
+    assert_eq!(
+        cli::prompt_to_file_stem("インベーダー風 シューティング"),
+        "インベーダー風_シューティング"
+    );
+    assert_eq!(cli::prompt_to_file_stem("rabbit-jump"), "rabbit_jump");
+    assert_eq!(cli::prompt_to_file_stem(""), "game");
+    assert_eq!(cli::prompt_to_file_stem("!@#$%^&*()"), "game");
+    assert_eq!(cli::prompt_to_file_stem("   "), "game");
+
+    // 3. resolve_unique_script_path の重複回避・連番テスト
+    let temp_dir = std::env::temp_dir().join(format!("uk_test_generate_{}", std::process::id()));
+    std::fs::create_dir_all(&temp_dir).expect("create temp_dir");
+
+    let p1 = temp_dir.join("test_game.rb");
+    assert_eq!(cli::resolve_unique_script_path(&p1), p1);
+
+    // p1 を実際に作成すると次は _2 になる
+    std::fs::write(&p1, "# original").expect("write p1");
+    let p2 = cli::resolve_unique_script_path(&p1);
+    assert_eq!(p2, temp_dir.join("test_game_2.rb"));
+
+    // p2 も作成すると次は _3 になる
+    std::fs::write(&p2, "# second").expect("write p2");
+    let p3 = cli::resolve_unique_script_path(&p1);
+    assert_eq!(p3, temp_dir.join("test_game_3.rb"));
+
+    // 4. cmd_generate_with_generator を用いた結合動作テスト
+    // (a) -o を指定しない場合: LLM の出力コード中の # filename: からファイル名が決定される
+    let out_gen_llm = cli::cmd_generate_with_generator(
+        "月面で餅つきをするゲーム",
+        None, // -o 省略
+        |_p, _title| {
+            Ok((
+                "# filename: moon_rabbit.rb\n# Usakame game\ncls(0)\n".to_string(),
+                1,
+            ))
+        },
+    );
+    if let Ok(ref gen_path) = out_gen_llm {
+        // カレントディレクトリに "moon_rabbit.rb" または既存回避名で生成されたことを確認
+        let fname = gen_path.file_name().and_then(|s| s.to_str()).unwrap();
+        assert!(
+            fname.starts_with("moon_rabbit"),
+            "Expected filename to start with moon_rabbit, got {}",
+            fname
+        );
+        let _ = std::fs::remove_file(gen_path);
+    }
+
+    // (b) -o で明示的に指定した場合はそのパスに書き込まれる
+    let explicit_path = temp_dir.join("custom_output.rb");
+    let res = cli::cmd_generate_with_generator(
+        "any prompt",
+        Some(&explicit_path),
+        |_p, title| {
+            assert_eq!(title, "CUSTOM OUTPUT");
+            Ok(("# custom content".to_string(), 1))
+        },
+    )
+    .expect("cmd_generate_with_generator with -o should succeed");
+    assert_eq!(res, explicit_path);
+    assert_eq!(
+        std::fs::read_to_string(&explicit_path).unwrap(),
+        "# custom content"
+    );
+
+    // 元の p1 の内容が破壊されていないことを確認
+    assert_eq!(
+        std::fs::read_to_string(&p1).unwrap(),
+        "# original"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
 

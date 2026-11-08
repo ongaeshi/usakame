@@ -44,7 +44,7 @@ pub enum CliAction {
     /// `uk generate <prompt> [-o <script.rb>] [--model <model>] [--api-key <key>]` (LLMによるスクリプト生成)
     Generate {
         prompt: String,
-        output_path: PathBuf,
+        output_path: Option<PathBuf>,
         model: Option<String>,
         api_key: Option<String>,
     },
@@ -562,12 +562,12 @@ fn parse_generate_args(args: &[String]) -> Result<CliAction, String> {
     }
 
     let prompt = prompt.ok_or_else(|| {
-        "Missing prompt. Usage: `uk generate \"<prompt>\" [-o game.rb] [--model <model>]`".to_string()
+        "Missing prompt. Usage: `uk generate \"<prompt>\" [-o <script.rb>] [--model <model>]`".to_string()
     })?;
 
     Ok(CliAction::Generate {
         prompt,
-        output_path: output_path.unwrap_or_else(|| PathBuf::from("game.rb")),
+        output_path,
         model,
         api_key,
     })
@@ -2063,34 +2063,161 @@ pub fn cmd_update_docs(dir: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(files)
 }
 
-/// `uk generate "<prompt>" [-o <script.rb>]` の実装
-pub fn cmd_generate(
-    prompt: &str,
-    output_path: &Path,
-    model: Option<&str>,
-    api_key: Option<&str>,
-) -> Result<PathBuf, String> {
-    let title = output_path
+/// プロンプト文字列から安全で使いやすいスクリプトファイル名（拡張子除くstem）を導出する
+pub fn prompt_to_file_stem(prompt: &str) -> String {
+    let mut stem = String::new();
+    let mut last_was_sep = false;
+
+    for ch in prompt.chars() {
+        if ch.is_alphanumeric() {
+            for lower in ch.to_lowercase() {
+                stem.push(lower);
+            }
+            last_was_sep = false;
+        } else if !last_was_sep && !stem.is_empty() {
+            stem.push('_');
+            last_was_sep = true;
+        }
+        if stem.chars().count() >= 30 {
+            break;
+        }
+    }
+
+    let trimmed = stem.trim_end_matches('_');
+    if trimmed.is_empty() {
+        "game".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// 指定したパスが既に存在する場合、上書きせず連番（`_2.rb`, `_3.rb` ...）を付与した空いているパスを返す
+pub fn resolve_unique_script_path(base_path: &Path) -> PathBuf {
+    if !base_path.exists() {
+        return base_path.to_path_buf();
+    }
+    let parent = base_path.parent();
+    let stem = base_path
         .file_stem()
         .and_then(|s| s.to_str())
-        .unwrap_or("Usakame Game")
-        .to_uppercase();
-    let (generated_rb, attempts) =
-        crate::llm::generate_verified_game_rb(prompt, &title, api_key, model)?;
-    if let Some(parent) = output_path.parent()
+        .unwrap_or("game");
+    let ext = base_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("rb");
+
+    let mut index = 2;
+    loop {
+        let candidate_name = format!("{}_{}.{}", stem, index, ext);
+        let candidate_path = match parent {
+            Some(p) if !p.as_os_str().is_empty() => p.join(&candidate_name),
+            _ => PathBuf::from(&candidate_name),
+        };
+        if !candidate_path.exists() {
+            return candidate_path;
+        }
+        index += 1;
+    }
+}
+
+/// Rubyコードのコメント行から `# filename: <name>.rb` 等の推奨ファイル名stemを抽出する
+pub fn extract_filename_from_ruby_code(code: &str) -> Option<String> {
+    for line in code.lines().take(30) {
+        let trimmed = line.trim();
+        let comment = if let Some(c) = trimmed.strip_prefix('#') {
+            c.trim()
+        } else if let Some(c) = trimmed.strip_prefix("//") {
+            c.trim()
+        } else {
+            continue;
+        };
+
+        let lower = comment.to_ascii_lowercase();
+        let raw_val = if lower.starts_with("filename:") {
+            Some(&comment["filename:".len()..])
+        } else if lower.starts_with("filename=") {
+            Some(&comment["filename=".len()..])
+        } else if lower.starts_with("file:") {
+            Some(&comment["file:".len()..])
+        } else if lower.starts_with("file=") {
+            Some(&comment["file=".len()..])
+        } else if lower.starts_with("script:") {
+            Some(&comment["script:".len()..])
+        } else {
+            None
+        };
+
+        if let Some(val) = raw_val {
+            let cleaned = val.trim().trim_matches(|c| c == '`' || c == '"' || c == '\'');
+            let cleaned = cleaned.strip_suffix(".rb").unwrap_or(cleaned);
+            let stem = prompt_to_file_stem(cleaned);
+            if !stem.is_empty() && stem != "game" {
+                return Some(stem);
+            }
+        }
+    }
+    None
+}
+
+/// `uk generate "<prompt>" [-o <script.rb>]` のジェネレータ抽象化実装（テスト容易化用）
+pub fn cmd_generate_with_generator<F>(
+    prompt: &str,
+    output_path: Option<&Path>,
+    generator: F,
+) -> Result<PathBuf, String>
+where
+    F: FnOnce(&str, &str) -> Result<(String, usize), String>,
+{
+    let initial_title = match output_path {
+        Some(p) => p
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Usakame Game")
+            .replace('_', " ")
+            .to_uppercase(),
+        None => prompt_to_file_stem(prompt)
+            .replace('_', " ")
+            .to_uppercase(),
+    };
+
+    let (generated_rb, attempts) = generator(prompt, &initial_title)?;
+
+    let target_path = match output_path {
+        Some(p) => p.to_path_buf(),
+        None => {
+            let stem = extract_filename_from_ruby_code(&generated_rb)
+                .unwrap_or_else(|| prompt_to_file_stem(prompt));
+            let base_path = PathBuf::from(format!("{}.rb", stem));
+            resolve_unique_script_path(&base_path)
+        }
+    };
+
+    if let Some(parent) = target_path.parent()
         && !parent.as_os_str().is_empty()
     {
         fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create directory `{}`: {}", parent.display(), e))?;
     }
-    fs::write(output_path, &generated_rb)
-        .map_err(|e| format!("Failed to write `{}`: {}", output_path.display(), e))?;
+    fs::write(&target_path, &generated_rb)
+        .map_err(|e| format!("Failed to write `{}`: {}", target_path.display(), e))?;
     println!(
         "✨ Generated and verified `{}` in {} attempt(s)!",
-        output_path.display(),
+        target_path.display(),
         attempts
     );
-    Ok(output_path.to_path_buf())
+    Ok(target_path)
+}
+
+/// `uk generate "<prompt>" [-o <script.rb>]` の実装
+pub fn cmd_generate(
+    prompt: &str,
+    output_path: Option<&Path>,
+    model: Option<&str>,
+    api_key: Option<&str>,
+) -> Result<PathBuf, String> {
+    cmd_generate_with_generator(prompt, output_path, |p, title| {
+        crate::llm::generate_verified_game_rb(p, title, api_key, model)
+    })
 }
 
 /// エディタプロセスをバックグラウンド（子プロセス）で起動する

@@ -380,6 +380,7 @@ Your job is to output a complete, self-contained, playable Usakame Ruby script (
    - Include a title / start state OR start immediately in gameplay with clear on-screen controls (e.g. `ARROWS: MOVE  Z: JUMP/SHOOT`) and score/HP display.
    - Include custom 16x16 pixel-art `@SPRITE` definitions (using hex colors `0`..`F` and `.` for transparent) AND/OR emoji sprites (`spr("🐰", x, y)`).
    - Include `@SFX` sound effects (or preset `sfx(:jump)`, `sfx(:coin)`, `sfx(:boom)`, `sfx(:hit)`, `sfx(:select)`) so actions feel responsive.
+5. On the very first line of the script, include a header comment with a concise, appropriate lowercase snake_case filename reflecting the game theme (e.g. `# filename: space_shooter.rb` or `# filename: moon_rabbit.rb`).
 
 ---
 # USAKAME ENGINE API REFERENCE
@@ -592,7 +593,7 @@ where
     F: FnMut(&[(String, String)]) -> Result<String, String>,
 {
     let initial_user_msg = format!(
-        "Create a complete, fun, playable Usakame game (`game.rb`) titled \"{}\" based on the following request:\n\n{}\n\nRemember: Output ONLY the valid Ruby code for `game.rb` (including `__END__` resources if needed), strictly following all mrubyedge rules.",
+        "Create a complete, fun, playable Usakame game (`game.rb`) titled \"{}\" based on the following request:\n\n{}\n\nRemember: Output ONLY the valid Ruby code for `game.rb` (including `__END__` resources if needed), strictly following all mrubyedge rules. On the very first line of the code, include `# filename: <game_name>.rb` with a concise, appropriate snake_case filename for this game.",
         project_title, user_prompt
     );
 
@@ -618,7 +619,7 @@ where
                     );
                     conversation.push(("model".to_string(), raw_response));
                     let fix_prompt = format!(
-                        "The generated `game.rb` failed verification with the following error in Usakame (mrubyedge):\n\n```\n{}\n```\n\nPlease fix this error and output the complete, corrected `game.rb` script. Remember all mrubyedge restrictions (no `.sample`, `.shuffle`, `.reverse`, `.delete(val)`, `Hash#key?`, `String#gsub`, `upto`/`downto`, `even?`/`odd?`, use float literals like `f -= 1.0` instead of `f -= 1` for float variables, and `mget` returns `nil` for empty cells).",
+                        "The generated `game.rb` failed verification with the following error in Usakame (mrubyedge):\n\n```\n{}\n```\n\nPlease fix this error and output the complete, corrected `game.rb` script. Keep the `# filename: <game_name>.rb` header comment on the first line. Remember all mrubyedge restrictions (no `.sample`, `.shuffle`, `.reverse`, `.delete(val)`, `Hash#key?`, `String#gsub`, `upto`/`downto`, `even?`/`odd?`, use float literals like `f -= 1.0` instead of `f -= 1` for float variables, and `mget` returns `nil` for empty cells).",
                         verify_err
                     );
                     conversation.push(("user".to_string(), fix_prompt));
