@@ -5251,4 +5251,83 @@ fn test_cmd_generate_filename_from_prompt_and_non_overwriting() {
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
+#[test]
+fn test_sub_game_runtime_execution_and_reflection() {
+    let temp_dir = std::env::temp_dir().join(format!("uk_sub_game_test_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let target_file = temp_dir.join("mini_game.rb");
+
+    let code = r#"
+$score = 100
+class TargetScene
+  def initialize
+    @player_x = 20
+    @player_y = 30
+  end
+  def update
+    @player_x += 1
+  end
+  def draw
+    cls(0)
+    rect(10, 10, 16, 16, 7)
+  end
+end
+run TargetScene.new
+"#;
+    std::fs::write(&target_file, code).unwrap();
+
+    let host_code = format!(
+        r#"
+path = "{}"
+ok = sub_game_load(path)
+raise "sub_game_load failed" unless ok
+raise "sub_game_running failed" unless sub_game_running?
+raise "sub_game_error not nil" if sub_game_error != nil
+
+g_pairs = sub_game_globals
+$has_score = false
+gi = 0
+while gi < g_pairs.size
+  if g_pairs[gi][0] == "$score" && g_pairs[gi][1] == "100"
+    $has_score = true
+  end
+  gi += 1
+end
+raise "score global missing" unless $has_score
+
+sub_game_update
+i_pairs = sub_game_ivars
+$has_px21 = false
+ii = 0
+while ii < i_pairs.size
+  if i_pairs[ii][0] == "@player_x" && i_pairs[ii][1] == "21"
+    $has_px21 = true
+  end
+  ii += 1
+end
+raise "player_x should be 21 after first update" unless $has_px21
+
+sub_game_update
+i_pairs2 = sub_game_ivars
+$has_px22 = false
+ii = 0
+while ii < i_pairs2.size
+  if i_pairs2[ii][0] == "@player_x" && i_pairs2[ii][1] == "22"
+    $has_px22 = true
+  end
+  ii += 1
+end
+raise "player_x should be 22 after second update" unless $has_px22
+"#,
+        target_file.display().to_string().replace('\\', "/")
+    );
+
+    let (host_tail, host_mrb) = cli::compile_ruby_script_str(&host_code).unwrap();
+    let mut rt = GameRuntime::new_with_args(&host_tail, &host_mrb, true, &[]).unwrap();
+    rt.call_update();
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+
 

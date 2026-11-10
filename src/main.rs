@@ -4469,6 +4469,7 @@ fn register_engine_api(
     register_string_format_extensions(vm);
     register_rand_extension(vm);
     register_reflection_extensions(vm);
+    register_sub_game_api(vm, headless);
     let obj_class = vm.object_class.clone();
 
     // run / scene: オブジェクト指向のシーン管理（遅延切り替え）
@@ -9122,6 +9123,403 @@ impl GameRuntime {
 }
 
 // ==========================================
+// Sub-Game Runtime (for Viewer live play)
+// ==========================================
+
+pub fn copy_camera(cam: &Camera2D) -> Camera2D {
+    Camera2D {
+        rotation: cam.rotation,
+        zoom: cam.zoom,
+        target: cam.target,
+        offset: cam.offset,
+        render_target: cam.render_target.clone(),
+        viewport: cam.viewport,
+    }
+}
+
+pub struct SubGameRuntime {
+    pub script_path: PathBuf,
+    pub runtime: GameRuntime,
+    pub screen: Option<(RenderTarget, Camera2D)>,
+    pub audio_preloaded: bool,
+}
+
+pub struct SubGameManager {
+    pub active_game: Option<SubGameRuntime>,
+    pub last_error: Option<String>,
+    pub headless: bool,
+}
+
+impl SubGameManager {
+    pub const fn new() -> Self {
+        Self {
+            active_game: None,
+            last_error: None,
+            headless: false,
+        }
+    }
+}
+
+thread_local! {
+    static SUB_GAME_MGR: RefCell<SubGameManager> = RefCell::new(SubGameManager::new());
+    static CURRENT_VIRTUAL_CAMERA: RefCell<Option<Camera2D>> = RefCell::new(None);
+}
+
+pub async fn process_sub_game_audio() {
+    let sub_to_preload = SUB_GAME_MGR.with(|mgr_cell| {
+        let mut mgr = mgr_cell.borrow_mut();
+        if let Some(ref mut sub) = mgr.active_game {
+            if !sub.audio_preloaded && !sub.runtime.headless {
+                sub.audio_preloaded = true;
+                return Some(sub.runtime.sound_bank.clone());
+            }
+        }
+        None
+    });
+    if let Some(bank) = sub_to_preload {
+        bank.borrow_mut().preload_all().await;
+    }
+
+    let sub_to_process = SUB_GAME_MGR.with(|mgr_cell| {
+        let mgr = mgr_cell.borrow();
+        mgr.active_game.as_ref().and_then(|sub| {
+            if sub.runtime.headless {
+                None
+            } else {
+                Some(sub.runtime.sound_bank.clone())
+            }
+        })
+    });
+    if let Some(bank) = sub_to_process {
+        bank.borrow_mut().process_audio().await;
+    }
+}
+
+fn format_val_for_inspector(obj: &RObject) -> String {
+    match &obj.value {
+        RValue::Integer(i) => i.to_string(),
+        RValue::Float(f) => {
+            if f.fract() == 0.0 {
+                format!("{:.1}", f)
+            } else {
+                format!("{:.2}", f)
+            }
+        }
+        RValue::Bool(b) => b.to_string(),
+        RValue::Nil => "nil".to_string(),
+        RValue::Symbol(s) => format!(":{}", s.name),
+        RValue::String(s, _) => {
+            let bytes = s.borrow();
+            let str_val = String::from_utf8_lossy(&bytes);
+            if str_val.len() > 16 {
+                format!("\"{}...\"", &str_val[..13])
+            } else {
+                format!("\"{}\"", str_val)
+            }
+        }
+        RValue::Array(arr) => {
+            let len = arr.borrow().len();
+            format!("[{} items]", len)
+        }
+        RValue::Hash(h) => {
+            let len = h.borrow().len();
+            format!("{{{} keys}}", len)
+        }
+        RValue::Instance(inst) => {
+            let class_name = &inst.class.module.sym_id.name;
+            format!("#<{}>", class_name)
+        }
+        _ => "#<Object>".to_string(),
+    }
+}
+
+fn sub_game_load_internal(script_path: &Path, headless: bool) -> Result<bool, mrubyedge::Error> {
+    if !script_path.exists() {
+        SUB_GAME_MGR.with(|mgr_cell| {
+            let mut mgr = mgr_cell.borrow_mut();
+            mgr.active_game = None;
+            mgr.last_error = Some(format!("File not found: {}", script_path.display()));
+        });
+        return Ok(false);
+    }
+
+    match cli::compile_ruby_script_file(script_path) {
+        Ok((source, tail, mrb)) => {
+            let parsed_config = parse_config_from_source(&source);
+            match GameRuntime::new_with_args(&tail, &mrb, headless, &[]) {
+                Ok(rt) => {
+                    if parsed_config != AppConfig::default() {
+                        let mut cfg = rt.config.borrow_mut();
+                        *cfg = parsed_config;
+                        rt.draw_state.borrow_mut().screen_w = cfg.screen_width as i32;
+                        rt.draw_state.borrow_mut().screen_h = cfg.screen_height as i32;
+                    }
+                    let (w, h) = {
+                        let cfg = rt.config.borrow();
+                        (cfg.screen_width, cfg.screen_height)
+                    };
+                    let screen = if headless {
+                        None
+                    } else {
+                        Some(create_virtual_screen(w, h))
+                    };
+                    let sub = SubGameRuntime {
+                        script_path: script_path.to_path_buf(),
+                        runtime: rt,
+                        screen,
+                        audio_preloaded: false,
+                    };
+                    SUB_GAME_MGR.with(|mgr_cell| {
+                        let mut mgr = mgr_cell.borrow_mut();
+                        mgr.active_game = Some(sub);
+                        mgr.last_error = None;
+                    });
+                    Ok(true)
+                }
+                Err(e) => {
+                    SUB_GAME_MGR.with(|mgr_cell| {
+                        let mut mgr = mgr_cell.borrow_mut();
+                        mgr.active_game = None;
+                        mgr.last_error = Some(e.full_message.clone());
+                    });
+                    Ok(false)
+                }
+            }
+        }
+        Err(e) => {
+            SUB_GAME_MGR.with(|mgr_cell| {
+                let mut mgr = mgr_cell.borrow_mut();
+                mgr.active_game = None;
+                mgr.last_error = Some(e.clone());
+            });
+            Ok(false)
+        }
+    }
+}
+
+fn mrb_sub_game_load(_vm: &mut VM, args: &[Rc<RObject>]) -> Result<Rc<RObject>, mrubyedge::Error> {
+    let path_str = match args.first() {
+        Some(arg) => match &arg.value {
+            RValue::String(s, _) => String::from_utf8_lossy(&s.borrow()).to_string(),
+            RValue::Symbol(sym) => sym.name.clone(),
+            _ => return Ok(Rc::new(RObject::boolean(false))),
+        },
+        None => return Ok(Rc::new(RObject::boolean(false))),
+    };
+    let headless = SUB_GAME_MGR.with(|mgr_cell| mgr_cell.borrow().headless);
+    let ok = sub_game_load_internal(Path::new(&path_str), headless)?;
+    Ok(Rc::new(RObject::boolean(ok)))
+}
+
+fn mrb_sub_game_running(_vm: &mut VM, _args: &[Rc<RObject>]) -> Result<Rc<RObject>, mrubyedge::Error> {
+    let running = SUB_GAME_MGR.with(|mgr_cell| {
+        let mgr = mgr_cell.borrow();
+        mgr.active_game.is_some() && mgr.last_error.is_none()
+    });
+    Ok(Rc::new(RObject::boolean(running)))
+}
+
+fn mrb_sub_game_error(_vm: &mut VM, _args: &[Rc<RObject>]) -> Result<Rc<RObject>, mrubyedge::Error> {
+    let err_opt = SUB_GAME_MGR.with(|mgr_cell| {
+        let mgr = mgr_cell.borrow();
+        mgr.last_error.clone()
+    });
+    if let Some(err) = err_opt {
+        Ok(Rc::new(RObject::string(err)))
+    } else {
+        Ok(Rc::new(RObject::nil()))
+    }
+}
+
+fn mrb_sub_game_update(_vm: &mut VM, _args: &[Rc<RObject>]) -> Result<Rc<RObject>, mrubyedge::Error> {
+    let ok = SUB_GAME_MGR.with(|mgr_cell| {
+        let mut mgr = mgr_cell.borrow_mut();
+        if mgr.last_error.is_some() {
+            return false;
+        }
+        if let Some(ref mut sub) = mgr.active_game {
+            if sub.runtime.is_restart_requested() {
+                let path = sub.script_path.clone();
+                let headless = mgr.headless;
+                drop(mgr);
+                return sub_game_load_internal(&path, headless).unwrap_or(false);
+            }
+            if let Err(err) = sub.runtime.call_update_result() {
+                mgr.last_error = Some(err.full_message);
+                return false;
+            }
+            true
+        } else {
+            false
+        }
+    });
+    Ok(Rc::new(RObject::boolean(ok)))
+}
+
+fn mrb_sub_game_draw(_vm: &mut VM, args: &[Rc<RObject>]) -> Result<Rc<RObject>, mrubyedge::Error> {
+    let x = arg_i32(args, 0, 0);
+    let y = arg_i32(args, 1, 0);
+    let w = arg_i32(args, 2, 256);
+    let h = arg_i32(args, 3, 256);
+    let ok = SUB_GAME_MGR.with(|mgr_cell| {
+        let mut mgr = mgr_cell.borrow_mut();
+        if mgr.last_error.is_some() {
+            return false;
+        }
+        if let Some(ref mut sub) = mgr.active_game {
+            if sub.runtime.headless {
+                return true;
+            }
+            if let Some((ref rt, ref cam)) = sub.screen {
+                set_camera(cam);
+                if let Err(err) = sub.runtime.call_draw_result() {
+                    mgr.last_error = Some(err.full_message);
+                    if let Some(parent_cam) = CURRENT_VIRTUAL_CAMERA.with(|c| c.borrow().as_ref().map(copy_camera)) {
+                        set_camera(&parent_cam);
+                    }
+                    return false;
+                }
+                if let Some(parent_cam) = CURRENT_VIRTUAL_CAMERA.with(|c| c.borrow().as_ref().map(copy_camera)) {
+                    set_camera(&parent_cam);
+                }
+                draw_texture_ex(
+                    &rt.texture,
+                    x as f32,
+                    y as f32,
+                    WHITE,
+                    DrawTextureParams {
+                        dest_size: Some(vec2(w as f32, h as f32)),
+                        flip_y: true,
+                        ..Default::default()
+                    },
+                );
+            }
+            true
+        } else {
+            false
+        }
+    });
+    Ok(Rc::new(RObject::boolean(ok)))
+}
+
+fn mrb_sub_game_restart(_vm: &mut VM, _args: &[Rc<RObject>]) -> Result<Rc<RObject>, mrubyedge::Error> {
+    let (path_opt, headless) = SUB_GAME_MGR.with(|mgr_cell| {
+        let mgr = mgr_cell.borrow();
+        (mgr.active_game.as_ref().map(|s| s.script_path.clone()), mgr.headless)
+    });
+    if let Some(path) = path_opt {
+        let ok = sub_game_load_internal(&path, headless)?;
+        Ok(Rc::new(RObject::boolean(ok)))
+    } else {
+        Ok(Rc::new(RObject::boolean(false)))
+    }
+}
+
+fn mrb_sub_game_globals(_vm: &mut VM, _args: &[Rc<RObject>]) -> Result<Rc<RObject>, mrubyedge::Error> {
+    let entries = SUB_GAME_MGR.with(|mgr_cell| {
+        let mgr = mgr_cell.borrow();
+        if let Some(ref sub) = mgr.active_game {
+            let mut list: Vec<(String, String)> = Vec::new();
+            for (k, v) in sub.runtime.vm.globals.iter() {
+                if k.starts_with('$') && !k.starts_with("$__") && k != "$:" && k != "$\"" && k != "$LOAD_PATH" {
+                    let val_str = format_val_for_inspector(v);
+                    list.push((k.clone(), val_str));
+                }
+            }
+            list.sort_by(|a, b| a.0.cmp(&b.0));
+            list
+        } else {
+            Vec::new()
+        }
+    });
+
+    let arr: Vec<Rc<RObject>> = entries
+        .into_iter()
+        .map(|(k, v)| {
+            Rc::new(RObject::array(vec![
+                Rc::new(RObject::string(k)),
+                Rc::new(RObject::string(v)),
+            ]))
+        })
+        .collect();
+    Ok(Rc::new(RObject::array(arr)))
+}
+
+fn mrb_sub_game_ivars(_vm: &mut VM, _args: &[Rc<RObject>]) -> Result<Rc<RObject>, mrubyedge::Error> {
+    let entries = SUB_GAME_MGR.with(|mgr_cell| {
+        let mgr = mgr_cell.borrow();
+        if let Some(ref sub) = mgr.active_game {
+            let mut list: Vec<(String, String)> = Vec::new();
+            if let Some(ref scene) = sub.runtime.current_scene {
+                let ivars = scene.ivar.borrow();
+                for (k, v) in ivars.iter() {
+                    let name = if k.starts_with('@') {
+                        k.clone()
+                    } else {
+                        format!("@{}", k)
+                    };
+                    let val_str = format_val_for_inspector(v);
+                    list.push((name, val_str));
+                }
+            }
+            list.sort_by(|a, b| a.0.cmp(&b.0));
+            list
+        } else {
+            Vec::new()
+        }
+    });
+
+    let arr: Vec<Rc<RObject>> = entries
+        .into_iter()
+        .map(|(k, v)| {
+            Rc::new(RObject::array(vec![
+                Rc::new(RObject::string(k)),
+                Rc::new(RObject::string(v)),
+            ]))
+        })
+        .collect();
+    Ok(Rc::new(RObject::array(arr)))
+}
+
+fn mrb_sub_game_info(_vm: &mut VM, _args: &[Rc<RObject>]) -> Result<Rc<RObject>, mrubyedge::Error> {
+    let info_opt = SUB_GAME_MGR.with(|mgr_cell| {
+        let mgr = mgr_cell.borrow();
+        mgr.active_game.as_ref().map(|sub| {
+            let cfg = sub.runtime.config.borrow();
+            (cfg.screen_width as i64, cfg.screen_height as i64, cfg.title.clone())
+        })
+    });
+
+    if let Some((w, h, title)) = info_opt {
+        let arr = vec![
+            Rc::new(RObject::integer(w)),
+            Rc::new(RObject::integer(h)),
+            Rc::new(RObject::string(title)),
+        ];
+        Ok(Rc::new(RObject::array(arr)))
+    } else {
+        Ok(Rc::new(RObject::nil()))
+    }
+}
+
+fn register_sub_game_api(vm: &mut VM, headless: bool) {
+    SUB_GAME_MGR.with(|mgr_cell| {
+        mgr_cell.borrow_mut().headless = headless;
+    });
+    let obj_class = vm.object_class.clone();
+    mrb_define_cmethod(vm, obj_class.clone(), "sub_game_load", Box::new(mrb_sub_game_load));
+    mrb_define_cmethod(vm, obj_class.clone(), "sub_game_running", Box::new(mrb_sub_game_running));
+    mrb_define_cmethod(vm, obj_class.clone(), "sub_game_running?", Box::new(mrb_sub_game_running));
+    mrb_define_cmethod(vm, obj_class.clone(), "sub_game_error", Box::new(mrb_sub_game_error));
+    mrb_define_cmethod(vm, obj_class.clone(), "sub_game_update", Box::new(mrb_sub_game_update));
+    mrb_define_cmethod(vm, obj_class.clone(), "sub_game_draw", Box::new(mrb_sub_game_draw));
+    mrb_define_cmethod(vm, obj_class.clone(), "sub_game_restart", Box::new(mrb_sub_game_restart));
+    mrb_define_cmethod(vm, obj_class.clone(), "sub_game_globals", Box::new(mrb_sub_game_globals));
+    mrb_define_cmethod(vm, obj_class.clone(), "sub_game_ivars", Box::new(mrb_sub_game_ivars));
+    mrb_define_cmethod(vm, obj_class, "sub_game_info", Box::new(mrb_sub_game_info));
+}
+
+// ==========================================
 // ウィンドウ & 描画ループ共通処理
 // ==========================================
 pub fn window_conf_with_title_and_size(title: &str, w: i32, h: i32) -> Conf {
@@ -10071,7 +10469,9 @@ async fn run_native_with_hot_reload(
                 error_overlay_frames = ERROR_OVERLAY_DURATION_FRAMES;
             }
             rt.process_audio().await;
+            process_sub_game_audio().await;
 
+            CURRENT_VIRTUAL_CAMERA.with(|c| *c.borrow_mut() = Some(copy_camera(&virtual_camera)));
             set_camera(&virtual_camera);
             if let Err(err) = rt.call_draw_result() {
                 if current_error.as_ref() != Some(&err) {
@@ -10275,7 +10675,9 @@ async fn run_embedded_game_with_args(
 
         runtime.call_update();
         runtime.process_audio().await;
+        process_sub_game_audio().await;
 
+        CURRENT_VIRTUAL_CAMERA.with(|c| *c.borrow_mut() = Some(copy_camera(&virtual_camera)));
         set_camera(&virtual_camera);
         runtime.call_draw();
 
@@ -10939,7 +11341,9 @@ async fn main() {
                 error_overlay_frames = ERROR_OVERLAY_DURATION_FRAMES;
             }
             rt.process_audio().await;
+            process_sub_game_audio().await;
 
+            CURRENT_VIRTUAL_CAMERA.with(|c| *c.borrow_mut() = Some(copy_camera(&virtual_camera)));
             set_camera(&virtual_camera);
             if let Err(err) = rt.call_draw_result() {
                 if current_error.as_ref() != Some(&err) {

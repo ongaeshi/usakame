@@ -486,6 +486,7 @@ class ResourceViewer
     end
     @target_idx = 0
     @target_path = @targets[0]
+    @use_internal_demo = (@target_path == default_self)
 
     # Hot-reload tracking
     @check_timer = 0
@@ -597,6 +598,14 @@ class ResourceViewer
 
     parse_tail_metadata(combined_tail)
     apply_sprite_filter(prev_sel_key)
+
+    if !@use_internal_demo
+      if is_hot_reload
+        sub_game_restart
+      else
+        sub_game_load(@target_path)
+      end
+    end
 
     @last_mtime_sig = compute_mtime_signature(path)
     if is_hot_reload
@@ -1113,8 +1122,9 @@ class ResourceViewer
     return if @targets.size <= 1
     @target_idx = (@target_idx + 1) % @targets.size
     @target_path = @targets[@target_idx]
+    @use_internal_demo = (@target_path == "examples/viewer.rb")
     sfx(:select, -1, 0.3)
-    reload_target_resources(true)
+    reload_target_resources(false)
   end
 
   # ============================================================================
@@ -1327,8 +1337,7 @@ class ResourceViewer
       sfx(:select, -1, 0.25)
     end
     if btnp(:key_r)
-      @game_scene.reset_game
-      sfx(:coin, -1, 0.3)
+      restart_current_game
     end
 
     if clicked && mx >= 280 && mx <= 472
@@ -1342,8 +1351,7 @@ class ResourceViewer
           @play_step_once = true
           sfx(:select, -1, 0.25)
         elsif mx >= 408 && mx < 466
-          @game_scene.reset_game
-          sfx(:coin, -1, 0.3)
+          restart_current_game
         end
       end
 
@@ -1364,14 +1372,31 @@ class ResourceViewer
     # Execute game scene update according to Pause / Step / Speed state
     if @play_step_once
       @play_step_once = false
-      @game_scene.update
+      advance_game_frame
     elsif !@play_paused
       spd = @play_speeds[@play_speed_idx]
       @play_frame_accum += spd
       if @play_frame_accum >= 1.0
         @play_frame_accum -= 1.0
-        @game_scene.update
+        advance_game_frame
       end
+    end
+  end
+
+  def restart_current_game
+    if @use_internal_demo
+      @game_scene.reset_game
+    else
+      sub_game_restart
+    end
+    sfx(:coin, -1, 0.3)
+  end
+
+  def advance_game_frame
+    if @use_internal_demo
+      @game_scene.update
+    else
+      sub_game_update
     end
   end
 
@@ -1870,13 +1895,32 @@ class ResourceViewer
     rectfill(0, 16, 480, 290, 0)
 
     # 1. Draw Embedded 256x256 Game Screen at (x: 12, y: 26, w: 256, h: 256)
-    clip(12, 26, 256, 256)
-    camera(-12, -26)
-    @game_scene.draw
-    camera()
-    clip()
-    pal()
-    palt()
+    if @use_internal_demo
+      clip(12, 26, 256, 256)
+      camera(-12, -26)
+      @game_scene.draw
+      camera()
+      clip()
+      pal()
+      palt()
+    else
+      err = sub_game_error
+      if err
+        rectfill(12, 26, 256, 256, 0)
+        rect(12, 26, 256, 256, 8)
+        text("RUN ERROR:", 18, 34, 8)
+        err_lines = err.split("\n")
+        ey = 46
+        ei = 0
+        while ei < err_lines.size && ey < 270
+          text(truncate_str(err_lines[ei], 38), 18, ey, 7)
+          ey += 9
+          ei += 1
+        end
+      else
+        sub_game_draw(12, 26, 256, 256)
+      end
+    end
 
     # Game Viewport Frame & Caption
     rect(11, 25, 258, 258, @play_paused ? 10 : 12)
@@ -1926,25 +1970,58 @@ class ResourceViewer
     text("WATCH VARIABLES (Live)", 286, 77, 12)
 
     wy = 91
-    text("[Globals]", 286, wy, 10)
-    wy += 10
-    g_entries = collect_watched_globals
-    gi = 0
-    while gi < g_entries.size && wy < 164
-      text(truncate_str(g_entries[gi], 29), 290, wy, 7)
-      wy += 9
-      gi += 1
-    end
+    if @use_internal_demo
+      text("[Globals]", 286, wy, 10)
+      wy += 10
+      g_entries = collect_watched_globals
+      gi = 0
+      while gi < g_entries.size && wy < 164
+        text(truncate_str(g_entries[gi], 29), 290, wy, 7)
+        wy += 9
+        gi += 1
+      end
 
-    wy += 3
-    text("[Scene Instance (@game_scene)]", 286, wy, 11)
-    wy += 10
-    i_entries = collect_watched_ivars(@game_scene)
-    ii = 0
-    while ii < i_entries.size && wy < 236
-      text(truncate_str(i_entries[ii], 29), 290, wy, 7)
-      wy += 9
-      ii += 1
+      wy += 3
+      text("[Scene Instance (@game_scene)]", 286, wy, 11)
+      wy += 10
+      i_entries = collect_watched_ivars(@game_scene)
+      ii = 0
+      while ii < i_entries.size && wy < 236
+        text(truncate_str(i_entries[ii], 29), 290, wy, 7)
+        wy += 9
+        ii += 1
+      end
+    else
+      text("[Target Globals ($)]", 286, wy, 10)
+      wy += 10
+      g_pairs = sub_game_globals
+      gi = 0
+      while gi < g_pairs.size && wy < 164
+        pair = g_pairs[gi]
+        text(truncate_str("#{pair[0]}=#{pair[1]}", 29), 290, wy, 7)
+        wy += 9
+        gi += 1
+      end
+      if g_pairs.size == 0
+        text("(No target globals)", 290, wy, 5)
+        wy += 9
+      end
+
+      wy += 3
+      text("[Target Scene Instance (@)]", 286, wy, 11)
+      wy += 10
+      i_pairs = sub_game_ivars
+      ii = 0
+      while ii < i_pairs.size && wy < 236
+        pair = i_pairs[ii]
+        text(truncate_str("#{pair[0]}=#{pair[1]}", 29), 290, wy, 7)
+        wy += 9
+        ii += 1
+      end
+      if i_pairs.size == 0
+        text("(No scene ivars)", 290, wy, 5)
+        wy += 9
+      end
     end
 
     # Section C: INPUT MONITOR
@@ -1971,7 +2048,17 @@ class ResourceViewer
     in_bounds = (gmx >= 0 && gmx < 256 && gmy >= 0 && gmy < 256)
     b_tag = in_bounds ? "IN" : "OUT"
     text("Mouse(Game): X=#{gmx} Y=#{gmy} [#{b_tag}]", 286, 276, in_bounds ? 7 : 6)
-    text("Frame: #{$t}  Enemies: #{@game_scene.enemies.size}", 286, 286, 6)
+
+    if @use_internal_demo
+      text("Frame: #{$t}  Enemies: #{@game_scene.enemies.size}", 286, 286, 6)
+    else
+      info = sub_game_info
+      if info
+        text("Target: #{@target_path} (#{info[0]}x#{info[1]})", 286, 286, 6)
+      else
+        text("Target: #{@target_path}", 286, 286, 6)
+      end
+    end
   end
 
   def format_watch_val(val)
