@@ -6150,6 +6150,64 @@ fn register_engine_api(
         }),
     );
 
+    // set_clipboard(text) / clipboard_set(text): OSクリップボード（ヘッドレス時は内部バッファ）にテキストをコピー
+    let set_clip_fn = Rc::new(move |_vm: &mut VM, args: &[Rc<RObject>]| -> Result<Rc<RObject>, mrubyedge::Error> {
+        let text = args
+            .first()
+            .and_then(|v| match &v.value {
+                RValue::String(s, _) => Some(String::from_utf8_lossy(&s.borrow()).to_string()),
+                RValue::Symbol(sym) => Some(sym.name.clone()),
+                _ => String::try_from(v.as_ref()).ok(),
+            })
+            .unwrap_or_default();
+        CLIPBOARD_BUFFER.with(|buf| {
+            *buf.borrow_mut() = text.clone();
+        });
+        if !headless {
+            miniquad::window::clipboard_set(&text);
+        }
+        Ok(Rc::new(RObject::boolean(true)))
+    });
+    let set_clip_1 = set_clip_fn.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "set_clipboard",
+        Box::new(move |vm, args| set_clip_1(vm, args)),
+    );
+    let set_clip_2 = set_clip_fn;
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "clipboard_set",
+        Box::new(move |vm, args| set_clip_2(vm, args)),
+    );
+
+    // get_clipboard / clipboard_get: クリップボード（または内部バッファ）からテキストを取得
+    let get_clip_fn = Rc::new(move |_vm: &mut VM, _args: &[Rc<RObject>]| -> Result<Rc<RObject>, mrubyedge::Error> {
+        let text = if !headless {
+            miniquad::window::clipboard_get()
+                .unwrap_or_else(|| CLIPBOARD_BUFFER.with(|buf| buf.borrow().clone()))
+        } else {
+            CLIPBOARD_BUFFER.with(|buf| buf.borrow().clone())
+        };
+        Ok(Rc::new(RObject::string(text)))
+    });
+    let get_clip_1 = get_clip_fn.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "get_clipboard",
+        Box::new(move |vm, args| get_clip_1(vm, args)),
+    );
+    let get_clip_2 = get_clip_fn;
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "clipboard_get",
+        Box::new(move |vm, args| get_clip_2(vm, args)),
+    );
+
     if headless {
         // ヘッドレステスト用スタブ登録 (図形ラスタライズ・カメラ・クリッピング・パレット変換および絵文字キャッシュ抽出も検証可能にする)
         let state_for_cls = draw_state.clone();
@@ -9163,6 +9221,7 @@ impl SubGameManager {
 thread_local! {
     static SUB_GAME_MGR: RefCell<SubGameManager> = RefCell::new(SubGameManager::new());
     static CURRENT_VIRTUAL_CAMERA: RefCell<Option<Camera2D>> = RefCell::new(None);
+    static CLIPBOARD_BUFFER: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
 pub async fn process_sub_game_audio() {

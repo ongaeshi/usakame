@@ -519,6 +519,12 @@ class ResourceViewer
     @hover_col = nil
     @inspected_col = 8
 
+    # Tweaker & editing state
+    @draw_col = 8
+    @prev_draw_col = 8
+    @copied_toast_timer = 0
+    @preview_hover_pos = nil
+
     # Play tab state
     @game_scene = PlayDemoScene.new
     @play_paused = false
@@ -882,7 +888,7 @@ class ResourceViewer
       short_label = truncate_str(disp_name, 6)
       used_cols = scan_sprite_used_colors(slots, d[:w], d[:h])
 
-      @sprites << {
+      sp_entry = {
         key: d[:name] ? d[:name] : "id_#{first_slot}",
         name: disp_name,
         is_named: d[:name] != nil,
@@ -896,8 +902,12 @@ class ResourceViewer
         type: d[:type],
         pal: d[:pal],
         short_label: short_label,
-        used_cols: used_cols
+        used_cols: used_cols,
+        modified: false,
+        orig_frames: nil
       }
+      backup_sprite_pixels(sp_entry)
+      @sprites << sp_entry
       i += 1
     end
   end
@@ -1008,26 +1018,119 @@ class ResourceViewer
     update_default_inspected_color
   end
 
+  def backup_sprite_pixels(sp)
+    return if !sp || sp[:orig_frames]
+    orig = []
+    f = 0
+    while f < sp[:slots].size
+      sid = sp[:slots][f]
+      u = (sid % 16) * 16
+      v = (sid / 16) * 16
+      pixels = get_bank_rect(VIEWER_BANK, u, v, sp[:w], sp[:h])
+      orig << (pixels ? pixels : [])
+      f += 1
+    end
+    sp[:orig_frames] = orig
+  end
+
+  def revert_sprite_pixels(sp)
+    return if !sp || !sp[:orig_frames] || !sp[:modified]
+    f = 0
+    while f < sp[:slots].size
+      sid = sp[:slots][f]
+      u = (sid % 16) * 16
+      v = (sid / 16) * 16
+      orig = sp[:orig_frames][f]
+      if orig && orig.size > 0
+        update_bank_rect(VIEWER_BANK, u, v, sp[:w], sp[:h], orig)
+      end
+      f += 1
+    end
+    sp[:modified] = false
+    sp[:used_cols] = scan_sprite_used_colors(sp[:slots], sp[:w], sp[:h])
+    sfx(:select, -1, 0.25)
+  end
+
+  def copy_sprite_definition_to_clipboard(sp)
+    return if !sp
+
+    header_parts = ["@SPRITE"]
+    if sp[:is_named]
+      header_parts << sp[:name]
+    else
+      header_parts << sp[:slot_id].to_s
+    end
+
+    if sp[:w] != 16 || sp[:h] != 16
+      header_parts << "#{sp[:w]}x#{sp[:h]}"
+    end
+
+    if sp[:pal] && sp[:pal] > 0
+      header_parts << "pal:#{sp[:pal]}"
+    end
+
+    lines = [header_parts.join(" ")]
+
+    f = 0
+    while f < sp[:slots].size
+      if f > 0
+        lines << "---"
+      end
+      sid = sp[:slots][f]
+      u = (sid % 16) * 16
+      v = (sid / 16) * 16
+      pixels = get_bank_rect(VIEWER_BANK, u, v, sp[:w], sp[:h])
+
+      y = 0
+      while y < sp[:h]
+        row_chars = []
+        x = 0
+        while x < sp[:w]
+          c = pixels ? pixels[y * sp[:w] + x] : nil
+          if c != nil && c >= 0 && c <= 15
+            row_chars << HEX_DIGITS[c]
+          else
+            row_chars << "."
+          end
+          x += 1
+        end
+        lines << row_chars.join("")
+        y += 1
+      end
+      f += 1
+    end
+
+    text = lines.join("\n") + "\n"
+    set_clipboard(text)
+    @copied_toast_timer = 90
+    sfx(:coin, -1, 0.3)
+  end
+
   def update_default_inspected_color
     sp = current_sprite
     return if !sp
+    found = nil
     c = 8
     while c < 16
       if sp[:used_cols][c]
-        @inspected_col = c
-        return
+        found = c
+        break
       end
       c += 1
     end
-    c = 1
-    while c < 8
-      if sp[:used_cols][c]
-        @inspected_col = c
-        return
+    if !found
+      c = 1
+      while c < 8
+        if sp[:used_cols][c]
+          found = c
+          break
+        end
+        c += 1
       end
-      c += 1
     end
-    @inspected_col = 0
+    @inspected_col = found ? found : 0
+    @draw_col = @inspected_col
+    @prev_draw_col = @inspected_col
   end
 
   def current_sprite
@@ -1171,6 +1274,86 @@ class ResourceViewer
       sfx(:select, -1, 0.25)
     end
 
+    # Copy shortcut (C key)
+    if btnp(:key_c) && sp
+      copy_sprite_definition_to_clipboard(sp)
+    end
+
+    # Revert shortcut (R key or U key)
+    if (btnp(:key_r) || btnp(:key_u)) && sp && sp[:modified]
+      revert_sprite_pixels(sp)
+    end
+
+    # Toggle transparent / previous color pen (X key)
+    if btnp(:key_x)
+      if @draw_col == nil
+        @draw_col = @prev_draw_col != nil ? @prev_draw_col : 8
+      else
+        @prev_draw_col = @draw_col
+        @draw_col = nil
+      end
+      sfx(:select, -1, 0.2)
+    end
+
+    if @copied_toast_timer > 0
+      @copied_toast_timer -= 1
+    end
+
+    # Preview hover & dot tweaker handling
+    @preview_hover_pos = nil
+    if sp
+      zoom = @zoom_levels[@zoom_idx]
+      draw_w = sp[:w] * zoom
+      draw_h = sp[:h] * zoom
+      px = 8
+      py = 28
+      pw = 96
+      ph = 96
+      dx = px + (pw - draw_w) / 2
+      dy = py + (ph - draw_h) / 2
+
+      if mx >= dx && mx < dx + draw_w && my >= dy && my < dy + draw_h
+        raw_lx = (mx - dx) / zoom
+        raw_ly = (my - dy) / zoom
+        if raw_lx >= 0 && raw_lx < sp[:w] && raw_ly >= 0 && raw_ly < sp[:h]
+          lx = @flip_h ? (sp[:w] - 1 - raw_lx) : raw_lx
+          ly = @flip_v ? (sp[:h] - 1 - raw_ly) : raw_ly
+          @preview_hover_pos = [lx, ly, raw_lx, raw_ly]
+
+          # Dot editing: Left click / drag
+          if btn(:mouse_left)
+            cur_f = @anim_frame_idx % sp[:frame_count]
+            sid = sp[:slots][cur_f]
+            u = (sid % 16) * 16
+            v = (sid / 16) * 16
+            cur_col = get_bank_pixel(VIEWER_BANK, u + lx, v + ly)
+            if cur_col != @draw_col
+              backup_sprite_pixels(sp)
+              set_bank_pixel(VIEWER_BANK, u + lx, v + ly, @draw_col)
+              @anim_playing = false
+              sp[:modified] = true
+              sp[:used_cols] = scan_sprite_used_colors(sp[:slots], sp[:w], sp[:h])
+            end
+          end
+
+          # Eyedropper: Right click
+          if btnp(:mouse_right) || btn(:mouse_right)
+            cur_f = @anim_frame_idx % sp[:frame_count]
+            sid = sp[:slots][cur_f]
+            u = (sid % 16) * 16
+            v = (sid / 16) * 16
+            c = get_bank_pixel(VIEWER_BANK, u + lx, v + ly)
+            @draw_col = c
+            if c != nil
+              @inspected_col = c
+              @prev_draw_col = c
+            end
+            sfx(:select, -1, 0.2) if btnp(:mouse_right)
+          end
+        end
+      end
+    end
+
     # Mouse wheel handling
     wheel = mouse_wheel
     if wheel != 0
@@ -1213,17 +1396,45 @@ class ResourceViewer
       end
     end
 
-    # Palette hover detection (x: 188..443, y: 86..100)
+    # Palette & transparent chip hover detection
     @hover_col = nil
-    if mx >= 188 && mx < 188 + 16 * 16 && my >= 86 && my < 100
-      c_idx = (mx - 188) / 16
-      if c_idx >= 0 && c_idx <= 15
-        @hover_col = c_idx
-        @inspected_col = c_idx if clicked
+    if my >= 80 && my < 94
+      if mx >= 188 && mx < 444
+        c_idx = (mx - 188) / 16
+        if c_idx >= 0 && c_idx <= 15
+          @hover_col = c_idx
+        end
+      elsif mx >= 444 && mx < 458
+        @hover_col = :trans
       end
     end
 
     return if !clicked
+
+    # Copy & Revert buttons click: y: 18..30
+    if sp && my >= 18 && my < 30
+      if mx >= 326 && mx < 376
+        revert_sprite_pixels(sp) if sp[:modified]
+      elsif mx >= 382 && mx < 474
+        copy_sprite_definition_to_clipboard(sp)
+      end
+    end
+
+    # Palette & transparent chip click: y: 80..94
+    if my >= 80 && my < 94
+      if mx >= 188 && mx < 444
+        c_idx = (mx - 188) / 16
+        if c_idx >= 0 && c_idx <= 15
+          @draw_col = c_idx
+          @prev_draw_col = c_idx
+          @inspected_col = c_idx
+          sfx(:select, -1, 0.2)
+        end
+      elsif mx >= 444 && mx < 458
+        @draw_col = nil
+        sfx(:select, -1, 0.2)
+      end
+    end
 
     # Zoom buttons click: y: 132..144
     if my >= 132 && my < 144
@@ -1514,7 +1725,7 @@ class ResourceViewer
     guide = if @tab == 1
       "[P] Pause/Resume  [S] Step  [R] Restart  [Arrows/Z/X] Act  [1-4/Tab] Mode"
     elsif @tab == 2
-      "[Click/Arrows] Select  [Space] Play/Pause  [Z] Zoom  [G] BG  [1-4/Tab] Mode"
+      "[L-Clk] Draw  [R-Clk] Pick  [C] Copy @SPRITE  [R] Revert  [X] Trans  [Space] Pause  [Z] Zoom"
     elsif @tab == 3
       "[Click/Arrows] Pan Map  [Z] Zoom  [G] Grid  [Target] Switch  [1-4/Tab] Mode"
     else
@@ -1574,6 +1785,9 @@ class ResourceViewer
     rectfill(0, 16, 180, 148, 0)
     rect(0, 16, 180, 148, 5)
     text("PREVIEW", 6, 19, 12)
+    if @preview_hover_pos
+      text("(#{pad3(@preview_hover_pos[0])[1, 2]},#{pad3(@preview_hover_pos[1])[1, 2]})", 56, 19, 10)
+    end
     if sp
       f_idx = @anim_frame_idx % sp[:frame_count]
       text("F:#{f_idx + 1}/#{sp[:frame_count]}", 126, 19, 6)
@@ -1595,6 +1809,15 @@ class ResourceViewer
       dx = px + (pw - draw_w) / 2
       dy = py + (ph - draw_h) / 2
       draw_sprite_from_viewer_bank(sp, @anim_frame_idx, dx, dy, zoom, @flip_h, @flip_v)
+
+      # 1px cursor frame over hovered dot
+      if @preview_hover_pos
+        rlx = @preview_hover_pos[2]
+        rly = @preview_hover_pos[3]
+        cx = dx + rlx * zoom
+        cy = dy + rly * zoom
+        rect(cx, cy, zoom, zoom, 10)
+      end
     end
     clip()
     rect(px - 1, py - 1, pw + 2, ph + 2, 7)
@@ -1682,6 +1905,23 @@ class ResourceViewer
     rect(180, 16, 300, 148, 5)
     text("INSPECTOR", 188, 19, 12)
 
+    if @copied_toast_timer > 0
+      rectfill(326, 18, 148, 11, 11)
+      rect(326, 18, 148, 11, 7)
+      text("COPIED TO CLIPBOARD!", 336, 20, 0)
+    else
+      # Revert button: x: 326, y: 18, w: 50, h: 11
+      rev_act = sp && sp[:modified]
+      rectfill(326, 18, 50, 11, rev_act ? 8 : 1)
+      rect(326, 18, 50, 11, rev_act ? 14 : 5)
+      text(rev_act ? "*Revert*" : "Revert", 332, 20, rev_act ? 7 : 6)
+
+      # Copy @SPRITE button: x: 382, y: 18, w: 92, h: 11
+      rectfill(382, 18, 92, 11, 12)
+      rect(382, 18, 92, 11, 7)
+      text("Copy @SPRITE", 390, 20, 0)
+    end
+
     if !sp
       text("No sprites match the selected filter.", 196, 68, 6)
       return
@@ -1694,7 +1934,8 @@ class ResourceViewer
       "##{pad3(sp[:slot_id])}"
     end
 
-    text("NAME : #{truncate_str(sp[:name], 14)}", 188, 31, 7)
+    mod_tag = sp[:modified] ? " *MOD*" : ""
+    text("NAME : #{truncate_str(sp[:name], 12)}#{mod_tag}", 188, 31, sp[:modified] ? 10 : 7)
     text("SLOT : #{slot_str}", 348, 31, 10)
 
     text("SIZE : #{sp[:w]}x#{sp[:h]}px (#{sp[:cells_w]}x#{sp[:cells_h]} cell)", 188, 42, 7)
@@ -1714,7 +1955,8 @@ class ResourceViewer
       used_cnt += 1 if sp[:used_cols][ci]
       ci += 1
     end
-    text("PALETTE (Bank #{sp[:pal]} - 16 colors, #{used_cnt} used)", 188, 68, 6)
+    pen_label = @draw_col == nil ? "TRANS" : HEX_DIGITS[@draw_col]
+    text("PALETTE (Bank #{sp[:pal]} - 16 colors, #{used_cnt} used) [Pen: #{pen_label}]", 188, 68, 6)
 
     c = 0
     while c < 16
@@ -1733,8 +1975,10 @@ class ResourceViewer
         rect(cx, cy, 14, 14, 5)
       end
 
-      if @hover_col == c || (@hover_col == nil && @inspected_col == c)
+      if @draw_col == c
         rect(cx - 1, cy - 1, 16, 16, 10)
+      elsif @hover_col == c
+        rect(cx - 1, cy - 1, 16, 16, 7)
       end
 
       lbl_col = (r + g + b > 380) ? 0 : 7
@@ -1742,16 +1986,34 @@ class ResourceViewer
       c += 1
     end
 
+    # 17th chip: Transparent color chip [.] at (444, 80)
+    tcx = 444
+    tcy = 80
+    draw_preview_bg(tcx, tcy, 14, 14, :chk)
+    is_trans_pen = (@draw_col == nil)
+    rect(tcx, tcy, 14, 14, is_trans_pen ? 10 : 5)
+    if is_trans_pen
+      rect(tcx - 1, tcy - 1, 16, 16, 10)
+    elsif @hover_col == :trans
+      rect(tcx - 1, tcy - 1, 16, 16, 7)
+    end
+    text(".", tcx + 5, tcy + 3, 7)
+
     # Inspected / Hovered color RGB & HEX readout
-    show_c = @hover_col ? @hover_col : @inspected_col
-    rgba_s = get_palette_color(sp[:pal], show_c)
-    sr = rgba_s ? rgba_s[0] : 0
-    sg = rgba_s ? rgba_s[1] : 0
-    sb = rgba_s ? rgba_s[2] : 0
-    mod_tag = (rgba_s && rgba_s[3]) ? " *PAL" : ""
-    used_tag = sp[:used_cols][show_c] ? "[USED]" : "[FREE]"
-    hex_code = "##{to_hex2(sr)}#{to_hex2(sg)}#{to_hex2(sb)}"
-    text("Col ##{pad3(show_c)[1, 2]}: #{hex_code} (RGB:#{sr},#{sg},#{sb}) #{used_tag}#{mod_tag}", 188, 98, 7)
+    if @hover_col == :trans || (@hover_col == nil && @draw_col == nil)
+      text("Col [TRANSPARENT] : . (Alpha/Nil) [PEN:TRANS] (Press X to toggle)", 188, 98, 7)
+    else
+      show_c = @hover_col ? @hover_col : (@inspected_col != nil ? @inspected_col : 0)
+      rgba_s = get_palette_color(sp[:pal], show_c)
+      sr = rgba_s ? rgba_s[0] : 0
+      sg = rgba_s ? rgba_s[1] : 0
+      sb = rgba_s ? rgba_s[2] : 0
+      mod_tag = (rgba_s && rgba_s[3]) ? " *PAL" : ""
+      used_tag = sp[:used_cols][show_c] ? "[USED]" : "[FREE]"
+      pen_tag = (@draw_col == show_c) ? " [PEN]" : ""
+      hex_code = "##{to_hex2(sr)}#{to_hex2(sg)}#{to_hex2(sb)}"
+      text("Col ##{pad3(show_c)[1, 2]}: #{hex_code} (RGB:#{sr},#{sg},#{sb}) #{used_tag}#{mod_tag}#{pen_tag}", 188, 98, 7)
+    end
 
     line(186, 110, 474, 110, 1)
 

@@ -705,6 +705,7 @@ fn test_external_resource_overlay_and_pack_unpack() {
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
+
 #[test]
 fn test_argv_and_file_io_in_ruby() {
     let temp_dir = std::env::temp_dir().join("uk_test_file_io");
@@ -791,6 +792,7 @@ $map_auto_tiles = load_resource_map("{}")
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
 
 #[test]
 fn test_png_sheet_encode_and_parse() {
@@ -2302,6 +2304,7 @@ save_file($save, $map_text)
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
 
 #[test]
 fn test_split_game_example_script() {
@@ -4293,6 +4296,7 @@ end
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
+
 #[test]
 fn test_save_resource_bank_and_map_non_destructive_in_ruby() {
     let temp_dir = std::env::temp_dir().join(format!("usakame_test_save_res_{}", std::process::id()));
@@ -4357,6 +4361,7 @@ __END__
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
 
 #[test]
 fn test_palette_color_picker_apis_and_save_palettes_in_ruby() {
@@ -4432,6 +4437,7 @@ __END__
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
 
 #[test]
 fn test_sprite_auto_packing_and_animation_parsing() {
@@ -5251,6 +5257,7 @@ fn test_cmd_generate_filename_from_prompt_and_non_overwriting() {
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
+
 #[test]
 fn test_sub_game_runtime_execution_and_reflection() {
     let temp_dir = std::env::temp_dir().join(format!("uk_sub_game_test_{}", std::process::id()));
@@ -5328,6 +5335,66 @@ raise "player_x should be 22 after second update" unless $has_px22
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+fn test_clipboard_set_and_get() {
+    let script = r#"
+        ok1 = set_clipboard("hello usakame")
+        raise "set_clipboard failed" unless ok1
+        t1 = get_clipboard()
+        raise "clipboard text mismatch: #{t1}" unless t1 == "hello usakame"
+
+        ok2 = clipboard_set("tweaker test")
+        raise "clipboard_set failed" unless ok2
+        t2 = clipboard_get()
+        raise "clipboard_get text mismatch: #{t2}" unless t2 == "tweaker test"
+    "#;
+    let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
+    let mut rt = GameRuntime::new_with_args(&tail, &mrb, true, &[]).unwrap();
+    rt.call_update();
+}
+
+#[test]
+fn test_sprite_tweaker_and_clipboard_export() {
+    let script = r#"
+def update
+  sp = $viewer.current_sprite
+  raise "current_sprite is nil" unless sp
+
+  orig_col = get_bank_pixel(VIEWER_BANK, 0, 0)
+  $viewer.instance_variable_set(:@draw_col, 10)
+  $viewer.backup_sprite_pixels(sp)
+  set_bank_pixel(VIEWER_BANK, 0, 0, 10)
+  sp[:modified] = true
+
+  raise "pixel not updated" unless get_bank_pixel(VIEWER_BANK, 0, 0) == 10
+  raise "modified flag not set" unless sp[:modified]
+
+  # クリップボードコピーをテスト
+  $viewer.copy_sprite_definition_to_clipboard(sp)
+  clip_text = get_clipboard()
+  raise "clipboard should contain @SPRITE" unless clip_text.include?("@SPRITE")
+  raise "clipboard should contain modified color A" unless clip_text.include?("A")
+
+  # Revert をテスト
+  $viewer.revert_sprite_pixels(sp)
+  raise "pixel not reverted" unless get_bank_pixel(VIEWER_BANK, 0, 0) == orig_col
+  raise "modified flag should be false after revert" if sp[:modified]
+  $test_passed = true
+end
+"#;
+
+    let viewer_rb = std::fs::read_to_string("examples/viewer.rb").unwrap();
+    let (code, tail) = bundle::split_ruby_source_and_tail(&viewer_rb);
+    let full_script = format!("{}\n{}\n__END__\n{}", code, script, tail);
+
+    let (tail_parsed, mrb) = cli::compile_ruby_script_str(&full_script).unwrap();
+    let mut rt = GameRuntime::new_with_args(&tail_parsed, &mrb, true, &[]).unwrap();
+    rt.call_update();
+}
+
+
+
 
 
 
