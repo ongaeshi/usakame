@@ -4166,6 +4166,139 @@ fn register_rand_extension(vm: &mut VM) {
     }
 }
 
+fn extract_var_name_arg(args: &[Rc<RObject>]) -> Result<String, mrubyedge::Error> {
+    let arg = args.first().ok_or_else(|| {
+        mrubyedge::Error::ArgumentError("variable name required".to_string())
+    })?;
+    match &arg.value {
+        RValue::Symbol(s) => Ok(s.name.clone()),
+        RValue::String(s, _) => Ok(String::from_utf8_lossy(&s.borrow()).to_string()),
+        _ => Err(mrubyedge::Error::ArgumentError(
+            "variable name must be a Symbol or String".to_string(),
+        )),
+    }
+}
+
+fn mrb_kernel_global_variables(
+    vm: &mut VM,
+    _args: &[Rc<RObject>],
+) -> Result<Rc<RObject>, mrubyedge::Error> {
+    let mut names: Vec<String> = vm
+        .globals
+        .keys()
+        .map(|k| {
+            if k.starts_with('$') {
+                k.clone()
+            } else {
+                format!("${}", k)
+            }
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    let arr: Vec<Rc<RObject>> = names
+        .into_iter()
+        .map(|n| Rc::new(RObject::symbol(mrubyedge::yamrb::value::RSym::new(n))))
+        .collect();
+    Ok(Rc::new(RObject::array(arr)))
+}
+
+fn mrb_kernel_global_variable_get(
+    vm: &mut VM,
+    args: &[Rc<RObject>],
+) -> Result<Rc<RObject>, mrubyedge::Error> {
+    let raw = extract_var_name_arg(args)?;
+    let with_dollar = if raw.starts_with('$') {
+        raw.clone()
+    } else {
+        format!("${}", raw)
+    };
+    let without_dollar = raw.trim_start_matches('$');
+    if let Some(val) = vm
+        .globals
+        .get(&with_dollar)
+        .or_else(|| vm.globals.get(without_dollar))
+    {
+        Ok(val.clone())
+    } else {
+        Ok(Rc::new(RObject::nil()))
+    }
+}
+
+fn mrb_object_instance_variables(
+    vm: &mut VM,
+    _args: &[Rc<RObject>],
+) -> Result<Rc<RObject>, mrubyedge::Error> {
+    let this = vm.getself()?;
+    let mut names: Vec<String> = this
+        .ivar
+        .borrow()
+        .keys()
+        .map(|k| {
+            if k.starts_with('@') {
+                k.clone()
+            } else {
+                format!("@{}", k)
+            }
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    let arr: Vec<Rc<RObject>> = names
+        .into_iter()
+        .map(|n| Rc::new(RObject::symbol(mrubyedge::yamrb::value::RSym::new(n))))
+        .collect();
+    Ok(Rc::new(RObject::array(arr)))
+}
+
+fn mrb_object_instance_variable_get(
+    vm: &mut VM,
+    args: &[Rc<RObject>],
+) -> Result<Rc<RObject>, mrubyedge::Error> {
+    let this = vm.getself()?;
+    let raw = extract_var_name_arg(args)?;
+    let with_at = if raw.starts_with('@') {
+        raw.clone()
+    } else {
+        format!("@{}", raw)
+    };
+    let without_at = raw.trim_start_matches('@');
+    let ivars = this.ivar.borrow();
+    if let Some(val) = ivars.get(&with_at).or_else(|| ivars.get(without_at)) {
+        Ok(val.clone())
+    } else {
+        Ok(Rc::new(RObject::nil()))
+    }
+}
+
+fn register_reflection_extensions(vm: &mut VM) {
+    let obj_class = vm.object_class.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "global_variables",
+        Box::new(mrb_kernel_global_variables),
+    );
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "global_variable_get",
+        Box::new(mrb_kernel_global_variable_get),
+    );
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "instance_variables",
+        Box::new(mrb_object_instance_variables),
+    );
+    mrb_define_cmethod(
+        vm,
+        obj_class,
+        "instance_variable_get",
+        Box::new(mrb_object_instance_variable_get),
+    );
+}
+
 #[derive(Clone)]
 pub struct NextSceneRequest {
     pub scene: Rc<RObject>,
@@ -4335,6 +4468,7 @@ fn register_engine_api(
     register_math_api(vm);
     register_string_format_extensions(vm);
     register_rand_extension(vm);
+    register_reflection_extensions(vm);
     let obj_class = vm.object_class.clone();
 
     // run / scene: オブジェクト指向のシーン管理（遅延切り替え）
