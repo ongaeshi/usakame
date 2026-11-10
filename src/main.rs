@@ -10553,6 +10553,33 @@ fn main() {
                 run_embedded_game_with_args(tail_data, mrb_bytes, args),
             );
         }
+        cli::CliAction::Viewer {
+            target_path,
+            script_args,
+        } => {
+            let disk_viewer_src = std::fs::read_to_string("examples/viewer.rb").ok();
+            let viewer_src = disk_viewer_src.as_deref().unwrap_or(cli::EMBEDDED_VIEWER);
+            let (tail_data, mrb_bytes) =
+                match cli::compile_ruby_script_str_with_filename(viewer_src, Some("viewer.rb")) {
+                    Ok(res) => res,
+                    Err(err) => {
+                        eprintln!("Failed to compile built-in viewer: {}", err);
+                        std::process::exit(1);
+                    }
+                };
+            let parsed_cfg = parse_config_from_source(viewer_src);
+            let title = format!("{} - {}", parsed_cfg.title, target_path.display());
+            let mut args = vec![target_path.to_string_lossy().to_string()];
+            args.extend(script_args);
+            macroquad::Window::from_config(
+                window_conf_with_title_and_size(
+                    &title,
+                    parsed_cfg.window_width(),
+                    parsed_cfg.window_height(),
+                ),
+                run_embedded_game_with_args(tail_data, mrb_bytes, args),
+            );
+        }
         cli::CliAction::Check {
             script_path,
             frames,

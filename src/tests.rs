@@ -3730,6 +3730,24 @@ fn test_cli_parse_new_edit_examples_and_run_with_edit() {
             dir: std::path::PathBuf::from("my_sketchbook"),
         }
     );
+
+    // 8. uk viewer [script.rb] [--tab=N]
+    let act_viewer_default = cli::parse_cli_args(["uk", "viewer"].map(String::from)).unwrap();
+    assert_eq!(
+        act_viewer_default,
+        cli::CliAction::Viewer {
+            target_path: std::path::PathBuf::from("game.rb"),
+            script_args: Vec::new(),
+        }
+    );
+    let act_viewer_target = cli::parse_cli_args(["uk", "viewer", "custom.rb", "-t", "3"].map(String::from)).unwrap();
+    assert_eq!(
+        act_viewer_target,
+        cli::CliAction::Viewer {
+            target_path: std::path::PathBuf::from("custom.rb"),
+            script_args: vec!["--tab=3".to_string()],
+        }
+    );
 }
 
 #[test]

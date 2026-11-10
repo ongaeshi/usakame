@@ -13,6 +13,7 @@ const WEB_MQ_JS_BUNDLE: &str = include_str!("../web/mq_js_bundle.js");
 
 pub const EMBEDDED_SPRITE_EDITOR: &str = include_str!("../examples/sprite_editor.rb");
 pub const EMBEDDED_TILEMAP_EDITOR: &str = include_str!("../examples/tilemap_editor.rb");
+pub const EMBEDDED_VIEWER: &str = include_str!("../examples/viewer.rb");
 pub const EMBEDDED_API_MD: &str = include_str!("../docs/api.md");
 pub const EMBEDDED_MRUBYEDGE_API_MD: &str = include_str!("../docs/mrubyedge_api.md");
 pub const EMBEDDED_EXAMPLES_ARCHIVE: &[u8] =
@@ -56,6 +57,11 @@ pub enum CliAction {
     Edit {
         kind: EditorKind,
         target_path: PathBuf,
+    },
+    /// `uk viewer [script.rb] [options]` (内蔵リソース＆実機プレイビューワー起動)
+    Viewer {
+        target_path: PathBuf,
+        script_args: Vec<String>,
     },
     /// `uk run <script.rb> [args...]` (ホットリロード付きネイティブ実行)
     Run {
@@ -139,6 +145,8 @@ USAGE:
         -g, --gacha, --mash             Enable random button mashing during auto-capture
     uk run-with-edit [script.rb]        Run game and editors simultaneously with live sync
     uk edit [spr|map|all] [script.rb]   Launch built-in Sprite / Tilemap Editor (default: spr)
+    uk viewer [script.rb] [options]     Launch integrated Resource & Live Play Viewer (default: game.rb)
+        -t, --tab <1..4>                Initial tab: 1:PLAY, 2:SPRITE, 3:MAP, 4:SOUND (default: 2)
     uk examples [dest_dir]              Extract bundled example scripts (default: ./examples)
     uk update-docs [dir]                Update AGENTS.md and docs/ in current or specified directory
     uk check [script.rb] [options]      Headless syntax and runtime verification (default: game.rb)
@@ -238,6 +246,7 @@ where
             Ok(CliAction::UpdateDocs { dir })
         }
         "edit" => parse_edit_args(&rest[1..], EditorKind::Sprite),
+        "viewer" | "view" => parse_viewer_args(&rest[1..]),
         "spr" => parse_edit_args(&rest[1..], EditorKind::Sprite),
         "map" => parse_edit_args(&rest[1..], EditorKind::Tilemap),
         "run-with-edit" | "run_with_edit" => parse_run_with_edit_args(&rest[1..]),
@@ -623,6 +632,59 @@ fn parse_edit_args(args: &[String], default_kind: EditorKind) -> Result<CliActio
     Ok(CliAction::Edit {
         kind,
         target_path: target_path.unwrap_or_else(|| PathBuf::from("game.rb")),
+    })
+}
+
+fn parse_viewer_args(args: &[String]) -> Result<CliAction, String> {
+    let mut target_path: Option<PathBuf> = None;
+    let mut script_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--tab" | "-t" => {
+                i += 1;
+                let t = args
+                    .get(i)
+                    .ok_or_else(|| "Missing argument for --tab / -t".to_string())?;
+                script_args.push(format!("--tab={}", t));
+            }
+            arg if arg.starts_with("--tab=") => {
+                script_args.push(arg.to_string());
+            }
+            "--" => {
+                i += 1;
+                while i < args.len() {
+                    script_args.push(args[i].clone());
+                    i += 1;
+                }
+                break;
+            }
+            arg if arg.starts_with('-') => {
+                return Err(format!("Unknown option for `uk viewer`: {}", arg));
+            }
+            arg => {
+                if target_path.is_none() {
+                    target_path = Some(PathBuf::from(arg));
+                } else {
+                    script_args.push(arg.to_string());
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let target_path = target_path.unwrap_or_else(|| {
+        if Path::new("game.rb").exists() {
+            PathBuf::from("game.rb")
+        } else {
+            PathBuf::from("examples/viewer.rb")
+        }
+    });
+
+    Ok(CliAction::Viewer {
+        target_path,
+        script_args,
     })
 }
 
