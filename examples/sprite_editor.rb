@@ -1183,8 +1183,46 @@ def save_dirty_sprites
   end
 end
 
+def resolve_run_target_path
+  path = $target_path
+  if path && path.length > 0
+    len = path.length
+    if len >= 3 && path[len - 3, 3] == ".rb"
+      return path if read_file(path)
+      return nil
+    end
+    if len >= 4 && (path[len - 4, 4] == ".spr" || path[len - 4, 4] == ".map")
+      rb_path = path[0, len - 4] + ".rb"
+      return rb_path if read_file(rb_path)
+    end
+  end
+  return "game.rb" if read_file("game.rb")
+  nil
+end
+
+def launch_target_app
+  run_path = resolve_run_target_path
+  $run_target_path = run_path
+  unless run_path
+    notify("NO .RB APP FOUND")
+    return false
+  end
+  if (any_dirty? || $floating_pixels) && !$is_read_only
+    save_dirty_sprites
+  end
+  if respond_to?(:spawn_app) && spawn_app(run_path)
+    notify("RUN: #{run_path}")
+    sfx(:select, -1, 0.2)
+    true
+  else
+    notify("FAILED TO RUN: #{run_path}")
+    false
+  end
+end
+
 # 初回ロード
 load_all_sprites
+$run_target_path = resolve_run_target_path
 
 # ------------------------------------------------------------------------------
 # 入力処理 (update)
@@ -1323,6 +1361,10 @@ def update
 
   # 2. トップバーボタンクリック
   if btnp(:mouse_left)
+    if hit?(mx, my, 314, 3, 42, 15)
+      launch_target_app
+      return
+    end
     return if hit?(mx, my, 360, 3, 58, 15) && (save_dirty_sprites; true)
     if hit?(mx, my, 422, 3, 46, 15)
       perform_undo
@@ -1549,6 +1591,9 @@ def draw
   path_lbl = truncate_label($save_path, 26)
   path_lbl += "*" if dirty
   print_text(path_lbl, 108, 6, dirty ? 10 : 6)
+
+  can_run = !$run_target_path.nil?
+  draw_btn(314, 3, 42, 15, "RUN", can_run ? 3 : 1, can_run ? 11 : 5, can_run ? 7 : 5)
 
   if $is_read_only
     draw_btn(360, 3, 58, 15, "READONLY", 2, 8, 8)

@@ -3445,6 +3445,54 @@ raise "Sprite 25 palette mapping failed" unless pals[25] == 4
 }
 
 #[test]
+fn test_sprite_editor_run_button_launches_app() {
+    let (_, tail_data, mrb_bytes) =
+        cli::compile_ruby_script_file(std::path::Path::new("examples/sprite_editor.rb"))
+            .expect("examples/sprite_editor.rb should compile");
+
+    // 1. .rb ターゲット時
+    let mut rt_rb = GameRuntime::new_with_args(
+        &tail_data,
+        &mrb_bytes,
+        true,
+        &["examples/platformer.rb".to_string()],
+    )
+    .expect("Sprite editor should initialize with platformer.rb");
+
+    rt_rb.call_update_result().expect("call_update should succeed");
+    rt_rb.call_draw_result().expect("call_draw should succeed");
+
+    let resolved_rb = mrb_funcall(&mut rt_rb.vm, None, "resolve_run_target_path", &[])
+        .expect("resolve_run_target_path should succeed");
+    assert_eq!(
+        String::try_from(resolved_rb.as_ref()).ok(),
+        Some("examples/platformer.rb".to_string())
+    );
+    let launched_rb = mrb_funcall(&mut rt_rb.vm, None, "launch_target_app", &[])
+        .expect("launch_target_app should succeed");
+    assert_eq!(launched_rb.as_ref(), &RObject::boolean(true));
+
+    // 2. .spr ターゲット時は対応する .rb を解決すること
+    let mut rt_spr = GameRuntime::new_with_args(
+        &tail_data,
+        &mrb_bytes,
+        true,
+        &["examples/split_game.spr".to_string()],
+    )
+    .expect("Sprite editor should initialize with split_game.spr");
+
+    let resolved_spr = mrb_funcall(&mut rt_spr.vm, None, "resolve_run_target_path", &[])
+        .expect("resolve_run_target_path should succeed for .spr");
+    assert_eq!(
+        String::try_from(resolved_spr.as_ref()).ok(),
+        Some("examples/split_game.rb".to_string())
+    );
+    let launched_spr = mrb_funcall(&mut rt_spr.vm, None, "launch_target_app", &[])
+        .expect("launch_target_app should succeed for .spr");
+    assert_eq!(launched_spr.as_ref(), &RObject::boolean(true));
+}
+
+#[test]
 fn test_math_numeric_and_format_extensions() {
     let script = r#"
     # 1. Float#%
@@ -3852,14 +3900,19 @@ fn test_cmd_new_and_examples_archive_workflow() {
         rt_split.call_draw_result().unwrap();
     }
 
-    // 4. Verify `spawn_editor` Ruby API works in headless mode
+    // 4. Verify `spawn_editor` and `spawn_app` Ruby APIs work in headless mode
     let spawn_script = r#"
     $spawn_ok = spawn_editor("map", "game.rb")
+    $spawn_app_ok = spawn_app("game.rb")
     "#;
     let (t_sp, m_sp) = cli::compile_ruby_script_str_with_filename(spawn_script, Some("test_spawn.rb")).unwrap();
     let rt_sp = GameRuntime::new(&t_sp, &m_sp, true).unwrap();
     assert_eq!(
         rt_sp.vm.globals.get("$spawn_ok").map(|o| o.as_ref().clone()),
+        Some(RObject::boolean(true))
+    );
+    assert_eq!(
+        rt_sp.vm.globals.get("$spawn_app_ok").map(|o| o.as_ref().clone()),
         Some(RObject::boolean(true))
     );
 

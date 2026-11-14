@@ -6219,6 +6219,36 @@ fn register_engine_api(
         }),
     );
 
+    // spawn_app(target_path = "game.rb"):
+    // 指定された Ruby スクリプトを別プロセス (`uk run <target_path>`) で起動する。
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "spawn_app",
+        Box::new(move |_vm, args| {
+            let target_path = args
+                .first()
+                .and_then(|v| String::try_from(v.as_ref()).ok())
+                .unwrap_or_else(|| "game.rb".to_string());
+
+            if headless {
+                return Ok(Rc::new(RObject::boolean(true)));
+            }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                if let Ok(exe) = std::env::current_exe() {
+                    let ok = std::process::Command::new(exe)
+                        .args(["run", &target_path])
+                        .spawn()
+                        .is_ok();
+                    return Ok(Rc::new(RObject::boolean(ok)));
+                }
+            }
+            Ok(Rc::new(RObject::boolean(false)))
+        }),
+    );
+
     // set_clipboard(text) / clipboard_set(text): OSクリップボード（ヘッドレス時は内部バッファ）にテキストをコピー
     let set_clip_fn = Rc::new(move |_vm: &mut VM, args: &[Rc<RObject>]| -> Result<Rc<RObject>, mrubyedge::Error> {
         let text = args
