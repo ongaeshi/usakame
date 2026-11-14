@@ -2,12 +2,16 @@
 name: usakame-sprite
 description: >-
   Generate high-quality pixel art sprites, custom color palettes (@PALETTE), and sprite-generation prompts for the Usakame (uk) retro game engine.
-  Use when the user asks to create, draw, generate, or prompt for Usakame sprites (16x16, 32x32, 48x48, @PALETTE custom palettes, @SPRITE text pattern, or PNG/SHEET).
+  Use when the user asks to create, draw, generate, or prompt for rich, detailed Usakame sprites (16x16, 32x32, 48x48, @PALETTE custom palettes, @SPRITE text pattern, or PNG/SHEET). For fast bulk generation or lightweight prototyping, prefer usakame-sprite-fast.
 ---
 
 # Usakame Sprite & Palette Designer
 
-This skill guides the creation of pixel art sprites (`@SPRITE`), custom 16-color palettes (`@PALETTE`), and generation prompts optimized for the **Usakame (`uk`)** retro game engine.
+This skill guides the creation of high-quality pixel art sprites (`@SPRITE`), custom 16-color palettes (`@PALETTE`), and generation prompts optimized for the **Usakame (`uk`)** retro game engine.
+
+> **When to use which skill:**
+> - **`usakame-sprite` (this skill)**: Hero characters, bosses, key monsters, and rich 16-bit SNES/GBA-style pixel art with dedicated `@PALETTE` 3–4 step color ramps.
+> - **`usakame-sprite-fast`**: Fast prototyping or bulk generation (5–20+ sprites at once) using standard palette `0`, flat 2–3 color shading, `8x8` micro sprites, and built-in emojis.
 
 ---
 
@@ -15,11 +19,11 @@ This skill guides the creation of pixel art sprites (`@SPRITE`), custom 16-color
 
 | Property | Specification |
 | :--- | :--- |
-| **Base Tile Size** | `16 × 16` pixels (Expandable in multiples of 16: `32x32`, `16x32`, `32x16`, `48x48`, etc.) |
+| **Base Tile Size** | `16 × 16` pixels (Supports `8x8` micro sprites and multiples of 16: `32x32`, `16x32`, `32x16`, `48x48`, etc.) |
 | **Virtual Screen** | `256 × 256` pixels |
 | **System Palette (ID 0)** | 16-color PICO-8 standard palette (immutable base palette) |
 | **Custom Palettes (ID >= 1)** | `@PALETTE <id>` (inherits PICO-8 base colors; supports pinpoint diff overrides or full 16-color definitions) |
-| **Sprite Palette Binding** | `@SPRITE <id> [WIDTHxHEIGHT] pal:<pal_id>` |
+| **Sprite Declaration** | `@SPRITE :name [WIDTHxHEIGHT] pal:<pal_id>` (auto-packed) or `@SPRITE <id> [WIDTHxHEIGHT] pal:<pal_id>` |
 
 ### Standard 16-Color Base Palette Table (Palette `0`)
 
@@ -67,11 +71,11 @@ Usakame supports **base-palette + diff override** custom palettes via `@PALETTE 
 3. **Full 16-Color Syntax**:
    - You can also list 16 hex colors (`#RRGGBB`) in order from `0` to `F` across one or two lines.
 4. **Linking a Sprite to a Palette**:
-   - Append `pal:<pal_id>` to the `@SPRITE` header:
+   - Append `pal:<pal_id>` to the `@SPRITE` header (prefer `:name` symbol declaration for automatic 2D slot packing):
      ```ruby
-     @SPRITE 0 16x16 pal:1
+     @SPRITE :hero 16x16 pal:1
      ```
-   - For multi-frame animations of the same character (e.g. walk cycle on sprites `0`, `1`, `2`, `3`), share the **same** `@PALETTE` ID (`pal:1`) across all frames so their colors stay synchronized.
+   - For multi-frame animations of the same character, separate frames with `---` inside a single `@SPRITE :name` block (or share the same `@PALETTE` ID across frames).
    - When adding sprites to an existing `.rb` or `.spr` file, check existing `@PALETTE` IDs first and pick an unused ID (`1`, `2`, `3`...) unless intentionally sharing an existing palette.
 
 ---
@@ -81,14 +85,13 @@ Usakame supports **base-palette + diff override** custom palettes via `@PALETTE 
 Choose the appropriate workflow based on what the user requests:
 
 ### Workflow A: Direct Text Sprite & Palette Generation (`@PALETTE` + `@SPRITE`)
-When the user asks to create, draw, or code a sprite for Usakame:
+When the user asks to create, draw, or code a high-quality sprite for Usakame:
 1. **Design a Custom Palette (`@PALETTE <id>`) When Appropriate**:
-   - **Proactively generate a `@PALETTE <id>` block** alongside `@SPRITE <id> [WIDTHxHEIGHT] pal:<id>` whenever the subject benefits from dedicated color ramps (e.g., specific character themes, monsters, food/items, elemental effects, rich 16-bit SNES/GBA-style shading) — unless the user explicitly asks to stick to default palette `0`.
+   - **Proactively generate a `@PALETTE <id>` block** alongside `@SPRITE :name [WIDTHxHEIGHT] pal:<id>` whenever the subject benefits from dedicated color ramps (e.g., specific character themes, monsters, food/items, elemental effects, rich 16-bit SNES/GBA-style shading) — unless the user explicitly asks to stick to default palette `0`.
    - Keep `0` (`#000000` or very dark `#100C1C`) for crisp outlines/pupils and `7` (`#FFF1E8` or `#FFFFFF`) for specular highlights, and override the color slots used by the sprite's main materials to form smooth 3-to-4-step shading ramps (Shadow -> Midtone -> Highlight).
 2. **Write the `@SPRITE` Block**:
-   - Use `@SPRITE <id> [WIDTHxHEIGHT] pal:<pal_id>` (or `@SPRITE <id> [WIDTHxHEIGHT]` if using default palette `0`).
+   - Prefer declarative symbol naming `@SPRITE :name [WIDTHxHEIGHT] pal:<pal_id>` so the engine automatically packs 2D slots (explicit integer IDs like `@SPRITE 0 16x16 pal:1` are also supported when needed).
    - Ensure each row has **exact character width** (e.g. 16 chars for `16x16`, 32 chars for `32x32`) and **exact row count**.
-   - Note Bank 0 slot layout: a `32x32` sprite at ID `0` occupies slots `0, 1, 16, 17`. Place subsequent sprites at non-overlapping slots (e.g. `2`, `4`, `32`).
    - Follow the **4-Layer Shading Rule**: Outline (`0` or `1`), Shadow, Base Midtone, and Highlight.
 3. **Output Ready-to-Use Code**:
    ```ruby
@@ -101,7 +104,7 @@ When the user asks to create, draw, or code a sprite for Usakame:
    8: #E43B44  # Ruby core base
    2: #9E1F28  # Ruby core shadow
 
-   @SPRITE 0 16x16 pal:1
+   @SPRITE :slime 16x16 pal:1
    ................
    .....111111.....
    ...11DDDDDD11...

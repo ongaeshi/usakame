@@ -48,7 +48,9 @@ Ruby コードを生成・修正する前に、必ず以下のドキュメント
 * 乱数は `rand()`（0.0...1.0）、`rand(max)`（0...max）、`rand(min..max)` が利用可能です。
 
 ### ⑤ スプライト・カスタムパレット（`@PALETTE` / `@SPRITE`）の生成
-* スプライトを作成する際、標準16色（パレット0番）だけでは表現しきれない固有色や滑らかな3〜4段階グラデーションが必要な場合は、積極的に **`@PALETTE <id>`（`id >= 1`、ベースパレットからのピンポイント差分定義）** と **`@SPRITE <id> [WxH] pal:<id>`** をセットで定義してください（詳細は [.agents/skills/usakame-sprite/SKILL.md](.agents/skills/usakame-sprite/SKILL.md) を参照）。
+用途に応じて以下の2つのスキルを使い分けてください。
+* **高品質・リッチなスプライト（`/usakame-sprite`）**: 主人公やボスなど、標準16色だけでは表現しきれない固有色や滑らかな3〜4段階グラデーションが必要な場合は、**`@PALETTE <id>`（`id >= 1`、ベースパレットからのピンポイント差分定義）** と **`@SPRITE :name [WxH] pal:<id>`** をセットで定義してください（詳細は [.agents/skills/usakame-sprite/SKILL.md](.agents/skills/usakame-sprite/SKILL.md) を参照）。
+* **高速・大量生成（`/usakame-sprite-fast`）**: プロトタイプ作成や雑魚敵・アイテム・弾・タイル等の大量生成で速度を重視する場合は、`@PALETTE` 設計を省略して標準パレット（`pal:0`）＋フラット2〜3色塗り・`:name` 自動配置・`8x8` 小型サイズ・内蔵絵文字を活用してください（詳細は [.agents/skills/usakame-sprite-fast/SKILL.md](.agents/skills/usakame-sprite-fast/SKILL.md) を参照）。
 
 ---
 
