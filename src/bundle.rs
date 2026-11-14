@@ -1395,6 +1395,178 @@ pub fn export_bank_sprites_text_from_pixels(bank_pixels: &[Option<u8>]) -> Strin
     out
 }
 
+#[derive(Debug, Clone)]
+struct SpriteLineSpan {
+    header_line_idx: usize,
+    frames: Vec<Vec<usize>>,
+}
+
+fn line_ending_of(line: &str) -> &str {
+    if line.ends_with("\r\n") {
+        "\r\n"
+    } else if line.ends_with('\n') {
+        "\n"
+    } else {
+        ""
+    }
+}
+
+fn is_sprite_directive(trimmed: &str) -> bool {
+    trimmed == "@SPRITE"
+        || trimmed.starts_with("@SPRITE ")
+        || trimmed.starts_with("@SPRITE\t")
+}
+
+fn strip_emoji_tokens_from_sprite_header(header_no_eol: &str) -> String {
+    let comment_pos = header_no_eol.find(" #").or_else(|| header_no_eol.find("\t#"));
+    let (head_part, comment_part) = match comment_pos {
+        Some(pos) => (&header_no_eol[..pos], &header_no_eol[pos..]),
+        None => (header_no_eol, ""),
+    };
+
+    let leading_ws_len = head_part.len() - head_part.trim_start().len();
+    let leading_ws = &head_part[..leading_ws_len];
+
+    let mut kept = Vec::new();
+    for (idx, tok) in head_part.trim().split_whitespace().enumerate() {
+        let keep = idx == 0
+            || tok.starts_with(':')
+            || tok.chars().all(|c| c.is_ascii_digit())
+            || parse_dims_token(tok).is_some()
+            || tok.starts_with("pal:")
+            || tok.starts_with("p:")
+            || tok.starts_with("pal=")
+            || tok.starts_with("p=");
+        if keep {
+            kept.push(tok);
+        }
+    }
+
+    format!("{}{}{}", leading_ws, kept.join(" "), comment_part)
+}
+
+/// 元のソースコード・コメント・空行・ヘッダー・他リソースを一切破壊せず、
+/// 指定された `@SPRITE` ブロックのピクセル行だけをインプレースで差し替える。
+/// `updates` のキーはファイル内の `@SPRITE` 出現順インデックス（0始まり）。
+pub fn patch_sprite_pixels_in_place(
+    full_source: &str,
+    updates: &std::collections::HashMap<usize, Vec<Vec<String>>>,
+) -> Result<String, String> {
+    if updates.is_empty() {
+        return Ok(full_source.to_string());
+    }
+
+    let default_eol = if full_source.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut lines: Vec<String> = full_source.split_inclusive('\n').map(|s| s.to_string()).collect();
+
+    let mut tail_start_idx = 0;
+    for (idx, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed == "__END__"
+            || (trimmed.starts_with("__END__")
+                && trimmed[7..].chars().all(|c| c.is_whitespace() || c == '#'))
+        {
+            tail_start_idx = idx + 1;
+            break;
+        }
+    }
+
+    let mut sprites: Vec<SpriteLineSpan> = Vec::new();
+    let mut cur: Option<SpriteLineSpan> = None;
+
+    for (idx, line) in lines.iter().enumerate().skip(tail_start_idx) {
+        let trimmed = line.trim_end_matches(['\r', '\n']).trim();
+        if trimmed.starts_with('@') {
+            if let Some(span) = cur.take() {
+                sprites.push(span);
+            }
+            if is_sprite_directive(trimmed) {
+                cur = Some(SpriteLineSpan {
+                    header_line_idx: idx,
+                    frames: vec![Vec::new()],
+                });
+            }
+        } else if let Some(ref mut span) = cur {
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if trimmed == "---" {
+                span.frames.push(Vec::new());
+            } else if let Some(last_frame) = span.frames.last_mut() {
+                last_frame.push(idx);
+            }
+        }
+    }
+    if let Some(span) = cur.take() {
+        sprites.push(span);
+    }
+
+    // 行挿入が起きても前のインデックスがずれないよう降順で適用する
+    let mut sorted_indices: Vec<usize> = updates.keys().copied().collect();
+    sorted_indices.sort_unstable_by(|a, b| b.cmp(a));
+
+    for sprite_idx in sorted_indices {
+        let new_frames = &updates[&sprite_idx];
+        let span = sprites.get(sprite_idx).ok_or_else(|| {
+            format!("Sprite index {} out of range (found {})", sprite_idx, sprites.len())
+        })?;
+
+        let existing_pixel_lines: usize = span.frames.iter().map(|f| f.len()).sum();
+        if existing_pixel_lines == 0 {
+            // インライン絵文字定義からの展開: ヘッダーの絵文字のみ除去し、コメントは維持して直下にドット行を挿入
+            let h_idx = span.header_line_idx;
+            let orig_eol = line_ending_of(&lines[h_idx]).to_string();
+            let header_no_eol = lines[h_idx].trim_end_matches(['\r', '\n']);
+            let new_header = strip_emoji_tokens_from_sprite_header(header_no_eol);
+            let eol_to_use = if orig_eol.is_empty() {
+                default_eol.to_string()
+            } else {
+                orig_eol
+            };
+            lines[h_idx] = format!("{}{}", new_header, eol_to_use);
+
+            let mut inserted = Vec::new();
+            for (f_idx, frame_rows) in new_frames.iter().enumerate() {
+                if f_idx > 0 {
+                    inserted.push(format!("---{}", eol_to_use));
+                }
+                for row in frame_rows {
+                    inserted.push(format!("{}{}", row, eol_to_use));
+                }
+            }
+            lines.splice((h_idx + 1)..(h_idx + 1), inserted);
+        } else {
+            if new_frames.len() != span.frames.len() {
+                return Err(format!(
+                    "Frame count mismatch for sprite {}: expected {}, got {}",
+                    sprite_idx,
+                    span.frames.len(),
+                    new_frames.len()
+                ));
+            }
+            for (f_idx, (line_indices, new_rows)) in
+                span.frames.iter().zip(new_frames.iter()).enumerate()
+            {
+                if line_indices.len() != new_rows.len() {
+                    return Err(format!(
+                        "Row count mismatch for sprite {} frame {}: expected {}, got {}",
+                        sprite_idx,
+                        f_idx,
+                        line_indices.len(),
+                        new_rows.len()
+                    ));
+                }
+                for (&line_idx, new_row) in line_indices.iter().zip(new_rows.iter()) {
+                    let eol = line_ending_of(&lines[line_idx]).to_string();
+                    lines[line_idx] = format!("{}{}", new_row, eol);
+                }
+            }
+        }
+    }
+
+    Ok(lines.concat())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1611,6 +1783,78 @@ player 50 60
         assert!(patched.contains("player 50 60"));
         assert!(patched.contains("# SFX section"));
         assert!(patched.contains("@SFX 0\nc4 e4 g4"));
+    }
+
+    #[test]
+    fn test_patch_sprite_pixels_in_place_preserves_all_comments() {
+        let original = r#"# Top comment
+def update
+  spr(:hero, 10, 10)
+end
+
+__END__
+# Palette section
+@PALETTE 1 # Hero palette
+7: #FFFFFF
+
+# Hero sprite (named + inline comment)
+@SPRITE :hero 4x4 pal:1 # Main character
+....
+.77.
+.77.
+....
+
+# Walk animation (multi-frame + inner comment)
+@SPRITE :walk 4x2
+# Frame 1
+....
+.88.
+---
+# Frame 2
+.88.
+....
+
+# Wall emoji
+@SPRITE :wall 🧱 # Solid wall
+
+@MAP 0 0
+0 1
+"#;
+
+        let mut updates = std::collections::HashMap::new();
+        // Update :hero (index 0) and :walk (index 1), leave :wall (index 2) untouched
+        updates.insert(
+            0,
+            vec![vec![
+                "8888".to_string(),
+                "8..8".to_string(),
+                "8..8".to_string(),
+                "8888".to_string(),
+            ]],
+        );
+        updates.insert(
+            1,
+            vec![
+                vec!["AAAA".to_string(), "....".to_string()],
+                vec!["....".to_string(), "AAAA".to_string()],
+            ],
+        );
+
+        let patched = patch_sprite_pixels_in_place(original, &updates).unwrap();
+
+        // All comments, headers, palettes, code, and untouched emoji sprite must be preserved verbatim
+        assert!(patched.contains("# Top comment\ndef update\n  spr(:hero, 10, 10)\nend"));
+        assert!(patched.contains("# Palette section\n@PALETTE 1 # Hero palette\n7: #FFFFFF"));
+        assert!(patched.contains("# Hero sprite (named + inline comment)\n@SPRITE :hero 4x4 pal:1 # Main character\n8888\n8..8\n8..8\n8888"));
+        assert!(patched.contains("# Walk animation (multi-frame + inner comment)\n@SPRITE :walk 4x2\n# Frame 1\nAAAA\n....\n---\n# Frame 2\n....\nAAAA"));
+        assert!(patched.contains("# Wall emoji\n@SPRITE :wall 🧱 # Solid wall"));
+        assert!(patched.contains("@MAP 0 0\n0 1"));
+
+        // Now also test expanding inline emoji :wall (index 2) while keeping `# Solid wall`
+        let mut wall_update = std::collections::HashMap::new();
+        wall_update.insert(2, vec![vec!["44".to_string(), "44".to_string()]]);
+        let patched2 = patch_sprite_pixels_in_place(&patched, &wall_update).unwrap();
+        assert!(patched2.contains("@SPRITE :wall # Solid wall\n44\n44\n\n@MAP 0 0"));
     }
 }
 

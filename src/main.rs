@@ -6008,6 +6008,75 @@ fn register_engine_api(
         }),
     );
 
+    // save_sprite_pixels_in_place(path, updates_hash):
+    // updates_hash: { sprite_order_idx => [ [row_str, ...], ... ] }
+    // 指定ファイルのコメント・空行・ヘッダー・他ブロックを一切破壊せず、該当 @SPRITE のピクセル行のみを更新する。
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "save_sprite_pixels_in_place",
+        Box::new(|_vm, args| {
+            let path_str = args
+                .first()
+                .and_then(|v| String::try_from(v.as_ref()).ok())
+                .unwrap_or_default();
+            if path_str.is_empty() {
+                return Ok(Rc::new(RObject::boolean(false)));
+            }
+
+            let mut updates: HashMap<usize, Vec<Vec<String>>> = HashMap::new();
+            if let Some(arg1) = args.get(1) {
+                if let RValue::Hash(ref h_cell) = arg1.value {
+                    for (_, (k, v)) in h_cell.borrow().iter() {
+                        if let RValue::Integer(idx) = k.value {
+                            if idx >= 0 {
+                                if let RValue::Array(ref frames_arr) = v.value {
+                                    let mut frames = Vec::new();
+                                    for f_obj in frames_arr.borrow().iter() {
+                                        if let RValue::Array(ref rows_arr) = f_obj.value {
+                                            let mut rows = Vec::new();
+                                            for r_obj in rows_arr.borrow().iter() {
+                                                if let Ok(s) = String::try_from(r_obj.as_ref()) {
+                                                    rows.push(s);
+                                                }
+                                            }
+                                            frames.push(rows);
+                                        }
+                                    }
+                                    updates.insert(idx as usize, frames);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let current_content = match std::fs::read_to_string(&path_str) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[save_sprite_pixels_in_place] Failed to read `{}`: {}", path_str, e);
+                    return Ok(Rc::new(RObject::boolean(false)));
+                }
+            };
+
+            let patched = match bundle::patch_sprite_pixels_in_place(&current_content, &updates) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[save_sprite_pixels_in_place] Patch error: {}", e);
+                    return Ok(Rc::new(RObject::boolean(false)));
+                }
+            };
+
+            match std::fs::write(&path_str, patched) {
+                Ok(()) => Ok(Rc::new(RObject::boolean(true))),
+                Err(e) => {
+                    eprintln!("[save_sprite_pixels_in_place] Failed to write `{}`: {}", path_str, e);
+                    Ok(Rc::new(RObject::boolean(false)))
+                }
+            }
+        }),
+    );
+
     // save_resource_map(path, map_text): 指定ファイル（game.rb または .map）へ @MAP / @OBJECTS を非破壊保存する。
     mrb_define_cmethod(
         vm,
