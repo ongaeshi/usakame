@@ -1,22 +1,23 @@
 # ==============================================================================
-# 🐰 Usakame Sprite Editor (640x360) — Non-Destructive Pixel Editor 🐢
+# 🐰 Usakame Sprite Editor (368x304) — Compact Icon-Driven Pixel Editor 🐢
 # ------------------------------------------------------------------------------
 # AI やテキストエディタで書いた @SPRITE / @PALETTE / # コメント を一切壊さず、
-# 既存スプライトのプレビューとドット打ちだけに特化したエディタです。
+# 既存スプライトのプレビューとドット打ちだけに特化したスリムなエディタです。
 #
 # 【主な機能】
+# - 2列スリムレイアウト (368x304): ゲーム画面やコードエディタの横に並べて常駐可能
+# - 全ボタンを専用 10x10 ドット絵アイコン (UI_BANK) で表現し、ホバー時にガイド表示
 # - 名前付き (:hero)、サイズ指定 (8x8..48x48)、複数フレーム (---)、絵文字に対応
-# - 複数スプライトを左リストで切り替えながら連続編集し、* マークで未保存を確認
 # - Ctrl+S のみで非破壊インプレース保存（コメント・空行・ヘッダー・他ブロック完全保持）
-# - ドット編集ツール: PEN / FILL / PICKER / ERASER / SELECT (矩形選択＆移動)
+# - ドット編集ツール: PEN / ERASER / FILL / PICKER / SELECT (矩形選択＆移動)
 # - コピー＆ペースト (Ctrl+C / Ctrl+X / Ctrl+V / Ctrl+A / Del)
 # - 反転 (H/V)・90度回転 (R)・1pxシフト (矢印)・グリッド (G)
 # - Ctrl+Z のみで Undo / Ctrl+Y または Ctrl+Shift+Z で Redo
 # ==============================================================================
 
 config(
-  width: 640,
-  height: 360,
+  width: 368,
+  height: 304,
   scale: 2.0,
   text_size: 8,
   title: "Usakame Sprite Editor"
@@ -26,12 +27,13 @@ show_mouse(true)
 
 EDIT_BANK = 1
 THUMB_BANK = 2
+UI_BANK = 3
 
 HEX_CHARS = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "A", "B", "C", "D", "E", "F"]
 
 COLOR_NAMES = [
-  "BLACK", "DARK-BLUE", "PURPLE", "DARK-GREEN",
-  "BROWN", "DARK-GRAY", "LIGHT-GRAY", "WHITE",
+  "BLACK", "D-BLUE", "PURPLE", "D-GREEN",
+  "BROWN", "D-GRAY", "L-GRAY", "WHITE",
   "RED", "ORANGE", "YELLOW", "GREEN",
   "BLUE", "INDIGO", "PINK", "PEACH"
 ]
@@ -78,9 +80,8 @@ $list_scroll = 0
 $list_mode = :list     # :list, :grid
 $sb_dragging = false
 
-$current_tool = :pen   # :pen, :fill, :picker, :eraser, :select
-$current_col = 8
-$prev_col = 8
+$current_tool = :pen   # :pen, :eraser, :fill, :picker, :select
+$current_col = 8       # 常に 0..15 を保持 (透明描画は :eraser ツールで行う)
 $show_grid = true
 $bg_mode = :gray       # :gray, :black, :white
 
@@ -107,39 +108,71 @@ $notify_msg = ""
 $notify_timer = 0
 $ui_tick = 0
 $hover_canvas_pos = nil
+$hover_hint = nil
 
-# レイアウト定数 (640x360)
-LIST_X = 6
-LIST_Y = 24
-LIST_W = 166
-LIST_H = 310
-LIST_HEADER_H = 18
-LIST_ROW_H = 22
-LIST_VISIBLE_ROWS = 13
+# ------------------------------------------------------------------------------
+# レイアウト定数 (案C: 368x304 2列スリム構成)
+# ------------------------------------------------------------------------------
+SCREEN_W = 368
+SCREEN_H = 304
+TOP_BAR_H = 18
+STATUS_BAR_Y = 288
+STATUS_BAR_H = 16
 
-SB_W = 8
+# 左列上部: プレビュー & フレーム/背景パネル
+PREV_X = 4
+PREV_Y = 21
+PREV_W = 112
+PREV_H = 56
+
+# 左列下部: スプライト一覧パネル
+LIST_X = 4
+LIST_Y = 81
+LIST_W = 112
+LIST_H = 203
+LIST_HEADER_H = 16
+LIST_ROW_H = 20
+LIST_VISIBLE_ROWS = 9
+
+SB_W = 7
 SB_X = LIST_X + LIST_W - SB_W - 2
-SB_Y = LIST_Y + LIST_HEADER_H
-SB_H = LIST_H - LIST_HEADER_H - 2
+SB_Y = LIST_Y + LIST_HEADER_H + 1
+SB_H = LIST_H - LIST_HEADER_H - 3
 
-GRID_COLS = 6
+GRID_COLS = 4
 GRID_CELL_W = 24
-GRID_CELL_H = 24
-GRID_VISIBLE_ROWS = 11
+GRID_CELL_H = 22
+GRID_VISIBLE_ROWS = 7
 GRID_PAD_X = LIST_X + 4
-GRID_PAD_Y = LIST_Y + LIST_HEADER_H
+GRID_PAD_Y = LIST_Y + LIST_HEADER_H + 2
 
-CANVAS_BOX_X = 180
-CANVAS_BOX_Y = 24
-CANVAS_BOX_SIZE = 256
+# 右列上部中央: ドット編集キャンバス (192x192 = 8,16,24,32,48 の最小公倍数)
+CANVAS_BOX_X = 122
+CANVAS_BOX_Y = 23
+CANVAS_BOX_SIZE = 192
 
-RIGHT_X = 446
-RIGHT_W = 188
+# 右列上部右端: 縦型ツール＆変形・シフトバー
+TOOL_X = 318
+TOOL_Y = 21
+TOOL_W = 46
+TOOL_H = 196
 
-BG_MODES = [
-  [:gray, "GRAY", RIGHT_X + 26, 50],
-  [:black, "BLACK", RIGHT_X + 80, 50],
-  [:white, "WHITE", RIGHT_X + 134, 48]
+# 右列下部: スプライト情報 & 8x2 コンパクトパレット
+PAL_X = 120
+PAL_Y = 220
+PAL_W = 244
+PAL_H = 64
+SWATCH_X0 = 184
+SWATCH_Y0 = 238
+SWATCH_W = 20
+SWATCH_H = 19
+SWATCH_STEP_X = 22
+SWATCH_STEP_Y = 21
+
+BG_CHIPS = [
+  [:gray, 180, 180, 180, PREV_X + 56, PREV_Y + 4, 15, 12, "BG: Gray"],
+  [:black, 0, 0, 0, PREV_X + 73, PREV_Y + 4, 15, 12, "BG: Black"],
+  [:white, 255, 255, 255, PREV_X + 90, PREV_Y + 4, 15, 12, "BG: White"]
 ]
 
 def notify(msg)
@@ -183,6 +216,363 @@ end
 def col_to_hex(col)
   return "." if col.nil? || col < 0 || col > 15
   HEX_CHARS[col]
+end
+
+# ------------------------------------------------------------------------------
+# 専用 10x10 ドット絵アイコン定義 & UI_BANK 初期化
+# ------------------------------------------------------------------------------
+ICON_IDS = {
+  run: 0,
+  pause: 1,
+  save: 2,
+  lock: 3,
+  undo: 4,
+  redo: 5,
+  revert: 6,
+  grid: 7,
+  list: 8,
+  gridmode: 9,
+  pen: 10,
+  eraser: 11,
+  fill: 12,
+  picker: 13,
+  select: 14,
+  fliph: 15,
+  flipv: 16,
+  rot90: 17,
+  clear: 18,
+  left: 19,
+  right: 20,
+  up: 21,
+  down: 22
+}
+
+ICON_PATTERNS = [
+  # 0: run (▶)
+  [
+    "..........",
+    "..BB......",
+    "..BBBB....",
+    "..BBBBBB..",
+    "..BBBBBBBB",
+    "..BBBBBBBB",
+    "..BBBBBB..",
+    "..BBBB....",
+    "..BB......",
+    ".........."
+  ],
+  # 1: pause (⏸)
+  [
+    "..........",
+    "..AA..AA..",
+    "..AA..AA..",
+    "..AA..AA..",
+    "..AA..AA..",
+    "..AA..AA..",
+    "..AA..AA..",
+    "..AA..AA..",
+    "..AA..AA..",
+    ".........."
+  ],
+  # 2: save (💾)
+  [
+    ".CCCCCCCC.",
+    ".C77777CC.",
+    ".C77577CC.",
+    ".C777777C.",
+    ".CCCCCCCC.",
+    ".CC7777CC.",
+    ".CC5555CC.",
+    ".CC7777CC.",
+    ".CCCCCCCC.",
+    ".........."
+  ],
+  # 3: lock (🔒)
+  [
+    "...6666...",
+    "..6....6..",
+    "..6....6..",
+    ".88888888.",
+    ".888AA888.",
+    ".888AA888.",
+    ".88888888.",
+    ".88888888.",
+    "..........",
+    ".........."
+  ],
+  # 4: undo (↩)
+  [
+    "....77....",
+    "...77.....",
+    "..777777..",
+    ".77777777.",
+    "..77....77",
+    "...7....77",
+    "........77",
+    "......777.",
+    ".....777..",
+    ".........."
+  ],
+  # 5: redo (↪)
+  [
+    "....77....",
+    ".....77...",
+    "..777777..",
+    ".77777777.",
+    "77....77..",
+    "77....7...",
+    "77........",
+    ".777......",
+    "..777.....",
+    ".........."
+  ],
+  # 6: revert (↺)
+  [
+    "...AAAA...",
+    ".AA....AA.",
+    ".A99....A.",
+    "AAAA....A.",
+    ".AAA....A.",
+    "........A.",
+    ".A.....AA.",
+    "..AAAAAA..",
+    "..........",
+    ".........."
+  ],
+  # 7: grid (#)
+  [
+    "..7..7..7.",
+    "..7..7..7.",
+    "7777777777",
+    "..7..7..7.",
+    "..7..7..7.",
+    "7777777777",
+    "..7..7..7.",
+    "..7..7..7.",
+    "7777777777",
+    "..7..7..7."
+  ],
+  # 8: list (≡)
+  [
+    "..........",
+    ".AA.777777",
+    ".AA.777777",
+    "..........",
+    ".AA.777777",
+    ".AA.777777",
+    "..........",
+    ".AA.777777",
+    ".AA.777777",
+    ".........."
+  ],
+  # 9: gridmode (⊞)
+  [
+    "..........",
+    ".777..777.",
+    ".777..777.",
+    ".777..777.",
+    "..........",
+    ".777..777.",
+    ".777..777.",
+    ".777..777.",
+    "..........",
+    ".........."
+  ],
+  # 10: pen (✏)
+  [
+    ".......88.",
+    "......8EE8",
+    ".....7AA8.",
+    "....7AA9..",
+    "...7AA9...",
+    "..7AA9....",
+    ".FFA9.....",
+    ".FF7......",
+    "00........",
+    ".........."
+  ],
+  # 11: eraser (🧹)
+  [
+    ".....EEEE.",
+    "....EEEEEE",
+    "...EEEEEE.",
+    "..EEEE77..",
+    ".EE7777...",
+    ".77777....",
+    "..777.....",
+    "..........",
+    ".77..77...",
+    ".........."
+  ],
+  # 12: fill (🪣)
+  [
+    "...666....",
+    "..6...6...",
+    "..777777..",
+    ".77CCCC78.",
+    ".7CCCCC788",
+    "..7CCC7.88",
+    "...777..88",
+    "........88",
+    ".......888",
+    ".........."
+  ],
+  # 13: picker (🧪)
+  [
+    "......888.",
+    ".....8EEE8",
+    ".....88E88",
+    "....7788..",
+    "...7C7....",
+    "..7C7.....",
+    ".7C7......",
+    ".77.......",
+    "C.........",
+    ".........."
+  ],
+  # 14: select (⬚)
+  [
+    "AA.77.77.A",
+    "A........A",
+    "..........",
+    "7........7",
+    "7........7",
+    "..........",
+    "7........7",
+    "7........7",
+    "..........",
+    "A.77.77.AA"
+  ],
+  # 15: fliph (◁|▷)
+  [
+    "....A.....",
+    "..7.A.C...",
+    ".77.A.CC..",
+    "777.A.CCC.",
+    "777.A.CCC.",
+    ".77.A.CC..",
+    "..7.A.C...",
+    "....A.....",
+    "....A.....",
+    ".........."
+  ],
+  # 16: flipv (△/▽)
+  [
+    "....7.....",
+    "...777....",
+    "..77777...",
+    "..........",
+    ".AAAAAAAA.",
+    "..........",
+    "..CCCCC...",
+    "...CCC....",
+    "....C.....",
+    ".........."
+  ],
+  # 17: rot90 (↻)
+  [
+    "..77777...",
+    ".77...77..",
+    ".7.....7.C",
+    ".7....CCCC",
+    ".7.....CCC",
+    ".77...CCC.",
+    "..777.....",
+    "..........",
+    "..........",
+    ".........."
+  ],
+  # 18: clear (🗑)
+  [
+    "...8888...",
+    ".88888888.",
+    "..........",
+    "..676767..",
+    "..676767..",
+    "..676767..",
+    "..676767..",
+    "..676767..",
+    "...6666...",
+    ".........."
+  ],
+  # 19: left (←)
+  [
+    "..........",
+    "....7.....",
+    "...77.....",
+    "..7777777.",
+    ".77777777.",
+    "..7777777.",
+    "...77.....",
+    "....7.....",
+    "..........",
+    ".........."
+  ],
+  # 20: right (→)
+  [
+    "..........",
+    ".....7....",
+    ".....77...",
+    ".7777777..",
+    ".77777777.",
+    ".7777777..",
+    ".....77...",
+    ".....7....",
+    "..........",
+    ".........."
+  ],
+  # 21: up (↑)
+  [
+    "....7.....",
+    "...777....",
+    "..77777...",
+    ".7777777..",
+    "...777....",
+    "...777....",
+    "...777....",
+    "...777....",
+    "..........",
+    ".........."
+  ],
+  # 22: down (↓)
+  [
+    "..........",
+    "...777....",
+    "...777....",
+    "...777....",
+    "...777....",
+    ".7777777..",
+    "..77777...",
+    "...777....",
+    "....7.....",
+    ".........."
+  ]
+]
+
+def init_ui_icons
+  idx = 0
+  while idx < ICON_PATTERNS.size
+    rows = ICON_PATTERNS[idx]
+    flat_normal = []
+    flat_dim = []
+    y = 0
+    while y < 10
+      rstr = rows[y]
+      x = 0
+      while x < 10
+        c = parse_hex_char(rstr[x])
+        flat_normal << c
+        flat_dim << (c.nil? ? nil : 5)
+        x += 1
+      end
+      y += 1
+    end
+    u = (idx % 16) * 16
+    v = (idx / 16) * 16
+    update_bank_rect(UI_BANK, u, v, 10, 10, flat_normal)
+    update_bank_rect(UI_BANK, u, v + 128, 10, 10, flat_dim)
+    idx += 1
+  end
 end
 
 def clone_grid(grid)
@@ -357,7 +747,6 @@ def load_all_sprites
   raw = read_file($load_source) || ""
   lines = raw.split("\n")
 
-  # __END__ がある場合はその次の行からパース (.spr 等は先頭から)
   start_line = 0
   i = 0
   while i < lines.size
@@ -409,7 +798,6 @@ def load_all_sprites
     raw_defs << cur
   end
 
-  # スロット割り当て (絵文字スプライトのピクセルを Bank 0 から取り出すため)
   used = Array.new(256, false)
   used[0] = true
 
@@ -486,7 +874,6 @@ def load_all_sprites
         frames << grid
       end
     else
-      # インライン絵文字定義: Bank 0 の割り当てスロットから 16x16 ピクセルを読み出す
       d[:slots].each do |sid|
         sx = (sid % 16) * 16
         sy = (sid / 16) * 16
@@ -554,7 +941,6 @@ end
 def sync_active_sprite_to_edit_bank
   sp = current_sprite
   return unless sp
-  # 各フレームを EDIT_BANK の y=0, x=f*64 に転送 (最大48x48まで重ならない)
   f = 0
   while f < sp[:frames].size && f < 4
     sync_grid_to_bank(EDIT_BANK, f * 64, 0, sp[:w], sp[:h], sp[:frames][f])
@@ -563,7 +949,6 @@ def sync_active_sprite_to_edit_bank
 end
 
 def sync_all_thumbnails
-  # サムネイル用に THUMB_BANK へ 16x16 相当の縮小は不要、そのまま左上16x16 または縮小して転送
   i = 0
   while i < $sprites.size && i < 256
     sp = $sprites[i]
@@ -651,8 +1036,9 @@ def ensure_selected_visible
   clamp_list_scroll
 end
 
-def toggle_list_mode
-  $list_mode = ($list_mode == :list) ? :grid : :list
+def set_list_mode(mode)
+  return if $list_mode == mode
+  $list_mode = mode
   ensure_selected_visible
   sfx(:select, -1, 0.15)
 end
@@ -1286,7 +1672,8 @@ def launch_target_app
   end
 end
 
-# 初回ロード
+# 初回ロード & アイコン登録
+init_ui_icons
 load_all_sprites
 $run_target_path = resolve_run_target_path
 
@@ -1315,6 +1702,46 @@ def switch_tool(new_tool)
   end
   $current_tool = new_tool
   sfx(:select, -1, 0.15)
+end
+
+# 縦型ツールバーのボタン定義 [id, x, y, w, h, icon_sym, hint]
+TOOL_BUTTONS = [
+  [:pen,    TOOL_X + 3,  TOOL_Y + 4,   19, 20, :pen,    "PEN: Draw pixels [B / 1]"],
+  [:eraser, TOOL_X + 24, TOOL_Y + 4,   19, 20, :eraser, "ERASER: Erase to transparent [E / 4 / X]"],
+  [:fill,   TOOL_X + 3,  TOOL_Y + 27,  19, 20, :fill,   "FILL: Flood fill [F / 2] (R-Click: Erase)"],
+  [:picker, TOOL_X + 24, TOOL_Y + 27,  19, 20, :picker, "PICKER: Eyedropper [I / 3 / R-Click]"],
+  [:select, TOOL_X + 3,  TOOL_Y + 50,  40, 20, :select, "SELECT: Box select & move [M / 5]"]
+]
+
+ACTION_BUTTONS = [
+  [:fliph, TOOL_X + 3,  TOOL_Y + 78,  19, 20, :fliph, "FLIP H: Mirror horizontally [H]"],
+  [:flipv, TOOL_X + 24, TOOL_Y + 78,  19, 20, :flipv, "FLIP V: Mirror vertically [V]"],
+  [:rot90, TOOL_X + 3,  TOOL_Y + 101, 19, 20, :rot90, "ROTATE: 90 deg clockwise [R]"],
+  [:clear, TOOL_X + 24, TOOL_Y + 101, 19, 20, :clear, "CLEAR: Clear canvas or selection [Del]"],
+  [:left,  TOOL_X + 3,  TOOL_Y + 129, 19, 20, :left,  "SHIFT LEFT: Move 1px left [Left]"],
+  [:right, TOOL_X + 24, TOOL_Y + 129, 19, 20, :right, "SHIFT RIGHT: Move 1px right [Right]"],
+  [:up,    TOOL_X + 3,  TOOL_Y + 152, 19, 20, :up,    "SHIFT UP: Move 1px up [Up]"],
+  [:down,  TOOL_X + 24, TOOL_Y + 152, 19, 20, :down,  "SHIFT DOWN: Move 1px down [Down]"]
+]
+
+def trigger_action_btn(act)
+  if act == :fliph
+    flip_active(true)
+  elsif act == :flipv
+    flip_active(false)
+  elsif act == :rot90
+    rotate_active_cw
+  elsif act == :clear
+    clear_active
+  elsif act == :left
+    shift_active(-1, 0)
+  elsif act == :right
+    shift_active(1, 0)
+  elsif act == :up
+    shift_active(0, -1)
+  elsif act == :down
+    shift_active(0, 1)
+  end
 end
 
 def update
@@ -1365,26 +1792,23 @@ def update
       return
     end
   else
-    # 単キーショートカット (S と Z は誤爆防止のため割り当てない)
+    # 単キーショートカット
     switch_tool(:pen) if btnp(:key_b) || btnp(:key_1)
     switch_tool(:fill) if btnp(:key_f) || btnp(:key_2)
     switch_tool(:picker) if btnp(:key_i) || btnp(:key_3)
     switch_tool(:eraser) if btnp(:key_e) || btnp(:key_4)
     switch_tool(:select) if btnp(:key_m) || btnp(:key_5)
 
+    # X キーで PEN <-> ERASER トグル
+    if btnp(:key_x)
+      switch_tool($current_tool == :eraser ? :pen : :eraser)
+    end
+
     if btnp(:key_g)
       $show_grid = !$show_grid
       sfx(:select, -1, 0.15)
     end
-    if btnp(:key_x)
-      if $current_col.nil?
-        $current_col = $prev_col.nil? ? 8 : $prev_col
-      else
-        $prev_col = $current_col
-        $current_col = nil
-      end
-      sfx(:select, -1, 0.15)
-    end
+
     flip_active(true) if btnp(:key_h)
     flip_active(false) if btnp(:key_v)
     rotate_active_cw if btnp(:key_r)
@@ -1425,33 +1849,73 @@ def update
     end
   end
 
-  # 2. トップバーボタンクリック
+  # 2. トップバーアイコンボタンクリック (x = 256 + i * 18, y = 2, w = 16, h = 14)
   if btnp(:mouse_left)
-    if hit?(mx, my, 314, 3, 42, 15)
+    if hit?(mx, my, 256, 2, 16, 14)
       launch_target_app
       return
     end
-    return if hit?(mx, my, 360, 3, 58, 15) && (save_dirty_sprites; true)
-    if hit?(mx, my, 422, 3, 46, 15)
+    if hit?(mx, my, 274, 2, 16, 14)
+      save_dirty_sprites
+      return
+    end
+    if hit?(mx, my, 292, 2, 16, 14)
       perform_undo
       return
     end
-    if hit?(mx, my, 472, 3, 46, 15)
+    if hit?(mx, my, 310, 2, 16, 14)
       perform_redo
       return
     end
-    if hit?(mx, my, 522, 3, 52, 15)
+    if hit?(mx, my, 328, 2, 16, 14)
       revert_current_sprite
       return
     end
-    if hit?(mx, my, 578, 3, 54, 15)
+    if hit?(mx, my, 346, 2, 16, 14)
       $show_grid = !$show_grid
       sfx(:select, -1, 0.15)
       return
     end
   end
 
-  # 3. 左側スプライトリスト (スクロールバー・モード切替・ホイール・クリック)
+  # 3. 左上プレビュー & BGカラーチップ & フレーム切替
+  if btnp(:mouse_left)
+    bi = 0
+    while bi < BG_CHIPS.size
+      bc = BG_CHIPS[bi]
+      if hit?(mx, my, bc[4], bc[5], bc[6], bc[7])
+        $bg_mode = bc[0]
+        sfx(:select, -1, 0.15)
+        return
+      end
+      bi += 1
+    end
+
+    if sp && sp[:frames].size > 1
+      # Play/Pause アイコンボタン
+      if hit?(mx, my, PREV_X + 56, PREV_Y + 20, 16, 14)
+        $anim_playing = !$anim_playing
+        $anim_timer = 0
+        sfx(:select, -1, 0.15)
+        return
+      end
+      f = 0
+      while f < sp[:frames].size && f < 5
+        fx = (f < 2) ? (PREV_X + 74 + f * 17) : (PREV_X + 56 + (f - 2) * 17)
+        fy = (f < 2) ? (PREV_Y + 20) : (PREV_Y + 36)
+        if hit?(mx, my, fx, fy, 15, 14)
+          commit_floating_selection(false) if $floating_pixels
+          $frame_idx = f
+          $anim_playing = false
+          sfx(:select, -1, 0.15)
+          return
+        end
+        f += 1
+      end
+    end
+  end
+
+  # 4. 左下スプライト一覧 (スクロールバー・モード切替・ホイール・クリック)
   max_s = list_max_scroll
   if max_s > 0
     if btnp(:mouse_left) && hit?(mx, my, SB_X - 2, SB_Y, SB_W + 4, SB_H)
@@ -1462,7 +1926,7 @@ def update
         total = list_total_rows
         vis = list_visible_rows
         thumb_h = (SB_H * vis) / total
-        thumb_h = 16 if thumb_h < 16
+        thumb_h = 14 if thumb_h < 14
         thumb_h = SB_H if thumb_h > SB_H
         track_range = SB_H - thumb_h
         if track_range > 0
@@ -1491,11 +1955,15 @@ def update
       clamp_list_scroll
     end
     if btnp(:mouse_left)
-      if hit?(mx, my, LIST_X + LIST_W - 40, LIST_Y + 2, 36, 13)
-        toggle_list_mode
+      if hit?(mx, my, LIST_X + LIST_W - 32, LIST_Y + 2, 14, 12)
+        set_list_mode(:list)
         return
       end
-      if mx < SB_X
+      if hit?(mx, my, LIST_X + LIST_W - 16, LIST_Y + 2, 14, 12)
+        set_list_mode(:grid)
+        return
+      end
+      if mx < SB_X && my >= LIST_Y + LIST_HEADER_H
         if $list_mode == :grid
           rel_x = mx - GRID_PAD_X
           rel_y = my - GRID_PAD_Y
@@ -1508,7 +1976,7 @@ def update
             end
           end
         else
-          rel_y = my - (LIST_Y + LIST_HEADER_H)
+          rel_y = my - (LIST_Y + LIST_HEADER_H + 1)
           if rel_y >= 0
             row = rel_y / LIST_ROW_H
             idx = $list_scroll + row
@@ -1519,91 +1987,44 @@ def update
     end
   end
 
-  # 4. 右側パネル (フレーム切替・ツール・変形・パレット)
+  # 5. 右側縦ツールバー & 下部 8x2 パレット
   if btnp(:mouse_left)
-    # フレームボタン (最大6個表示)
-    if sp && sp[:frames].size > 1
-      # Play/Pause ボタン
-      if hit?(mx, my, RIGHT_X + 128, 30, 52, 14)
-        $anim_playing = !$anim_playing
-        $anim_timer = 0
-        return
-      end
-      f = 0
-      while f < sp[:frames].size && f < 6
-        fx = RIGHT_X + 104 + (f % 3) * 26
-        fy = 50 + (f / 3) * 16
-        if hit?(mx, my, fx, fy, 24, 14)
-          commit_floating_selection(false) if $floating_pixels
-          $frame_idx = f
-          $anim_playing = false
-          sfx(:select, -1, 0.15)
-          return
-        end
-        f += 1
-      end
-    end
-
-    # 背景色切替ボタン
-    bi = 0
-    while bi < BG_MODES.size
-      bm = BG_MODES[bi]
-      if hit?(mx, my, bm[2], 110, bm[3], 16)
-        $bg_mode = bm[0]
-        sfx(:select, -1, 0.15)
-        return
-      end
-      bi += 1
-    end
-
-    # ツールボタン (5個)
-    tools = [:pen, :fill, :picker, :eraser, :select]
     ti = 0
-    while ti < tools.size
-      bx = RIGHT_X + 6 + ti * 36
-      by = 148
-      if hit?(mx, my, bx, by, 33, 16)
-        switch_tool(tools[ti])
+    while ti < TOOL_BUTTONS.size
+      tb = TOOL_BUTTONS[ti]
+      if hit?(mx, my, tb[1], tb[2], tb[3], tb[4])
+        switch_tool(tb[0])
         return
       end
       ti += 1
     end
 
-    # 変形・シフトボタン (2行)
-    return if hit?(mx, my, RIGHT_X + 6, 170, 40, 14) && (flip_active(true); true)
-    return if hit?(mx, my, RIGHT_X + 50, 170, 40, 14) && (flip_active(false); true)
-    return if hit?(mx, my, RIGHT_X + 94, 170, 40, 14) && (rotate_active_cw; true)
-    return if hit?(mx, my, RIGHT_X + 138, 170, 44, 14) && (clear_active; true)
+    ai = 0
+    while ai < ACTION_BUTTONS.size
+      ab = ACTION_BUTTONS[ai]
+      if hit?(mx, my, ab[1], ab[2], ab[3], ab[4])
+        trigger_action_btn(ab[0])
+        return
+      end
+      ai += 1
+    end
 
-    return if hit?(mx, my, RIGHT_X + 6, 188, 40, 14) && (shift_active(-1, 0); true)
-    return if hit?(mx, my, RIGHT_X + 50, 188, 40, 14) && (shift_active(1, 0); true)
-    return if hit?(mx, my, RIGHT_X + 94, 188, 40, 14) && (shift_active(0, -1); true)
-    return if hit?(mx, my, RIGHT_X + 138, 188, 44, 14) && (shift_active(0, 1); true)
-
-    # パレット 16色 (4x4)
+    # 8x2 パレット 16色
     c = 0
     while c < 16
-      px = RIGHT_X + 8 + (c % 4) * 44
-      py = 222 + (c / 4) * 22
-      if hit?(mx, my, px, py, 40, 18)
+      px = SWATCH_X0 + (c % 8) * SWATCH_STEP_X
+      py = SWATCH_Y0 + (c / 8) * SWATCH_STEP_Y
+      if hit?(mx, my, px, py, SWATCH_W, SWATCH_H)
         $current_col = c
-        $prev_col = c
         $current_tool = :pen if $current_tool == :eraser || $current_tool == :picker
         sfx(:select, -1, 0.15)
         return
       end
       c += 1
     end
-
-    # 透明色ボタン
-    if hit?(mx, my, RIGHT_X + 8, 312, 172, 18)
-      $current_col = nil
-      sfx(:select, -1, 0.15)
-      return
-    end
   end
 
-  # 5. 中央キャンバス操作
+  # 6. キャンバス操作
   $hover_canvas_pos = nil
   if sp
     cx, cy, cell, cw, ch = canvas_geometry(sp)
@@ -1613,12 +2034,23 @@ def update
       if lx >= 0 && lx < sp[:w] && ly >= 0 && ly < sp[:h]
         $hover_canvas_pos = [lx, ly]
 
-        # 右クリックは常にスポイト
+        # 右クリック: FILL 選択時は透明塗りつぶし、それ以外はスポイト (透明ドットなら消しゴム切替)
         if btnp(:mouse_right) || btn(:mouse_right)
-          picked = current_grid[ly][lx]
-          $current_col = picked
-          $prev_col = picked if picked != nil
-          sfx(:select, -1, 0.2) if btnp(:mouse_right)
+          if $current_tool == :fill && !$is_read_only
+            if btnp(:mouse_right)
+              flood_fill(lx, ly, nil)
+              sfx(:select, -1, 0.2)
+            end
+          else
+            picked = current_grid[ly][lx]
+            if picked != nil
+              $current_col = picked
+              $current_tool = :pen if $current_tool == :eraser
+            else
+              $current_tool = :eraser if btnp(:mouse_right)
+            end
+            sfx(:select, -1, 0.2) if btnp(:mouse_right)
+          end
         end
 
         if !$is_read_only
@@ -1654,8 +2086,12 @@ def update
           elsif $current_tool == :picker
             if btnp(:mouse_left) || btn(:mouse_left)
               picked = current_grid[ly][lx]
-              $current_col = picked
-              $prev_col = picked if picked != nil
+              if picked != nil
+                $current_col = picked
+                switch_tool(:pen) if btnp(:mouse_left)
+              else
+                switch_tool(:eraser) if btnp(:mouse_left)
+              end
               sfx(:select, -1, 0.2) if btnp(:mouse_left)
             end
           else
@@ -1691,13 +2127,39 @@ def update
 end
 
 # ------------------------------------------------------------------------------
-# 描画 (draw)
+# 描画ヘルパー (draw)
 # ------------------------------------------------------------------------------
-def draw_btn(x, y, w, h, label, bg_col, border_col, text_col)
+def draw_icon(icon_sym, x, y, enabled = true)
+  idx = ICON_IDS[icon_sym]
+  return unless idx
+  u = (idx % 16) * 16
+  v = (idx / 16) * 16
+  v += 128 unless enabled
+  blt(x, y, UI_BANK, u, v, 10, 10, 0, 1.0, 0)
+end
+
+def draw_icon_btn(x, y, w, h, icon_sym, bg_col, border_col, enabled = true, hint = nil)
+  mx = mouse_x
+  my = mouse_y
+  hov = hit?(mx, my, x, y, w, h)
+  $hover_hint = hint if hov && hint
+  bcol = (hov && enabled) ? 7 : border_col
   rectfill(x, y, w, h, bg_col)
-  rect(x, y, w, h, border_col)
+  rect(x, y, w, h, bcol)
+  ix = x + (w - 10) / 2
+  iy = y + (h - 10) / 2
+  draw_icon(icon_sym, ix, iy, enabled)
+end
+
+def draw_mini_btn(x, y, w, h, label, bg_col, border_col, text_col, hint = nil)
+  mx = mouse_x
+  my = mouse_y
+  hov = hit?(mx, my, x, y, w, h)
+  $hover_hint = hint if hov && hint
+  rectfill(x, y, w, h, bg_col)
+  rect(x, y, w, h, hov ? 7 : border_col)
   tx = x + (w - label.length * 6) / 2
-  tx = x + 2 if tx < x + 2
+  tx = x + 1 if tx < x + 1
   print_text(label, tx, y + (h - 8) / 2, text_col)
 end
 
@@ -1718,47 +2180,104 @@ end
 
 def draw
   cls(0)
-
-  # 1. トップバー
-  rectfill(0, 0, 640, 20, 1)
-  line(0, 20, 640, 20, 5)
-  print_text("SPRITE EDITOR", 8, 6, 7)
-
-  dirty = any_dirty?
-  path_lbl = truncate_label($save_path, 26)
-  path_lbl += "*" if dirty
-  print_text(path_lbl, 108, 6, dirty ? 10 : 6)
-
-  can_run = !$run_target_path.nil?
-  draw_btn(314, 3, 42, 15, "RUN", can_run ? 3 : 1, can_run ? 11 : 5, can_run ? 7 : 5)
-
-  if $is_read_only
-    draw_btn(360, 3, 58, 15, "READONLY", 2, 8, 8)
-  elsif dirty
-    draw_btn(360, 3, 58, 15, "SAVE ^S", 3, 11, 7)
-  else
-    draw_btn(360, 3, 58, 15, "SAVE ^S", 2, 5, 6)
-  end
-
-  draw_btn(422, 3, 46, 15, "UNDO", $undo_stack.empty? ? 1 : 2, $undo_stack.empty? ? 5 : 6, $undo_stack.empty? ? 5 : 7)
-  draw_btn(472, 3, 46, 15, "REDO", $redo_stack.empty? ? 1 : 2, $redo_stack.empty? ? 5 : 6, $redo_stack.empty? ? 5 : 7)
-
-  sp = current_sprite
-  can_rev = sp && sp[:dirty] && !$is_read_only
-  draw_btn(522, 3, 52, 15, "REVERT", can_rev ? 2 : 1, can_rev ? 9 : 5, can_rev ? 10 : 5)
-  draw_btn(578, 3, 54, 15, $show_grid ? "GRID:ON" : "GRID:--", $show_grid ? 12 : 1, 6, 7)
-
-  # 2. 左ペイン: スプライト一覧
+  $hover_hint = nil
   mx = mouse_x
   my = mouse_y
+  sp = current_sprite
+  dirty = any_dirty?
+
+  # 1. トップバー (368x18)
+  rectfill(0, 0, SCREEN_W, TOP_BAR_H, 1)
+  line(0, TOP_BAR_H, SCREEN_W, TOP_BAR_H, 5)
+  print_text("SPR ED", 5, 5, 7)
+
+  path_lbl = truncate_label($save_path, 22)
+  path_lbl += "*" if dirty
+  print_text(path_lbl, 48, 5, dirty ? 10 : 6)
+
+  can_run = !$run_target_path.nil?
+  draw_icon_btn(256, 2, 16, 14, :run, can_run ? 3 : 1, can_run ? 11 : 5, can_run, "RUN: Launch #{$run_target_path || 'game.rb'}")
+
+  if $is_read_only
+    draw_icon_btn(274, 2, 16, 14, :lock, 2, 8, true, "READ-ONLY: Cannot save")
+  else
+    draw_icon_btn(274, 2, 16, 14, :save, dirty ? 3 : 2, dirty ? 11 : 5, true, "SAVE: Save dirty sprites [Ctrl+S]")
+  end
+
+  can_undo = !$undo_stack.empty? && !$is_read_only
+  can_redo = !$redo_stack.empty? && !$is_read_only
+  can_rev = sp && sp[:dirty] && !$is_read_only
+
+  draw_icon_btn(292, 2, 16, 14, :undo, can_undo ? 2 : 1, can_undo ? 6 : 5, can_undo, "UNDO [Ctrl+Z]")
+  draw_icon_btn(310, 2, 16, 14, :redo, can_redo ? 2 : 1, can_redo ? 6 : 5, can_redo, "REDO [Ctrl+Y / Ctrl+Shift+Z]")
+  draw_icon_btn(328, 2, 16, 14, :revert, can_rev ? 2 : 1, can_rev ? 9 : 5, can_rev, "REVERT: Discard changes to current sprite")
+  draw_icon_btn(346, 2, 16, 14, :grid, $show_grid ? 12 : 1, $show_grid ? 7 : 5, true, "GRID: Toggle pixel grid [G]")
+
+  # 2. 左列上部: プレビュー & 背景チップ & フレーム切替 (x=4, y=22, w=112, h=56)
+  rectfill(PREV_X, PREV_Y, PREV_W, PREV_H, 1)
+  rect(PREV_X, PREV_Y, PREV_W, PREV_H, 5)
+
+  pbox_x = PREV_X + 4
+  pbox_y = PREV_Y + 4
+  draw_preview_bg(pbox_x, pbox_y, 48, 48)
+  rect(pbox_x, pbox_y, 48, 48, 5)
+
+  if sp
+    src_x = ($frame_idx % 4) * 64
+    scale_2x = (sp[:w] <= 24 && sp[:h] <= 24) ? 2.0 : 1.0
+    pw = (sp[:w] * scale_2x).to_i
+    ph = (sp[:h] * scale_2x).to_i
+    px = pbox_x + (48 - pw) / 2
+    py = pbox_y + (48 - ph) / 2
+    blt(px, py, EDIT_BANK, src_x, 0, sp[:w], sp[:h], 0, scale_2x, sp[:pal])
+  end
+
+  # 背景色チップ (3個の実色正方形)
+  bi = 0
+  while bi < BG_CHIPS.size
+    bc = BG_CHIPS[bi]
+    active_bg = ($bg_mode == bc[0])
+    hov_bg = hit?(mx, my, bc[4], bc[5], bc[6], bc[7])
+    $hover_hint = bc[8] if hov_bg
+    rectfill_rgb(bc[4], bc[5], bc[6], bc[7], bc[1], bc[2], bc[3])
+    rect(bc[4], bc[5], bc[6], bc[7], active_bg ? 10 : (hov_bg ? 7 : 5))
+    bi += 1
+  end
+
+  if sp
+    if sp[:frames].size > 1
+      play_icon = $anim_playing ? :pause : :run
+      draw_icon_btn(PREV_X + 56, PREV_Y + 20, 16, 14, play_icon, $anim_playing ? 8 : 3, 6, true, "PLAY/PAUSE Animation [Space]")
+      f = 0
+      while f < sp[:frames].size && f < 5
+        fx = (f < 2) ? (PREV_X + 74 + f * 17) : (PREV_X + 56 + (f - 2) * 17)
+        fy = (f < 2) ? (PREV_Y + 20) : (PREV_Y + 36)
+        is_f = (f == $frame_idx)
+        draw_mini_btn(fx, fy, 15, 14, "#{f + 1}", is_f ? 12 : 2, is_f ? 7 : 5, 7, "Frame #{f + 1} [, / .]")
+        f += 1
+      end
+    elsif sp[:w] <= 24 && sp[:h] <= 24
+      # 単フレームかつ 24x24 以下の場合は右側に等倍 (1x) ミニプレビューも並べて表示
+      mini_x = PREV_X + 56
+      mini_y = PREV_Y + 22
+      draw_preview_bg(mini_x, mini_y, 26, 26)
+      rect(mini_x, mini_y, 26, 26, 5)
+      blt(mini_x + (26 - sp[:w]) / 2, mini_y + (26 - sp[:h]) / 2, EDIT_BANK, 0, 0, sp[:w], sp[:h], 0, 1.0, sp[:pal])
+      print_text("1x", mini_x + 30, mini_y + 9, 6)
+    end
+  end
+
+  # 3. 左列下部: スプライト一覧 (x=4, y=82, w=112, h=202)
   rectfill(LIST_X, LIST_Y, LIST_W, LIST_H, 1)
   rect(LIST_X, LIST_Y, LIST_W, LIST_H, 5)
-  print_text("SPRITES (#{$sprites.size})", LIST_X + 6, LIST_Y + 5, 7)
-  draw_btn(LIST_X + LIST_W - 40, LIST_Y + 2, 36, 13, $list_mode == :grid ? "LIST" : "GRID", 2, 6, 7)
-  line(LIST_X, LIST_Y + 16, LIST_X + LIST_W, LIST_Y + 16, 5)
+  print_text("SPR(#{$sprites.size})", LIST_X + 4, LIST_Y + 4, 7)
+
+  draw_icon_btn(LIST_X + LIST_W - 32, LIST_Y + 2, 14, 12, :list, $list_mode == :list ? 12 : 2, $list_mode == :list ? 7 : 5, true, "LIST VIEW: Show names")
+  draw_icon_btn(LIST_X + LIST_W - 16, LIST_Y + 2, 14, 12, :gridmode, $list_mode == :grid ? 12 : 2, $list_mode == :grid ? 7 : 5, true, "GRID VIEW: Show thumbnails")
+  line(LIST_X, LIST_Y + LIST_HEADER_H, LIST_X + LIST_W, LIST_Y + LIST_HEADER_H, 5)
 
   if $sprites.empty?
-    print_text("NO @SPRITE FOUND", LIST_X + 14, LIST_Y + 40, 8)
+    print_text("NO @SPRITE", LIST_X + 18, LIST_Y + 40, 8)
   elsif $list_mode == :grid
     hover_idx = nil
     row = 0
@@ -1775,21 +2294,13 @@ def draw
         hover_idx = idx if is_hov
 
         rectfill(cx + 1, cy + 1, GRID_CELL_W - 2, GRID_CELL_H - 2, is_sel ? 12 : 0)
-        if is_sel
-          rect(cx + 1, cy + 1, GRID_CELL_W - 2, GRID_CELL_H - 2, 7)
-        elsif is_hov
-          rect(cx + 1, cy + 1, GRID_CELL_W - 2, GRID_CELL_H - 2, 6)
-        else
-          rect(cx + 1, cy + 1, GRID_CELL_W - 2, GRID_CELL_H - 2, 5)
-        end
+        rect(cx + 1, cy + 1, GRID_CELL_W - 2, GRID_CELL_H - 2, is_sel ? 7 : (is_hov ? 6 : 5))
 
         if idx < 256
-          blt(cx + 4, cy + 4, THUMB_BANK, (idx % 16) * 16, (idx / 16) * 16, 16, 16, 0, 1.0, item[:pal])
+          blt(cx + 4, cy + 3, THUMB_BANK, (idx % 16) * 16, (idx / 16) * 16, 16, 16, 0, 1.0, item[:pal])
         end
 
-        if item[:dirty]
-          print_text("*", cx + GRID_CELL_W - 7, cy + 1, 10)
-        end
+        print_text("*", cx + GRID_CELL_W - 7, cy + 1, 10) if item[:dirty]
         fc = item[:frames].size
         if fc > 1
           fc_lbl = fc <= 9 ? "#{fc}" : "+"
@@ -1801,41 +2312,36 @@ def draw
       row += 1
     end
 
-    # グリッド下部: ホバー中または選択中のスプライト情報
     info_y = GRID_PAD_Y + GRID_VISIBLE_ROWS * GRID_CELL_H + 2
     line(LIST_X + 2, info_y, SB_X - 2, info_y, 5)
     info_idx = hover_idx.nil? ? $selected_idx : hover_idx
     if info_idx >= 0 && info_idx < $sprites.size
       isp = $sprites[info_idx]
-      print_text(truncate_label(isp[:label], 22), LIST_X + 5, info_y + 4, 7)
+      print_text(truncate_label(isp[:label], 15), LIST_X + 4, info_y + 3, 7)
       imeta = "#{isp[:w]}x#{isp[:h]} p#{isp[:pal]}"
       imeta += " #{isp[:frames].size}f" if isp[:frames].size > 1
-      print_text(imeta, LIST_X + 5, info_y + 14, 6)
+      print_text(imeta, LIST_X + 4, info_y + 13, 6)
     end
   else
-    row_w = SB_X - LIST_X - 4
+    row_w = SB_X - LIST_X - 3
     row = 0
     while row < LIST_VISIBLE_ROWS
       idx = $list_scroll + row
       break if idx >= $sprites.size
       item = $sprites[idx]
-      ry = LIST_Y + LIST_HEADER_H + row * LIST_ROW_H
+      ry = LIST_Y + LIST_HEADER_H + 1 + row * LIST_ROW_H
       is_sel = (idx == $selected_idx)
       rectfill(LIST_X + 2, ry, row_w, LIST_ROW_H - 1, is_sel ? 12 : (row % 2 == 0 ? 1 : 0))
       rect(LIST_X + 2, ry, row_w, LIST_ROW_H - 1, 7) if is_sel
 
-      # サムネイル (16x16)
-      rectfill(LIST_X + 5, ry + 2, 16, 16, 0)
+      rectfill(LIST_X + 4, ry + 2, 16, 16, 0)
       if idx < 256
-        blt(LIST_X + 5, ry + 2, THUMB_BANK, (idx % 16) * 16, (idx / 16) * 16, 16, 16, 0, 1.0, item[:pal])
+        blt(LIST_X + 4, ry + 2, THUMB_BANK, (idx % 16) * 16, (idx / 16) * 16, 16, 16, 0, 1.0, item[:pal])
       end
 
-      lbl = truncate_label(item[:label], 12)
-      print_text(lbl, LIST_X + 25, ry + 3, is_sel ? 7 : 6)
-      meta = "#{item[:w]}x#{item[:h]} p#{item[:pal]}"
-      meta += " #{item[:frames].size}f" if item[:frames].size > 1
-      print_text(meta, LIST_X + 25, ry + 12, 5)
-      print_text("*", SB_X - 9, ry + 6, 10) if item[:dirty]
+      lbl = truncate_label(item[:label], 10)
+      print_text(lbl, LIST_X + 23, ry + 6, is_sel ? 7 : 6)
+      print_text("*", SB_X - 8, ry + 6, 10) if item[:dirty]
       row += 1
     end
   end
@@ -1848,7 +2354,7 @@ def draw
     total = list_total_rows
     vis = list_visible_rows
     thumb_h = (SB_H * vis) / total
-    thumb_h = 16 if thumb_h < 16
+    thumb_h = 14 if thumb_h < 14
     thumb_h = SB_H if thumb_h > SB_H
     track_range = SB_H - thumb_h
     thumb_y = track_range > 0 ? SB_Y + ($list_scroll * track_range) / max_s : SB_Y
@@ -1857,7 +2363,7 @@ def draw
     rectfill(SB_X + 1, thumb_y + 1, SB_W - 2, thumb_h - 2, thumb_col)
   end
 
-  # 3. 中央ペイン: ドット編集キャンバス
+  # 4. 右列中央: ドット編集キャンバス (192x192)
   rectfill(CANVAS_BOX_X - 2, CANVAS_BOX_Y - 2, CANVAS_BOX_SIZE + 4, CANVAS_BOX_SIZE + 4, 1)
   rect(CANVAS_BOX_X - 2, CANVAS_BOX_Y - 2, CANVAS_BOX_SIZE + 4, CANVAS_BOX_SIZE + 4, 5)
 
@@ -1877,7 +2383,6 @@ def draw
           rgb = palette_rgb(pal_id, c)
           rectfill_rgb(px, py, cell, cell, rgb[0], rgb[1], rgb[2])
         else
-          # 透過背景 (ライトグレー / 黒 / 白)
           if $bg_mode == :black
             rectfill_rgb(px, py, cell, cell, 0, 0, 0)
           elsif $bg_mode == :white
@@ -1940,121 +2445,95 @@ def draw
       hx, hy = $hover_canvas_pos
       rect(cx + hx * cell, cy + hy * cell, cell, cell, 7)
     end
-
-    # キャンバス下情報
-    info_y = CANVAS_BOX_Y + CANVAS_BOX_SIZE + 8
-    info_str = "#{sp[:label]}  #{sp[:w]}x#{sp[:h]}  pal:#{sp[:pal]}"
-    info_str += "  F#{$frame_idx + 1}/#{sp[:frames].size}" if sp[:frames].size > 1
-    print_text(info_str, CANVAS_BOX_X, info_y, 7)
-
-    if $hover_canvas_pos
-      hx, hy = $hover_canvas_pos
-      hc = grid[hy][hx]
-      hstr = "POS:(#{hx},#{hy}) COL:#{hc.nil? ? '.' : "#{hc}(#{HEX_CHARS[hc]})"}"
-      print_text(hstr, CANVAS_BOX_X, info_y + 12, 6)
-    else
-      print_text("L:DRAW  R:EYEDROPPER  CTRL+Z/Y:UNDO/REDO", CANVAS_BOX_X, info_y + 12, 5)
-    end
   end
 
-  # 4. 右ペイン: プレビュー・ツール・パレット
-  rectfill(RIGHT_X, 24, RIGHT_W, 112, 1)
-  rect(RIGHT_X, 24, RIGHT_W, 112, 5)
-  print_text("PREVIEW", RIGHT_X + 6, 30, 7)
+  # 5. 右列右端: 縦型ツール＆変形・シフトバー (x=318, y=22, w=46, h=192)
+  rectfill(TOOL_X, TOOL_Y, TOOL_W, TOOL_H, 1)
+  rect(TOOL_X, TOOL_Y, TOOL_W, TOOL_H, 5)
 
-  if sp
-    # 1x / 2x プレビュー
-    draw_preview_bg(RIGHT_X + 8, 44, 48, 48)
-    rect(RIGHT_X + 8, 44, 48, 48, 5)
-    draw_preview_bg(RIGHT_X + 62, 44, 36, 36)
-    rect(RIGHT_X + 62, 44, 36, 36, 5)
-
-    src_x = ($frame_idx % 4) * 64
-    scale_2x = (sp[:w] <= 24 && sp[:h] <= 24) ? 2.0 : 1.0
-    blt(RIGHT_X + 8, 44, EDIT_BANK, src_x, 0, sp[:w], sp[:h], 0, scale_2x, sp[:pal])
-    blt(RIGHT_X + 62, 44, EDIT_BANK, src_x, 0, sp[:w], sp[:h], 0, 1.0, sp[:pal])
-
-    if sp[:frames].size > 1
-      draw_btn(RIGHT_X + 128, 30, 52, 14, $anim_playing ? "PAUSE" : "PLAY", $anim_playing ? 8 : 3, 6, 7)
-      f = 0
-      while f < sp[:frames].size && f < 6
-        fx = RIGHT_X + 104 + (f % 3) * 26
-        fy = 50 + (f / 3) * 16
-        is_f = (f == $frame_idx)
-        draw_btn(fx, fy, 24, 14, "F#{f + 1}", is_f ? 12 : 2, is_f ? 7 : 5, 7)
-        f += 1
-      end
-    else
-      print_text("SINGLE FRAME", RIGHT_X + 104, 54, 5)
-    end
-  end
-
-  print_text("BG", RIGHT_X + 8, 114, 6)
-  bi = 0
-  while bi < BG_MODES.size
-    bm = BG_MODES[bi]
-    active = ($bg_mode == bm[0])
-    draw_btn(bm[2], 110, bm[3], 16, bm[1], active ? 12 : 2, active ? 7 : 5, active ? 7 : 6)
-    bi += 1
-  end
-
-  # ツールボタン
-  rectfill(RIGHT_X, 140, RIGHT_W, 68, 1)
-  rect(RIGHT_X, 140, RIGHT_W, 68, 5)
-  tool_defs = [
-    [:pen, "PEN"],
-    [:fill, "FILL"],
-    [:picker, "PICK"],
-    [:eraser, "ERAS"],
-    [:select, "SEL"]
-  ]
   ti = 0
-  while ti < tool_defs.size
-    tid = tool_defs[ti][0]
-    tlbl = tool_defs[ti][1]
-    bx = RIGHT_X + 6 + ti * 36
-    active = ($current_tool == tid)
-    draw_btn(bx, 148, 33, 16, tlbl, active ? 12 : 2, active ? 7 : 5, 7)
+  while ti < TOOL_BUTTONS.size
+    tb = TOOL_BUTTONS[ti]
+    active = ($current_tool == tb[0])
+    draw_icon_btn(tb[1], tb[2], tb[3], tb[4], tb[5], active ? 12 : 2, active ? 7 : 5, true, tb[6])
     ti += 1
   end
 
-  draw_btn(RIGHT_X + 6, 170, 40, 14, "FLIPH", 2, 5, 6)
-  draw_btn(RIGHT_X + 50, 170, 40, 14, "FLIPV", 2, 5, 6)
-  draw_btn(RIGHT_X + 94, 170, 40, 14, "ROT90", 2, 5, 6)
-  draw_btn(RIGHT_X + 138, 170, 44, 14, "CLEAR", 2, 8, 7)
+  line(TOOL_X + 3, TOOL_Y + 73, TOOL_X + TOOL_W - 4, TOOL_Y + 73, 5)
 
-  draw_btn(RIGHT_X + 6, 188, 40, 14, "<-", 2, 5, 6)
-  draw_btn(RIGHT_X + 50, 188, 40, 14, "->", 2, 5, 6)
-  draw_btn(RIGHT_X + 94, 188, 40, 14, "^", 2, 5, 6)
-  draw_btn(RIGHT_X + 138, 188, 44, 14, "v", 2, 5, 6)
+  ai = 0
+  while ai < ACTION_BUTTONS.size
+    ab = ACTION_BUTTONS[ai]
+    bcol = (ab[0] == :clear) ? 8 : 5
+    draw_icon_btn(ab[1], ab[2], ab[3], ab[4], ab[5], 2, bcol, !$is_read_only, ab[6])
+    line(TOOL_X + 3, TOOL_Y + 124, TOOL_X + TOOL_W - 4, TOOL_Y + 124, 5) if ai == 3
+    ai += 1
+  end
 
-  # パレット (読み込み専用)
+  # ツールバー最下部にカーソル座標表示
+  if $hover_canvas_pos
+    hx, hy = $hover_canvas_pos
+    print_text("#{hx},#{hy}", TOOL_X + 5, TOOL_Y + 178, 10)
+  else
+    print_text("XY:--", TOOL_X + 5, TOOL_Y + 178, 5)
+  end
+
+  # 6. 右列下部: スプライト情報 & 8x2 コンパクトパレット (x=120, y=220, w=244, h=64)
   pal_id = sp ? sp[:pal] : 0
-  rectfill(RIGHT_X, 210, RIGHT_W, 126, 1)
-  rect(RIGHT_X, 210, RIGHT_W, 126, 5)
-  print_text("PALETTE #{pal_id}", RIGHT_X + 8, 213, 7)
+  rectfill(PAL_X, PAL_Y, PAL_W, PAL_H, 1)
+  rect(PAL_X, PAL_Y, PAL_W, PAL_H, 5)
+
+  if sp
+    info_str = "#{truncate_label(sp[:label], 14)} #{sp[:w]}x#{sp[:h]} pal:#{sp[:pal]}"
+    info_str += " F#{$frame_idx + 1}/#{sp[:frames].size}" if sp[:frames].size > 1
+    print_text(info_str, PAL_X + 6, PAL_Y + 5, 7)
+  end
+
+  # 左側: 選択中カラー / 消しゴム状態バッジ (x=126, y=238, w=52, h=40)
+  rectfill(PAL_X + 6, SWATCH_Y0, 52, 40, 0)
+  rect(PAL_X + 6, SWATCH_Y0, 52, 40, 5)
+  if $current_tool == :eraser
+    draw_icon(:eraser, PAL_X + 12, SWATCH_Y0 + 6, true)
+    print_text("ERASE", PAL_X + 24, SWATCH_Y0 + 8, 14)
+    print_text("(.)", PAL_X + 24, SWATCH_Y0 + 22, 6)
+  else
+    rgb = palette_rgb(pal_id, $current_col)
+    rectfill_rgb(PAL_X + 10, SWATCH_Y0 + 5, 18, 18, rgb[0], rgb[1], rgb[2])
+    rect(PAL_X + 10, SWATCH_Y0 + 5, 18, 18, 7)
+    print_text("##{HEX_CHARS[$current_col]}", PAL_X + 32, SWATCH_Y0 + 10, 7)
+    print_text(COLOR_NAMES[$current_col], PAL_X + 9, SWATCH_Y0 + 27, 6)
+  end
+
+  # 右側: 8x2 パレット (20x19 正方形チップ x 16色)
   c = 0
   while c < 16
-    px = RIGHT_X + 8 + (c % 4) * 44
-    py = 222 + (c / 4) * 22
+    px = SWATCH_X0 + (c % 8) * SWATCH_STEP_X
+    py = SWATCH_Y0 + (c / 8) * SWATCH_STEP_Y
     rgb = palette_rgb(pal_id, c)
-    rectfill_rgb(px, py, 40, 18, rgb[0], rgb[1], rgb[2])
-    is_cur = ($current_col == c)
-    rect(px, py, 40, 18, is_cur ? 7 : 0)
-    rect(px - 1, py - 1, 42, 20, 10) if is_cur
+    rectfill_rgb(px, py, SWATCH_W, SWATCH_H, rgb[0], rgb[1], rgb[2])
+    is_cur = ($current_col == c && $current_tool != :eraser)
+    hov_sw = hit?(mx, my, px, py, SWATCH_W, SWATCH_H)
+    $hover_hint = "COLOR #{c} (##{HEX_CHARS[c]} #{COLOR_NAMES[c]})" if hov_sw
+    rect(px, py, SWATCH_W, SWATCH_H, is_cur ? 7 : (hov_sw ? 6 : 0))
+    rect(px - 1, py - 1, SWATCH_W + 2, SWATCH_H + 2, 10) if is_cur
     c += 1
   end
-  draw_btn(RIGHT_X + 8, 312, 172, 18, "TRANSPARENT (.) [X]", $current_col.nil? ? 8 : 2, $current_col.nil? ? 7 : 5, 7)
 
-  # 5. 下部ステータスバー
-  rectfill(0, 340, 640, 20, 1)
-  line(0, 340, 640, 340, 5)
+  # 7. 下部ステータスバー (y=288, h=16)
+  rectfill(0, STATUS_BAR_Y, SCREEN_W, STATUS_BAR_H, 1)
+  line(0, STATUS_BAR_Y, SCREEN_W, STATUS_BAR_Y, 5)
   if $notify_timer > 0 && $notify_msg.length > 0
-    print_text($notify_msg, 10, 346, 11)
+    print_text($notify_msg, 6, STATUS_BAR_Y + 4, 11)
+  elsif $hover_hint
+    print_text($hover_hint, 6, STATUS_BAR_Y + 4, 10)
   elsif $is_read_only
-    print_text("READ-ONLY: Direct PNG reference (view-only).", 10, 346, 10)
+    print_text("READ-ONLY: Direct PNG reference (view-only).", 6, STATUS_BAR_Y + 4, 10)
+  elsif $hover_canvas_pos && sp
+    hx, hy = $hover_canvas_pos
+    hc = current_grid[hy][hx]
+    c_str = hc.nil? ? ".(EMPTY)" : "#{hc}(##{HEX_CHARS[hc]})"
+    print_text("XY:(#{hx},#{hy}) COL:#{c_str} | L:Draw R:Pick E:Erase", 6, STATUS_BAR_Y + 4, 6)
   else
-    col_desc = $current_col.nil? ? "TRANSPARENT (.)" : "#{$current_col} #{COLOR_NAMES[$current_col]}"
-    print_text("COL: #{col_desc}  |  B:Pen F:Fill I:Pick E:Eraser M:Select G:Grid", 10, 346, 6)
+    print_text("B:Pen E:Erase F:Fill I:Pick M:Sel G:Grid ^S:Save", 6, STATUS_BAR_Y + 4, 6)
   end
 end
