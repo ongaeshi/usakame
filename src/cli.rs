@@ -16,6 +16,11 @@ pub const EMBEDDED_TILEMAP_EDITOR: &str = include_str!("../examples/tilemap_edit
 pub const EMBEDDED_VIEWER: &str = include_str!("../examples/viewer.rb");
 pub const EMBEDDED_API_MD: &str = include_str!("../docs/api.md");
 pub const EMBEDDED_MRUBYEDGE_API_MD: &str = include_str!("../docs/mrubyedge_api.md");
+/// `.agents/skills/PROJECT_SKILLS` に記載されたスキルのみを同梱したアーカイブ
+pub const EMBEDDED_SKILLS_ARCHIVE: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/skills_archive.bin"));
+pub const EMBEDDED_PROJECT_SKILLS_MANIFEST: &str =
+    include_str!("../.agents/skills/PROJECT_SKILLS");
 pub const EMBEDDED_EXAMPLES_ARCHIVE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/examples_archive.bin"));
 
@@ -1502,9 +1507,9 @@ pub fn unpack_examples_archive(compressed: &[u8]) -> Result<Vec<(String, Vec<u8>
     Ok(entries)
 }
 
-/// 指定ディレクトリに同梱の `examples/` ファイルをすべて展開する。
-pub fn extract_examples_to_dir(dest_dir: &Path) -> Result<Vec<PathBuf>, String> {
-    let entries = unpack_examples_archive(EMBEDDED_EXAMPLES_ARCHIVE)?;
+/// 圧縮アーカイブを指定ディレクトリに展開する共通ヘルパー。
+fn extract_archive_to_dir(archive_bytes: &[u8], dest_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let entries = unpack_examples_archive(archive_bytes)?;
     fs::create_dir_all(dest_dir).map_err(|e| {
         format!(
             "Failed to create directory `{}`: {}",
@@ -1516,11 +1521,35 @@ pub fn extract_examples_to_dir(dest_dir: &Path) -> Result<Vec<PathBuf>, String> 
     let mut written = Vec::with_capacity(entries.len());
     for (name, bytes) in entries {
         let out_path = dest_dir.join(&name);
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| {
+                format!("Failed to create directory `{}`: {}", parent.display(), e)
+            })?;
+        }
         fs::write(&out_path, &bytes)
             .map_err(|e| format!("Failed to write `{}`: {}", out_path.display(), e))?;
         written.push(out_path);
     }
     Ok(written)
+}
+
+/// 指定ディレクトリに同梱の `examples/` ファイルをすべて展開する。
+pub fn extract_examples_to_dir(dest_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    extract_archive_to_dir(EMBEDDED_EXAMPLES_ARCHIVE, dest_dir)
+}
+
+/// 指定ディレクトリに `.agents/skills/PROJECT_SKILLS` で許可されたスキルを展開する。
+pub fn extract_project_skills_to_dir(dest_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    extract_archive_to_dir(EMBEDDED_SKILLS_ARCHIVE, dest_dir)
+}
+
+/// `PROJECT_SKILLS` マニフェスト文字列から配布対象のスキル名一覧をパースする。
+pub fn parse_project_skills_manifest(manifest: &str) -> Vec<&str> {
+    manifest
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect()
 }
 
 /// `uk examples [dest_dir]` の実装
@@ -1778,6 +1807,7 @@ Usakame のスクリプト実行環境は軽量 Ruby VM **mrubyedge** です。�
 
 * **[docs/mrubyedge_api.md](docs/mrubyedge_api.md)**: mrubyedge で利用可能な Ruby 標準クラス・メソッド一覧、および未実装メソッドと代替コード集。
 * **[docs/api.md](docs/api.md)**: Usakame エンジン固有の描画・入力・タイルマップ・バンク・サウンド API（`cls`, `spr`, `blt`, `btn`, `map`, `sfx`, `music` 等）。
+* **[.agents/skills/usakame-sprite/SKILL.md](.agents/skills/usakame-sprite/SKILL.md)** / **[usakame-sprite-fast](.agents/skills/usakame-sprite-fast/SKILL.md)**: スプライト（`@SPRITE`）やカスタムパレット（`@PALETTE`）生成用のスキルガイド。
 * **`refs/examples/*.rb`**（存在する場合、または `uk examples refs/examples` でいつでも展開可能）: 実践的なサンプルゲーム群（アクション、サバイバー、RPG、エディタ等）。
 
 ---
@@ -2082,7 +2112,7 @@ pub fn resolve_project_title(dir: &Path) -> String {
         .to_uppercase()
 }
 
-/// プロジェクトディレクトリに AGENTS.md および docs/ ディレクトリ（api.md, mrubyedge_api.md）を書き込む
+/// プロジェクトディレクトリに AGENTS.md、docs/（api.md, mrubyedge_api.md）、および許可された .agents/skills/ を書き込む
 pub fn write_project_docs(dir: &Path, project_title: &str) -> Result<Vec<PathBuf>, String> {
     let mut written_files = Vec::new();
 
@@ -2109,15 +2139,22 @@ pub fn write_project_docs(dir: &Path, project_title: &str) -> Result<Vec<PathBuf
         .map_err(|e| format!("Failed to write `{}`: {}", mruby_md_path.display(), e))?;
     written_files.push(mruby_md_path);
 
+    let skills_root = dir.join(".agents").join("skills");
+    let extracted_skills = extract_project_skills_to_dir(&skills_root)?;
+    written_files.extend(extracted_skills);
+
     Ok(written_files)
 }
 
-/// `uk update-docs [dir]` の実装（既存プロジェクトの AGENTS.md および docs/ を最新化）
+/// `uk update-docs [dir]` の実装（既存プロジェクトの AGENTS.md、docs/、および .agents/skills/ を最新化）
 pub fn cmd_update_docs(dir: &Path) -> Result<Vec<PathBuf>, String> {
     let project_title = resolve_project_title(dir);
     let files = write_project_docs(dir, &project_title)?;
 
-    println!("✨ Updated AGENTS.md and docs/ in `{}`:", dir.display());
+    println!(
+        "✨ Updated AGENTS.md, docs/, and .agents/skills/ in `{}`:",
+        dir.display()
+    );
     for f in &files {
         println!("  - {}", f.display());
     }

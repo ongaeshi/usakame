@@ -1,0 +1,6 @@
+# List of skills to copy to user projects (`uk new` / `uk update-docs`).
+# Only skills explicitly listed here (one directory name per line) are bundled.
+# Any other skill directories under `.agents/skills/` are ignored to prevent
+# accidentally distributing internal/development-only skills.
+usakame-sprite
+usakame-sprite-fast

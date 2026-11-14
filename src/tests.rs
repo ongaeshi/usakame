@@ -3778,6 +3778,8 @@ fn test_cmd_new_and_examples_archive_workflow() {
     assert!(dir_default.join("AGENTS.md").exists());
     assert!(dir_default.join("docs/api.md").exists());
     assert!(dir_default.join("docs/mrubyedge_api.md").exists());
+    assert!(dir_default.join(".agents/skills/usakame-sprite/SKILL.md").exists());
+    assert!(dir_default.join(".agents/skills/usakame-sprite-fast/SKILL.md").exists());
 
     // Compile and run generated game.rb for 30 frames
     let (_, tail_def, mrb_def) =
@@ -3808,6 +3810,7 @@ fn test_cmd_new_and_examples_archive_workflow() {
     assert!(dir_min.join("game.rb").exists());
     assert!(!dir_min.join("AGENTS.md").exists());
     assert!(!dir_min.join("docs").exists());
+    assert!(!dir_min.join(".agents").exists());
 
     let (_, tail_min, mrb_min) =
         cli::compile_ruby_script_file(&dir_min.join("game.rb")).expect("Minimal game.rb should compile");
@@ -3886,25 +3889,47 @@ fn test_cmd_update_docs_workflow() {
         existing_game_rb
     );
 
-    // AGENTS.md, docs/api.md, docs/mrubyedge_api.md が生成されていること
+    // AGENTS.md, docs/api.md, docs/mrubyedge_api.md, および許可された .agents/skills/ が生成されていること
     let agents_path = project_dir.join("AGENTS.md");
     let api_path = project_dir.join("docs").join("api.md");
     let mruby_path = project_dir.join("docs").join("mrubyedge_api.md");
+    let sprite_skill_path = project_dir
+        .join(".agents")
+        .join("skills")
+        .join("usakame-sprite")
+        .join("SKILL.md");
+    let sprite_fast_skill_path = project_dir
+        .join(".agents")
+        .join("skills")
+        .join("usakame-sprite-fast")
+        .join("SKILL.md");
 
     assert!(agents_path.exists());
     assert!(api_path.exists());
     assert!(mruby_path.exists());
+    assert!(sprite_skill_path.exists());
+    assert!(sprite_fast_skill_path.exists());
+
+    // .agents/skills/PROJECT_SKILLS に記載されたスキルのみがコピーされることを検証
+    let skill_names = cli::parse_project_skills_manifest(cli::EMBEDDED_PROJECT_SKILLS_MANIFEST);
+    assert_eq!(skill_names, vec!["usakame-sprite", "usakame-sprite-fast"]);
+    let skill_dirs: Vec<_> = std::fs::read_dir(project_dir.join(".agents").join("skills"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(skill_dirs.len(), 2);
 
     let agents_text = std::fs::read_to_string(&agents_path).unwrap();
     assert!(agents_text.contains("MY_EXISTING_SKETCHBOOK"));
     assert!(agents_text.contains("docs/mrubyedge_api.md"));
     assert!(agents_text.contains("docs/api.md"));
+    assert!(agents_text.contains(".agents/skills/usakame-sprite/SKILL.md"));
 
-    assert_eq!(updated_files.len(), 3);
+    assert_eq!(updated_files.len(), 5);
 
     // 再度実行してもエラーにならず上書き更新できること
     let updated_files2 = cli::cmd_update_docs(&project_dir).expect("second cmd_update_docs should succeed");
-    assert_eq!(updated_files2.len(), 3);
+    assert_eq!(updated_files2.len(), 5);
     assert_eq!(
         std::fs::read_to_string(&game_rb_path).unwrap(),
         existing_game_rb
