@@ -75,11 +75,14 @@ $sprites = []
 $selected_idx = 0
 $frame_idx = 0
 $list_scroll = 0
+$list_mode = :list     # :list, :grid
+$sb_dragging = false
 
 $current_tool = :pen   # :pen, :fill, :picker, :eraser, :select
 $current_col = 8
 $prev_col = 8
 $show_grid = true
+$bg_mode = :gray       # :gray, :black, :white
 
 $anim_playing = false
 $anim_timer = 0
@@ -110,8 +113,21 @@ LIST_X = 6
 LIST_Y = 24
 LIST_W = 166
 LIST_H = 310
+LIST_HEADER_H = 18
 LIST_ROW_H = 22
 LIST_VISIBLE_ROWS = 13
+
+SB_W = 8
+SB_X = LIST_X + LIST_W - SB_W - 2
+SB_Y = LIST_Y + LIST_HEADER_H
+SB_H = LIST_H - LIST_HEADER_H - 2
+
+GRID_COLS = 6
+GRID_CELL_W = 24
+GRID_CELL_H = 24
+GRID_VISIBLE_ROWS = 11
+GRID_PAD_X = LIST_X + 4
+GRID_PAD_Y = LIST_Y + LIST_HEADER_H
 
 CANVAS_BOX_X = 180
 CANVAS_BOX_Y = 24
@@ -119,6 +135,12 @@ CANVAS_BOX_SIZE = 256
 
 RIGHT_X = 446
 RIGHT_W = 188
+
+BG_MODES = [
+  [:gray, "GRAY", RIGHT_X + 26, 50],
+  [:black, "BLACK", RIGHT_X + 80, 50],
+  [:white, "WHITE", RIGHT_X + 134, 48]
+]
 
 def notify(msg)
   $notify_msg = msg
@@ -508,6 +530,7 @@ def load_all_sprites
   $floating_pixels = nil
   sync_all_thumbnails
   sync_active_sprite_to_edit_bank
+  clamp_list_scroll
 end
 
 # ------------------------------------------------------------------------------
@@ -589,6 +612,49 @@ end
 def current_sprite
   return nil if $sprites.empty?
   $sprites[$selected_idx]
+end
+
+def list_total_rows
+  return 0 if $sprites.empty?
+  if $list_mode == :grid
+    ($sprites.size + GRID_COLS - 1) / GRID_COLS
+  else
+    $sprites.size
+  end
+end
+
+def list_visible_rows
+  $list_mode == :grid ? GRID_VISIBLE_ROWS : LIST_VISIBLE_ROWS
+end
+
+def list_max_scroll
+  total = list_total_rows
+  vis = list_visible_rows
+  total > vis ? total - vis : 0
+end
+
+def clamp_list_scroll
+  max_s = list_max_scroll
+  $list_scroll = 0 if $list_scroll < 0
+  $list_scroll = max_s if $list_scroll > max_s
+end
+
+def ensure_selected_visible
+  return if $sprites.empty?
+  row = $list_mode == :grid ? ($selected_idx / GRID_COLS) : $selected_idx
+  vis = list_visible_rows
+  if row < $list_scroll
+    $list_scroll = row
+  elsif row >= $list_scroll + vis
+    $list_scroll = row - vis + 1
+  end
+  clamp_list_scroll
+end
+
+def toggle_list_mode
+  $list_mode = ($list_mode == :list) ? :grid : :list
+  ensure_selected_visible
+  sfx(:select, -1, 0.15)
 end
 
 def current_grid
@@ -1385,21 +1451,70 @@ def update
     end
   end
 
-  # 3. 左側スプライトリスト
+  # 3. 左側スプライトリスト (スクロールバー・モード切替・ホイール・クリック)
+  max_s = list_max_scroll
+  if max_s > 0
+    if btnp(:mouse_left) && hit?(mx, my, SB_X - 2, SB_Y, SB_W + 4, SB_H)
+      $sb_dragging = true
+    end
+    if $sb_dragging
+      if btn(:mouse_left)
+        total = list_total_rows
+        vis = list_visible_rows
+        thumb_h = (SB_H * vis) / total
+        thumb_h = 16 if thumb_h < 16
+        thumb_h = SB_H if thumb_h > SB_H
+        track_range = SB_H - thumb_h
+        if track_range > 0
+          pos = my - SB_Y - thumb_h / 2
+          pos = 0 if pos < 0
+          pos = track_range if pos > track_range
+          $list_scroll = (pos * max_s + track_range / 2) / track_range
+          clamp_list_scroll
+        end
+        return
+      else
+        $sb_dragging = false
+      end
+    end
+  else
+    $sb_dragging = false
+  end
+
   if hit?(mx, my, LIST_X, LIST_Y, LIST_W, LIST_H)
     wheel = mouse_wheel
-    if wheel != 0
-      max_scroll = $sprites.size > LIST_VISIBLE_ROWS ? $sprites.size - LIST_VISIBLE_ROWS : 0
-      $list_scroll -= wheel > 0 ? 1 : -1
-      $list_scroll = 0 if $list_scroll < 0
-      $list_scroll = max_scroll if $list_scroll > max_scroll
+    if wheel > 0.2
+      $list_scroll -= 1
+      clamp_list_scroll
+    elsif wheel < -0.2
+      $list_scroll += 1
+      clamp_list_scroll
     end
     if btnp(:mouse_left)
-      rel_y = my - (LIST_Y + 18)
-      if rel_y >= 0
-        row = rel_y / LIST_ROW_H
-        idx = $list_scroll + row
-        select_sprite(idx) if idx >= 0 && idx < $sprites.size
+      if hit?(mx, my, LIST_X + LIST_W - 40, LIST_Y + 2, 36, 13)
+        toggle_list_mode
+        return
+      end
+      if mx < SB_X
+        if $list_mode == :grid
+          rel_x = mx - GRID_PAD_X
+          rel_y = my - GRID_PAD_Y
+          if rel_x >= 0 && rel_y >= 0
+            col = rel_x / GRID_CELL_W
+            row = rel_y / GRID_CELL_H
+            if col < GRID_COLS && row < GRID_VISIBLE_ROWS
+              idx = ($list_scroll + row) * GRID_COLS + col
+              select_sprite(idx) if idx >= 0 && idx < $sprites.size
+            end
+          end
+        else
+          rel_y = my - (LIST_Y + LIST_HEADER_H)
+          if rel_y >= 0
+            row = rel_y / LIST_ROW_H
+            idx = $list_scroll + row
+            select_sprite(idx) if idx >= 0 && idx < $sprites.size
+          end
+        end
       end
     end
   end
@@ -1427,6 +1542,18 @@ def update
         end
         f += 1
       end
+    end
+
+    # 背景色切替ボタン
+    bi = 0
+    while bi < BG_MODES.size
+      bm = BG_MODES[bi]
+      if hit?(mx, my, bm[2], 110, bm[3], 16)
+        $bg_mode = bm[0]
+        sfx(:select, -1, 0.15)
+        return
+      end
+      bi += 1
     end
 
     # ツールボタン (5個)
@@ -1579,6 +1706,16 @@ def draw_marching_rect(x, y, w, h, tick)
   rect(x, y, w, h, col)
 end
 
+def draw_preview_bg(x, y, w, h)
+  if $bg_mode == :black
+    rectfill_rgb(x, y, w, h, 0, 0, 0)
+  elsif $bg_mode == :white
+    rectfill_rgb(x, y, w, h, 255, 255, 255)
+  else
+    rectfill_rgb(x, y, w, h, 180, 180, 180)
+  end
+end
+
 def draw
   cls(0)
 
@@ -1612,23 +1749,80 @@ def draw
   draw_btn(578, 3, 54, 15, $show_grid ? "GRID:ON" : "GRID:--", $show_grid ? 12 : 1, 6, 7)
 
   # 2. 左ペイン: スプライト一覧
+  mx = mouse_x
+  my = mouse_y
   rectfill(LIST_X, LIST_Y, LIST_W, LIST_H, 1)
   rect(LIST_X, LIST_Y, LIST_W, LIST_H, 5)
   print_text("SPRITES (#{$sprites.size})", LIST_X + 6, LIST_Y + 5, 7)
+  draw_btn(LIST_X + LIST_W - 40, LIST_Y + 2, 36, 13, $list_mode == :grid ? "LIST" : "GRID", 2, 6, 7)
   line(LIST_X, LIST_Y + 16, LIST_X + LIST_W, LIST_Y + 16, 5)
 
   if $sprites.empty?
     print_text("NO @SPRITE FOUND", LIST_X + 14, LIST_Y + 40, 8)
+  elsif $list_mode == :grid
+    hover_idx = nil
+    row = 0
+    while row < GRID_VISIBLE_ROWS
+      col = 0
+      while col < GRID_COLS
+        idx = ($list_scroll + row) * GRID_COLS + col
+        break if idx >= $sprites.size
+        item = $sprites[idx]
+        cx = GRID_PAD_X + col * GRID_CELL_W
+        cy = GRID_PAD_Y + row * GRID_CELL_H
+        is_sel = (idx == $selected_idx)
+        is_hov = hit?(mx, my, cx, cy, GRID_CELL_W, GRID_CELL_H)
+        hover_idx = idx if is_hov
+
+        rectfill(cx + 1, cy + 1, GRID_CELL_W - 2, GRID_CELL_H - 2, is_sel ? 12 : 0)
+        if is_sel
+          rect(cx + 1, cy + 1, GRID_CELL_W - 2, GRID_CELL_H - 2, 7)
+        elsif is_hov
+          rect(cx + 1, cy + 1, GRID_CELL_W - 2, GRID_CELL_H - 2, 6)
+        else
+          rect(cx + 1, cy + 1, GRID_CELL_W - 2, GRID_CELL_H - 2, 5)
+        end
+
+        if idx < 256
+          blt(cx + 4, cy + 4, THUMB_BANK, (idx % 16) * 16, (idx / 16) * 16, 16, 16, 0, 1.0, item[:pal])
+        end
+
+        if item[:dirty]
+          print_text("*", cx + GRID_CELL_W - 7, cy + 1, 10)
+        end
+        fc = item[:frames].size
+        if fc > 1
+          fc_lbl = fc <= 9 ? "#{fc}" : "+"
+          rectfill(cx + GRID_CELL_W - 8, cy + GRID_CELL_H - 10, 7, 9, 1)
+          print_text(fc_lbl, cx + GRID_CELL_W - 7, cy + GRID_CELL_H - 9, 11)
+        end
+        col += 1
+      end
+      row += 1
+    end
+
+    # グリッド下部: ホバー中または選択中のスプライト情報
+    info_y = GRID_PAD_Y + GRID_VISIBLE_ROWS * GRID_CELL_H + 2
+    line(LIST_X + 2, info_y, SB_X - 2, info_y, 5)
+    info_idx = hover_idx.nil? ? $selected_idx : hover_idx
+    if info_idx >= 0 && info_idx < $sprites.size
+      isp = $sprites[info_idx]
+      print_text(truncate_label(isp[:label], 22), LIST_X + 5, info_y + 4, 7)
+      imeta = "#{isp[:w]}x#{isp[:h]} p#{isp[:pal]}"
+      imeta += " #{isp[:frames].size}f" if isp[:frames].size > 1
+      print_text(imeta, LIST_X + 5, info_y + 14, 6)
+    end
   else
+    row_w = SB_X - LIST_X - 4
     row = 0
     while row < LIST_VISIBLE_ROWS
       idx = $list_scroll + row
       break if idx >= $sprites.size
       item = $sprites[idx]
-      ry = LIST_Y + 18 + row * LIST_ROW_H
+      ry = LIST_Y + LIST_HEADER_H + row * LIST_ROW_H
       is_sel = (idx == $selected_idx)
-      rectfill(LIST_X + 2, ry, LIST_W - 4, LIST_ROW_H - 1, is_sel ? 12 : (row % 2 == 0 ? 1 : 0))
-      rect(LIST_X + 2, ry, LIST_W - 4, LIST_ROW_H - 1, 7) if is_sel
+      rectfill(LIST_X + 2, ry, row_w, LIST_ROW_H - 1, is_sel ? 12 : (row % 2 == 0 ? 1 : 0))
+      rect(LIST_X + 2, ry, row_w, LIST_ROW_H - 1, 7) if is_sel
 
       # サムネイル (16x16)
       rectfill(LIST_X + 5, ry + 2, 16, 16, 0)
@@ -1636,14 +1830,31 @@ def draw
         blt(LIST_X + 5, ry + 2, THUMB_BANK, (idx % 16) * 16, (idx / 16) * 16, 16, 16, 0, 1.0, item[:pal])
       end
 
-      lbl = truncate_label(item[:label], 13)
+      lbl = truncate_label(item[:label], 12)
       print_text(lbl, LIST_X + 25, ry + 3, is_sel ? 7 : 6)
       meta = "#{item[:w]}x#{item[:h]} p#{item[:pal]}"
       meta += " #{item[:frames].size}f" if item[:frames].size > 1
       print_text(meta, LIST_X + 25, ry + 12, 5)
-      print_text("*", LIST_X + LIST_W - 12, ry + 6, 10) if item[:dirty]
+      print_text("*", SB_X - 9, ry + 6, 10) if item[:dirty]
       row += 1
     end
+  end
+
+  # スクロールバー描画
+  rectfill(SB_X, SB_Y, SB_W, SB_H, 0)
+  rect(SB_X, SB_Y, SB_W, SB_H, 5)
+  max_s = list_max_scroll
+  if max_s > 0
+    total = list_total_rows
+    vis = list_visible_rows
+    thumb_h = (SB_H * vis) / total
+    thumb_h = 16 if thumb_h < 16
+    thumb_h = SB_H if thumb_h > SB_H
+    track_range = SB_H - thumb_h
+    thumb_y = track_range > 0 ? SB_Y + ($list_scroll * track_range) / max_s : SB_Y
+    sb_hover = hit?(mx, my, SB_X - 2, SB_Y, SB_W + 4, SB_H)
+    thumb_col = ($sb_dragging || sb_hover) ? 7 : 6
+    rectfill(SB_X + 1, thumb_y + 1, SB_W - 2, thumb_h - 2, thumb_col)
   end
 
   # 3. 中央ペイン: ドット編集キャンバス
@@ -1666,9 +1877,14 @@ def draw
           rgb = palette_rgb(pal_id, c)
           rectfill_rgb(px, py, cell, cell, rgb[0], rgb[1], rgb[2])
         else
-          # 市松模様の透過背景
-          bg = ((x + y) % 2 == 0) ? 1 : 0
-          rectfill(px, py, cell, cell, bg)
+          # 透過背景 (ライトグレー / 黒 / 白)
+          if $bg_mode == :black
+            rectfill_rgb(px, py, cell, cell, 0, 0, 0)
+          elsif $bg_mode == :white
+            rectfill_rgb(px, py, cell, cell, 255, 255, 255)
+          else
+            rectfill_rgb(px, py, cell, cell, 180, 180, 180)
+          end
         end
         x += 1
       end
@@ -1748,9 +1964,9 @@ def draw
 
   if sp
     # 1x / 2x プレビュー
-    rectfill(RIGHT_X + 8, 44, 48, 48, 0)
+    draw_preview_bg(RIGHT_X + 8, 44, 48, 48)
     rect(RIGHT_X + 8, 44, 48, 48, 5)
-    rectfill(RIGHT_X + 62, 44, 36, 36, 0)
+    draw_preview_bg(RIGHT_X + 62, 44, 36, 36)
     rect(RIGHT_X + 62, 44, 36, 36, 5)
 
     src_x = ($frame_idx % 4) * 64
@@ -1771,6 +1987,15 @@ def draw
     else
       print_text("SINGLE FRAME", RIGHT_X + 104, 54, 5)
     end
+  end
+
+  print_text("BG", RIGHT_X + 8, 114, 6)
+  bi = 0
+  while bi < BG_MODES.size
+    bm = BG_MODES[bi]
+    active = ($bg_mode == bm[0])
+    draw_btn(bm[2], 110, bm[3], 16, bm[1], active ? 12 : 2, active ? 7 : 5, active ? 7 : 6)
+    bi += 1
   end
 
   # ツールボタン
