@@ -11,7 +11,7 @@
 # - Ctrl+S のみで非破壊インプレース保存（コメント・空行・ヘッダー・他ブロック完全保持）
 # - ドット編集ツール: PEN / ERASER / FILL / PICKER / SELECT (矩形選択＆移動)
 # - コピー＆ペースト (Ctrl+C / Ctrl+X / Ctrl+V / Ctrl+A / Del)
-# - 反転 (H/V)・90度回転 (R)・1pxシフト (矢印)・グリッド (G)
+# - 反転 (H/V)・90度回転 (R)・1pxシフト (Ctrl+矢印)・グリッド (G)・カラー選択 (0-7 / Shift+0-7)
 # - Ctrl+Z のみで Undo / Ctrl+Y または Ctrl+Shift+Z で Redo
 # ==============================================================================
 
@@ -2035,6 +2035,7 @@ def select_sprite(new_idx)
   $frame_idx = 0
   $anim_playing = false
   sync_active_sprite_to_edit_bank
+  ensure_selected_visible
   sfx(:select, -1, 0.2)
 end
 
@@ -2046,13 +2047,15 @@ def switch_tool(new_tool)
   sfx(:select, -1, 0.15)
 end
 
+COLOR_KEYS = [:key_0, :key_1, :key_2, :key_3, :key_4, :key_5, :key_6, :key_7]
+
 # 縦型ツールバーのボタン定義 [id, x, y, w, h, icon_sym, hint]
 TOOL_BUTTONS = [
-  [:pen,    TOOL_X + 3,  TOOL_Y + 4,   19, 20, :pen,    "PEN: Draw pixels [B / 1]"],
-  [:eraser, TOOL_X + 24, TOOL_Y + 4,   19, 20, :eraser, "ERASER: Erase to transparent [E / 4 / X]"],
-  [:fill,   TOOL_X + 3,  TOOL_Y + 27,  19, 20, :fill,   "FILL: Flood fill [F / 2] (R-Click: Erase)"],
-  [:picker, TOOL_X + 24, TOOL_Y + 27,  19, 20, :picker, "PICKER: Eyedropper [I / 3 / R-Click]"],
-  [:select, TOOL_X + 3,  TOOL_Y + 50,  40, 20, :select, "SELECT: Box select & move [M / 5]"]
+  [:pen,    TOOL_X + 3,  TOOL_Y + 4,   19, 20, :pen,    "PEN: Draw pixels [B]"],
+  [:eraser, TOOL_X + 24, TOOL_Y + 4,   19, 20, :eraser, "ERASER: Erase to transparent [E / X]"],
+  [:fill,   TOOL_X + 3,  TOOL_Y + 27,  19, 20, :fill,   "FILL: Flood fill [F] (R-Click: Erase)"],
+  [:picker, TOOL_X + 24, TOOL_Y + 27,  19, 20, :picker, "PICKER: Eyedropper [I / R-Click]"],
+  [:select, TOOL_X + 3,  TOOL_Y + 50,  40, 20, :select, "SELECT: Box select & move [M]"]
 ]
 
 ACTION_BUTTONS = [
@@ -2060,10 +2063,10 @@ ACTION_BUTTONS = [
   [:flipv, TOOL_X + 24, TOOL_Y + 78,  19, 20, :flipv, "FLIP V: Mirror vertically [V]"],
   [:rot90, TOOL_X + 3,  TOOL_Y + 101, 19, 20, :rot90, "ROTATE: 90 deg clockwise [R]"],
   [:clear, TOOL_X + 24, TOOL_Y + 101, 19, 20, :clear, "CLEAR: Clear canvas or selection [Del]"],
-  [:left,  TOOL_X + 3,  TOOL_Y + 129, 19, 20, :left,  "SHIFT LEFT: Move 1px left [Left]"],
-  [:right, TOOL_X + 24, TOOL_Y + 129, 19, 20, :right, "SHIFT RIGHT: Move 1px right [Right]"],
-  [:up,    TOOL_X + 3,  TOOL_Y + 152, 19, 20, :up,    "SHIFT UP: Move 1px up [Up]"],
-  [:down,  TOOL_X + 24, TOOL_Y + 152, 19, 20, :down,  "SHIFT DOWN: Move 1px down [Down]"]
+  [:left,  TOOL_X + 3,  TOOL_Y + 129, 19, 20, :left,  "SHIFT LEFT: Move 1px left [Ctrl+Left]"],
+  [:right, TOOL_X + 24, TOOL_Y + 129, 19, 20, :right, "SHIFT RIGHT: Move 1px right [Ctrl+Right]"],
+  [:up,    TOOL_X + 3,  TOOL_Y + 152, 19, 20, :up,    "SHIFT UP: Move 1px up [Ctrl+Up]"],
+  [:down,  TOOL_X + 24, TOOL_Y + 152, 19, 20, :down,  "SHIFT DOWN: Move 1px down [Ctrl+Down]"]
 ]
 
 def trigger_action_btn(act)
@@ -2140,14 +2143,38 @@ def update
     elsif btnp(:key_g)
       open_ai_modal
       return
+    elsif btnp(:left)
+      shift_active(-1, 0)
+      return
+    elsif btnp(:right)
+      shift_active(1, 0)
+      return
+    elsif btnp(:up)
+      shift_active(0, -1)
+      return
+    elsif btnp(:down)
+      shift_active(0, 1)
+      return
     end
   else
     # 単キーショートカット
-    switch_tool(:pen) if btnp(:key_b) || btnp(:key_1)
-    switch_tool(:fill) if btnp(:key_f) || btnp(:key_2)
-    switch_tool(:picker) if btnp(:key_i) || btnp(:key_3)
-    switch_tool(:eraser) if btnp(:key_e) || btnp(:key_4)
-    switch_tool(:select) if btnp(:key_m) || btnp(:key_5)
+    switch_tool(:pen) if btnp(:key_b)
+    switch_tool(:fill) if btnp(:key_f)
+    switch_tool(:picker) if btnp(:key_i)
+    switch_tool(:eraser) if btnp(:key_e)
+    switch_tool(:select) if btnp(:key_m)
+
+    # カラー選択ホットキー (0-7 / Shift+0-7)
+    ci = 0
+    while ci < 8
+      if btnp(COLOR_KEYS[ci])
+        $current_col = shift ? (ci + 8) : ci
+        $current_tool = :pen if $current_tool == :eraser || $current_tool == :picker
+        sfx(:select, -1, 0.15)
+        break
+      end
+      ci += 1
+    end
 
     # X キーで PEN <-> ERASER トグル
     if btnp(:key_x)
@@ -2165,10 +2192,18 @@ def update
     clear_active if btnp(:delete) || btnp(:backspace)
     clear_rect_selection(true) if btnp(:escape) && $rect_sel
 
-    shift_active(-1, 0) if btnp(:left)
-    shift_active(1, 0) if btnp(:right)
-    shift_active(0, -1) if btnp(:up)
-    shift_active(0, 1) if btnp(:down)
+    # 矢印キーでスプライト一覧の項目を移動
+    if $sprites.size > 0
+      if $list_mode == :grid
+        select_sprite($selected_idx - 1) if btnp(:left)
+        select_sprite($selected_idx + 1) if btnp(:right)
+        select_sprite($selected_idx - GRID_COLS) if btnp(:up)
+        select_sprite($selected_idx + GRID_COLS) if btnp(:down)
+      else
+        select_sprite($selected_idx - 1) if btnp(:up)
+        select_sprite($selected_idx + 1) if btnp(:down)
+      end
+    end
 
     sp = current_sprite
     if sp && sp[:frames].size > 1
@@ -2543,11 +2578,6 @@ def draw
   # 1. トップバー (368x18)
   rectfill(0, 0, SCREEN_W, TOP_BAR_H, 1)
   line(0, TOP_BAR_H, SCREEN_W, TOP_BAR_H, 5)
-  print_text("SPR ED", 5, 5, 7)
-
-  path_lbl = truncate_label($save_path, 22)
-  path_lbl += "*" if dirty
-  print_text(path_lbl, 48, 5, dirty ? 10 : 6)
 
   can_ai = !sp.nil? && !$is_read_only
   draw_mini_btn(226, 2, 26, 14, "AI", can_ai ? 13 : 1, can_ai ? 14 : 5, can_ai ? 7 : 5, "AI EDIT: Edit sprite with prompt [Ctrl+G]")
@@ -2870,7 +2900,8 @@ def draw
     rectfill_rgb(px, py, SWATCH_W, SWATCH_H, rgb[0], rgb[1], rgb[2])
     is_cur = ($current_col == c && $current_tool != :eraser)
     hov_sw = hit?(mx, my, px, py, SWATCH_W, SWATCH_H)
-    $hover_hint = "COLOR #{c} (##{HEX_CHARS[c]} #{COLOR_NAMES[c]})" if hov_sw
+    hotkey = c < 8 ? "#{c}" : "Shift+#{c - 8}"
+    $hover_hint = "COLOR #{c} (##{HEX_CHARS[c]} #{COLOR_NAMES[c]}) [#{hotkey}]" if hov_sw
     rect(px, py, SWATCH_W, SWATCH_H, is_cur ? 7 : (hov_sw ? 6 : 0))
     rect(px - 1, py - 1, SWATCH_W + 2, SWATCH_H + 2, 10) if is_cur
     c += 1
