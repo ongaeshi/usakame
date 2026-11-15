@@ -110,6 +110,13 @@ $ui_tick = 0
 $hover_canvas_pos = nil
 $hover_hint = nil
 
+$ai_modal_open = false
+$ai_prompt = ""
+$ai_status = :input   # :input, :loading, :error
+$ai_job_id = nil
+$ai_error = ""
+$ai_bs_hold = 0
+
 # ------------------------------------------------------------------------------
 # レイアウト定数 (案C: 368x304 2列スリム構成)
 # ------------------------------------------------------------------------------
@@ -1672,6 +1679,341 @@ def launch_target_app
   end
 end
 
+# ------------------------------------------------------------------------------
+# AI スプライト編集 (LLM プロンプト入力 & 非破壊メモリ反映)
+# ------------------------------------------------------------------------------
+AI_MODAL_X = 24
+AI_MODAL_Y = 60
+AI_MODAL_W = 320
+AI_MODAL_H = 184
+AI_GEN_BTN_X = 184
+AI_GEN_BTN_Y = 218
+AI_BTN_W = 72
+AI_BTN_H = 18
+AI_CANCEL_BTN_X = 264
+AI_CANCEL_BTN_Y = 218
+
+def grid_to_text(grid)
+  return "" unless grid
+  lines = []
+  y = 0
+  while y < grid.size
+    row = grid[y]
+    line = ""
+    x = 0
+    while x < row.size
+      line += col_to_hex(row[x])
+      x += 1
+    end
+    lines << line
+    y += 1
+  end
+  lines.join("\n")
+end
+
+def palette_info_text(pal_id)
+  parts = []
+  c = 0
+  while c < 16
+    rgb = palette_rgb(pal_id, c)
+    hex_rgb = sprintf("#%02X%02X%02X", rgb[0], rgb[1], rgb[2])
+    parts << "#{HEX_CHARS[c]}:#{hex_rgb}"
+    c += 1
+  end
+  parts.join(" ")
+end
+
+def apply_ai_grid_to_current(grid_text)
+  sp = current_sprite
+  return false unless sp && grid_text
+  raw_lines = grid_text.split("\n")
+  lines = []
+  i = 0
+  while i < raw_lines.size
+    s = raw_lines[i].strip
+    lines << s if s.length > 0
+    i += 1
+  end
+  return false if lines.size != sp[:h]
+
+  new_grid = []
+  y = 0
+  while y < sp[:h]
+    line = lines[y]
+    return false if line.length != sp[:w]
+    row = Array.new(sp[:w], nil)
+    x = 0
+    while x < sp[:w]
+      ch = line[x, 1]
+      row[x] = (ch == ".") ? nil : parse_hex_char(ch)
+      x += 1
+    end
+    new_grid << row
+    y += 1
+  end
+
+  commit_floating_selection(false) if $floating_pixels
+  clear_rect_selection(false)
+  push_undo_state
+  sp[:frames][$frame_idx] = new_grid
+  refresh_dirty_flag(sp)
+  sync_active_sprite_to_edit_bank
+  sync_current_thumbnail
+  true
+end
+
+def open_ai_modal
+  sp = current_sprite
+  unless sp
+    notify("NO SPRITE SELECTED")
+    return
+  end
+  if $is_read_only
+    notify("READ-ONLY: CANNOT EDIT")
+    return
+  end
+  key_chars if respond_to?(:key_chars)
+  $ai_modal_open = true
+  $ai_status = :input
+  $ai_error = ""
+  $ai_bs_hold = 0
+  $ai_job_id = nil
+  sfx(:select, -1, 0.2)
+end
+
+def close_ai_modal
+  if $ai_status == :loading && $ai_job_id && respond_to?(:llm_edit_sprite_cancel)
+    llm_edit_sprite_cancel($ai_job_id)
+  end
+  $ai_modal_open = false
+  $ai_job_id = nil
+  $ai_status = :input
+  $ai_error = ""
+end
+
+def submit_ai_prompt
+  sp = current_sprite
+  return unless sp
+  p_str = $ai_prompt.strip
+  if p_str.empty?
+    $ai_status = :error
+    $ai_error = "Please enter an edit prompt."
+    return
+  end
+  unless respond_to?(:llm_edit_sprite_start)
+    $ai_status = :error
+    $ai_error = "LLM API is not available."
+    return
+  end
+  res = llm_edit_sprite_start(
+    sp[:w],
+    sp[:h],
+    sp[:label],
+    grid_to_text(current_grid),
+    palette_info_text(sp[:pal]),
+    p_str
+  )
+  if res && res[:ok]
+    $ai_job_id = res[:id]
+    $ai_status = :loading
+    $ai_error = ""
+    sfx(:select, -1, 0.2)
+  else
+    $ai_status = :error
+    $ai_error = (res && res[:error]) ? res[:error] : "Failed to start LLM edit."
+  end
+end
+
+def wrap_text_lines(text, max_px)
+  return [""] if text.nil? || text.empty?
+  lines = []
+  cur = ""
+  cur_w = 0
+  chars = text.chars
+  i = 0
+  while i < chars.size
+    ch = chars[i]
+    if ch == "\n"
+      lines << cur
+      cur = ""
+      cur_w = 0
+    else
+      cw = ch.bytesize == 1 ? 6 : 8
+      if cur_w + cw > max_px && cur.length > 0
+        lines << cur
+        cur = ch
+        cur_w = cw
+      else
+        cur += ch
+        cur_w += cw
+      end
+    end
+    i += 1
+  end
+  lines << cur
+  lines
+end
+
+def update_ai_modal
+  mx = mouse_x
+  my = mouse_y
+
+  if btnp(:escape)
+    close_ai_modal
+    return
+  end
+
+  if btnp(:mouse_left)
+    if hit?(mx, my, AI_CANCEL_BTN_X, AI_CANCEL_BTN_Y, AI_BTN_W, AI_BTN_H)
+      close_ai_modal
+      return
+    end
+    if $ai_status != :loading && hit?(mx, my, AI_GEN_BTN_X, AI_GEN_BTN_Y, AI_BTN_W, AI_BTN_H)
+      submit_ai_prompt
+      return
+    end
+  end
+
+  if $ai_status == :loading
+    if $ai_job_id && respond_to?(:llm_edit_sprite_poll)
+      res = llm_edit_sprite_poll($ai_job_id)
+      if res
+        st = res[:status]
+        if st == "done"
+          if apply_ai_grid_to_current(res[:grid])
+            $ai_modal_open = false
+            $ai_job_id = nil
+            $ai_prompt = ""
+            $ai_status = :input
+            sfx(:select, -1, 0.35)
+            notify("AI EDITED (PRESS CTRL+S TO SAVE)")
+          else
+            $ai_status = :error
+            $ai_error = "Invalid sprite grid returned by LLM."
+            $ai_job_id = nil
+          end
+        elsif st == "error"
+          $ai_status = :error
+          $ai_error = res[:error] || "LLM request failed."
+          $ai_job_id = nil
+        end
+      end
+    end
+    return
+  end
+
+  ctrl = btn(:ctrl) || btn(:rctrl)
+  if ctrl && btnp(:key_v)
+    clip = get_clipboard
+    if clip && clip.length > 0
+      clean = clip.split("\r").join("").split("\n").join(" ")
+      $ai_prompt += clean
+      $ai_status = :input if $ai_status == :error
+    end
+    return
+  end
+
+  chars = respond_to?(:key_chars) ? key_chars : ""
+  if chars && chars.length > 0
+    $ai_prompt += chars
+    $ai_status = :input if $ai_status == :error
+  end
+
+  if btnp(:backspace)
+    cs = $ai_prompt.chars
+    if !cs.empty?
+      cs.pop
+      $ai_prompt = cs.join("")
+    end
+    $ai_bs_hold = 0
+  elsif btn(:backspace)
+    $ai_bs_hold += 1
+    if $ai_bs_hold > 20 && ($ai_bs_hold % 3) == 0
+      cs = $ai_prompt.chars
+      if !cs.empty?
+        cs.pop
+        $ai_prompt = cs.join("")
+      end
+    end
+  else
+    $ai_bs_hold = 0
+  end
+
+  if btnp(:key_enter)
+    submit_ai_prompt
+  end
+end
+
+def draw_ai_modal
+  # 背景を暗くする枠
+  rectfill(AI_MODAL_X - 2, AI_MODAL_Y - 2, AI_MODAL_W + 4, AI_MODAL_H + 4, 0)
+  rectfill(AI_MODAL_X, AI_MODAL_Y, AI_MODAL_W, AI_MODAL_H, 1)
+  rect(AI_MODAL_X, AI_MODAL_Y, AI_MODAL_W, AI_MODAL_H, 12)
+
+  # タイトルバー
+  rectfill(AI_MODAL_X, AI_MODAL_Y, AI_MODAL_W, 16, 13)
+  line(AI_MODAL_X, AI_MODAL_Y + 16, AI_MODAL_X + AI_MODAL_W, AI_MODAL_Y + 16, 12)
+  print_text("AI SPRITE EDIT", AI_MODAL_X + 6, AI_MODAL_Y + 4, 7)
+
+  sp = current_sprite
+  if sp
+    lbl = "TARGET: #{truncate_label(sp[:label], 16)} (#{sp[:w]}x#{sp[:h]}"
+    lbl += " F#{$frame_idx + 1}" if sp[:frames].size > 1
+    lbl += ")"
+    print_text(lbl, AI_MODAL_X + 8, AI_MODAL_Y + 23, 6)
+  end
+
+  # プロンプト入力ボックス
+  box_x = AI_MODAL_X + 8
+  box_y = AI_MODAL_Y + 36
+  box_w = AI_MODAL_W - 16
+  box_h = 68
+  rectfill(box_x, box_y, box_w, box_h, 0)
+  rect(box_x, box_y, box_w, box_h, $ai_status == :loading ? 5 : 7)
+
+  if $ai_prompt.empty? && $ai_status != :loading
+    print_text("Enter edit prompt...", box_x + 5, box_y + 6, 5)
+    print_text("e.g. add a gold crown / change to blue", box_x + 5, box_y + 18, 5)
+  end
+
+  cursor_on = ($ai_status != :loading) && (($ui_tick / 20) % 2 == 0)
+  disp_text = cursor_on ? ($ai_prompt + "|") : $ai_prompt
+  lines = wrap_text_lines(disp_text, box_w - 10)
+  max_lines = 6
+  start_idx = lines.size > max_lines ? (lines.size - max_lines) : 0
+  li = start_idx
+  row_y = box_y + 5
+  while li < lines.size
+    print_text(lines[li], box_x + 5, row_y, 7)
+    row_y += 10
+    li += 1
+  end
+
+  # ステータス / エラー / ヒント
+  msg_y = AI_MODAL_Y + 112
+  if $ai_status == :loading
+    dots = "." * ((($ui_tick / 15) % 3) + 1)
+    print_text("GENERATING WITH LLM#{dots}", box_x, msg_y, 11)
+    print_text("Editing in memory (not saved to file).", box_x, msg_y + 12, 6)
+  elsif $ai_status == :error && $ai_error.length > 0
+    err_lines = wrap_text_lines($ai_error, box_w)
+    ei = 0
+    while ei < err_lines.size && ei < 3
+      print_text(err_lines[ei], box_x, msg_y + ei * 10, 8)
+      ei += 1
+    end
+  else
+    print_text("Enter:Generate  Ctrl+V:Paste  Esc:Cancel", box_x, msg_y, 6)
+    print_text("Changes apply in editor only (Ctrl+S to save).", box_x, msg_y + 12, 5)
+  end
+
+  # ボタン
+  if $ai_status != :loading
+    draw_mini_btn(AI_GEN_BTN_X, AI_GEN_BTN_Y, AI_BTN_W, AI_BTN_H, "GENERATE", 3, 11, 7)
+  end
+  draw_mini_btn(AI_CANCEL_BTN_X, AI_CANCEL_BTN_Y, AI_BTN_W, AI_BTN_H, "CANCEL", 2, 6, 7)
+end
+
 # 初回ロード & アイコン登録
 init_ui_icons
 load_all_sprites
@@ -1748,6 +2090,11 @@ def update
   $ui_tick += 1
   $notify_timer -= 1 if $notify_timer > 0
 
+  if $ai_modal_open
+    update_ai_modal
+    return
+  end
+
   # 外部ファイル変更のホットリロード (未保存変更がない場合のみ)
   if $save_path && !any_dirty?
     cur_mtime = file_mtime($save_path)
@@ -1789,6 +2136,9 @@ def update
       return
     elsif btnp(:key_v)
       paste_selection
+      return
+    elsif btnp(:key_g)
+      open_ai_modal
       return
     end
   else
@@ -1849,8 +2199,12 @@ def update
     end
   end
 
-  # 2. トップバーアイコンボタンクリック (x = 256 + i * 18, y = 2, w = 16, h = 14)
+  # 2. トップバーアイコンボタンクリック (AI: x=226, 他: x = 256 + i * 18, y = 2, w = 16, h = 14)
   if btnp(:mouse_left)
+    if hit?(mx, my, 226, 2, 26, 14)
+      open_ai_modal
+      return
+    end
     if hit?(mx, my, 256, 2, 16, 14)
       launch_target_app
       return
@@ -2195,6 +2549,9 @@ def draw
   path_lbl += "*" if dirty
   print_text(path_lbl, 48, 5, dirty ? 10 : 6)
 
+  can_ai = !sp.nil? && !$is_read_only
+  draw_mini_btn(226, 2, 26, 14, "AI", can_ai ? 13 : 1, can_ai ? 14 : 5, can_ai ? 7 : 5, "AI EDIT: Edit sprite with prompt [Ctrl+G]")
+
   can_run = !$run_target_path.nil?
   draw_icon_btn(256, 2, 16, 14, :run, can_run ? 3 : 1, can_run ? 11 : 5, can_run, "RUN: Launch #{$run_target_path || 'game.rb'}")
 
@@ -2536,4 +2893,6 @@ def draw
   else
     print_text("B:Pen E:Erase F:Fill I:Pick M:Sel G:Grid ^S:Save", 6, STATUS_BAR_Y + 4, 6)
   end
+
+  draw_ai_modal if $ai_modal_open
 end

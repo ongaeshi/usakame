@@ -2270,6 +2270,7 @@ pub fn parse_button_name(name: &str) -> Option<ButtonId> {
 
         // --- 特殊キー ---
         "tab" => Some(ButtonId::Key(KeyCode::Tab)),
+        "key_enter" => Some(ButtonId::Key(KeyCode::Enter)),
         "ctrl" | "lctrl" | "control" => Some(ButtonId::Key(KeyCode::LeftControl)),
         "rctrl" => Some(ButtonId::Key(KeyCode::RightControl)),
         "shift" | "lshift" => Some(ButtonId::Key(KeyCode::LeftShift)),
@@ -6307,6 +6308,190 @@ fn register_engine_api(
         Box::new(move |vm, args| get_clip_2(vm, args)),
     );
 
+    // key_chars: このフレームに入力された印字可能文字を文字列として返す（日本語・IME入力含む）
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "key_chars",
+        Box::new(move |_vm, _args| {
+            let mut out = String::new();
+            if !headless {
+                while let Some(ch) = get_char_pressed() {
+                    if !ch.is_control() {
+                        out.push(ch);
+                    }
+                }
+            }
+            Ok(Rc::new(RObject::string(out)))
+        }),
+    );
+
+    // llm_edit_sprite_start(w, h, label, current_grid, palette_info, prompt)
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "llm_edit_sprite_start",
+        Box::new(move |_vm, args| {
+            let w = arg_i32(args, 0, 16).max(1) as usize;
+            let h = arg_i32(args, 1, 16).max(1) as usize;
+            let label = args
+                .get(2)
+                .and_then(|v| String::try_from(v.as_ref()).ok())
+                .unwrap_or_default();
+            let current_grid = args
+                .get(3)
+                .and_then(|v| String::try_from(v.as_ref()).ok())
+                .unwrap_or_default();
+            let palette_info = args
+                .get(4)
+                .and_then(|v| String::try_from(v.as_ref()).ok())
+                .unwrap_or_default();
+            let prompt = args
+                .get(5)
+                .and_then(|v| String::try_from(v.as_ref()).ok())
+                .unwrap_or_default();
+
+            if prompt.trim().is_empty() {
+                return Ok(make_symbol_hash(vec![
+                    ("ok", Rc::new(RObject::boolean(false))),
+                    (
+                        "error",
+                        Rc::new(RObject::string("Prompt is empty.".to_string())),
+                    ),
+                ]));
+            }
+
+            if headless {
+                return Ok(make_symbol_hash(vec![
+                    ("ok", Rc::new(RObject::boolean(false))),
+                    (
+                        "error",
+                        Rc::new(RObject::string(
+                            "LLM edit is disabled in headless mode.".to_string(),
+                        )),
+                    ),
+                ]));
+            }
+
+            #[cfg(target_arch = "wasm32")]
+            {
+                return Ok(make_symbol_hash(vec![
+                    ("ok", Rc::new(RObject::boolean(false))),
+                    (
+                        "error",
+                        Rc::new(RObject::string(
+                            "LLM edit is not supported on WASM.".to_string(),
+                        )),
+                    ),
+                ]));
+            }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let provider = match llm::resolve_llm_provider(None, None) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return Ok(make_symbol_hash(vec![
+                            ("ok", Rc::new(RObject::boolean(false))),
+                            ("error", Rc::new(RObject::string(e))),
+                        ]));
+                    }
+                };
+                let job_id =
+                    LLM_SPRITE_NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if let Ok(mut map) = llm_sprite_jobs().lock() {
+                    map.insert(job_id, LlmSpriteEditJob::Pending);
+                }
+                std::thread::spawn(move || {
+                    let res = llm::edit_sprite_with_provider(
+                        &provider,
+                        w,
+                        h,
+                        &label,
+                        &current_grid,
+                        &palette_info,
+                        &prompt,
+                    );
+                    if let Ok(mut map) = llm_sprite_jobs().lock() {
+                        if map.contains_key(&job_id) {
+                            map.insert(job_id, LlmSpriteEditJob::Done(res));
+                        }
+                    }
+                });
+                Ok(make_symbol_hash(vec![
+                    ("ok", Rc::new(RObject::boolean(true))),
+                    ("id", Rc::new(RObject::integer(job_id as i64))),
+                ]))
+            }
+        }),
+    );
+
+    // llm_edit_sprite_poll(job_id)
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "llm_edit_sprite_poll",
+        Box::new(move |_vm, args| {
+            let job_id = arg_i32(args, 0, 0) as u64;
+            let mut map = match llm_sprite_jobs().lock() {
+                Ok(m) => m,
+                Err(_) => {
+                    return Ok(make_symbol_hash(vec![
+                        ("status", Rc::new(RObject::string("error".to_string()))),
+                        (
+                            "error",
+                            Rc::new(RObject::string("Lock poisoned".to_string())),
+                        ),
+                    ]));
+                }
+            };
+            match map.get(&job_id) {
+                Some(LlmSpriteEditJob::Pending) => Ok(make_symbol_hash(vec![(
+                    "status",
+                    Rc::new(RObject::string("pending".to_string())),
+                )])),
+                Some(LlmSpriteEditJob::Done(_)) => {
+                    let done = map.remove(&job_id);
+                    match done {
+                        Some(LlmSpriteEditJob::Done(Ok(grid))) => Ok(make_symbol_hash(vec![
+                            ("status", Rc::new(RObject::string("done".to_string()))),
+                            ("grid", Rc::new(RObject::string(grid))),
+                        ])),
+                        Some(LlmSpriteEditJob::Done(Err(e))) => Ok(make_symbol_hash(vec![
+                            ("status", Rc::new(RObject::string("error".to_string()))),
+                            ("error", Rc::new(RObject::string(e))),
+                        ])),
+                        _ => Ok(make_symbol_hash(vec![(
+                            "status",
+                            Rc::new(RObject::string("error".to_string())),
+                        )])),
+                    }
+                }
+                None => Ok(make_symbol_hash(vec![
+                    ("status", Rc::new(RObject::string("error".to_string()))),
+                    (
+                        "error",
+                        Rc::new(RObject::string("Unknown or cancelled job".to_string())),
+                    ),
+                ])),
+            }
+        }),
+    );
+
+    // llm_edit_sprite_cancel(job_id)
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "llm_edit_sprite_cancel",
+        Box::new(move |_vm, args| {
+            let job_id = arg_i32(args, 0, 0) as u64;
+            if let Ok(mut map) = llm_sprite_jobs().lock() {
+                map.remove(&job_id);
+            }
+            Ok(Rc::new(RObject::boolean(true)))
+        }),
+    );
+
     if headless {
         // ヘッドレステスト用スタブ登録 (図形ラスタライズ・カメラ・クリッピング・パレット変換および絵文字キャッシュ抽出も検証可能にする)
         let state_for_cls = draw_state.clone();
@@ -9321,6 +9506,32 @@ thread_local! {
     static SUB_GAME_MGR: RefCell<SubGameManager> = RefCell::new(SubGameManager::new());
     static CURRENT_VIRTUAL_CAMERA: RefCell<Option<Camera2D>> = RefCell::new(None);
     static CLIPBOARD_BUFFER: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+enum LlmSpriteEditJob {
+    Pending,
+    Done(Result<String, String>),
+}
+
+static LLM_SPRITE_JOBS: std::sync::OnceLock<std::sync::Mutex<HashMap<u64, LlmSpriteEditJob>>> =
+    std::sync::OnceLock::new();
+static LLM_SPRITE_NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn llm_sprite_jobs() -> &'static std::sync::Mutex<HashMap<u64, LlmSpriteEditJob>> {
+    LLM_SPRITE_JOBS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn make_symbol_hash(pairs: Vec<(&str, Rc<RObject>)>) -> Rc<RObject> {
+    let mut hash = mrubyedge::yamrb::value::RHash::default();
+    for (k, v) in pairs {
+        let sym_obj = Rc::new(RObject::symbol(mrubyedge::yamrb::value::RSym::new(
+            k.to_string(),
+        )));
+        if let Ok(hkey) = sym_obj.as_hash_key() {
+            hash.insert(hkey, (sym_obj, v));
+        }
+    }
+    Rc::new(RObject::hash(hash))
 }
 
 pub async fn process_sub_game_audio() {

@@ -657,3 +657,187 @@ pub fn generate_verified_game_rb(
         call_llm_http_api(&provider, &system_prompt, conv)
     })
 }
+
+/// スプライト編集用のシステムプロンプトを構築する
+pub fn build_sprite_edit_system_prompt() -> String {
+    r#"You are an expert pixel artist for the **Usakame (`uk`)** retro game engine.
+Your job is to edit or create a single sprite frame in Usakame's `@SPRITE` text format.
+
+# FORMAT RULES
+1. Output **ONLY** the pixel grid rows (exact height `H` lines, each line exact width `W` characters).
+2. Do NOT include `@SPRITE` headers, `---` separators, comments, or explanations.
+3. Valid pixel characters:
+   - `.` : Transparent pixel
+   - `0`..`9`, `A`..`F` : Palette color index 0..15 (uppercase hex)
+4. Every row MUST have the exact same width `W` and there MUST be exactly `H` rows.
+5. Make the pixel art clean, readable, and faithful to the user's edit request while preserving unmentioned details of the existing sprite when editing."#
+        .to_string()
+}
+
+/// LLM の応答から `@SPRITE` ピクセルグリッド（W x H）を抽出して検証・正規化する
+pub fn extract_and_validate_sprite_grid(
+    raw: &str,
+    w: usize,
+    h: usize,
+) -> Result<String, String> {
+    if w == 0 || h == 0 {
+        return Err("Sprite dimensions must be positive".to_string());
+    }
+
+    let trimmed = raw.trim();
+    let mut in_fence = false;
+    let mut fence_lines: Vec<&str> = Vec::new();
+    for line in trimmed.lines() {
+        let l = line.trim();
+        if !in_fence {
+            if l.starts_with("```") {
+                in_fence = true;
+                continue;
+            }
+        } else if l == "```" {
+            break;
+        } else {
+            fence_lines.push(line);
+        }
+    }
+
+    let candidate_text = if !fence_lines.is_empty() {
+        fence_lines.join("\n")
+    } else {
+        trimmed.to_string()
+    };
+
+    let mut valid_rows: Vec<String> = Vec::new();
+    let mut exact_rows: Vec<String> = Vec::new();
+
+    for line in candidate_text.lines() {
+        let t = line.trim();
+        if t.is_empty()
+            || t.starts_with('#')
+            || t.starts_with('@')
+            || t == "---"
+            || t.starts_with("```")
+        {
+            continue;
+        }
+        let mut norm = String::with_capacity(t.len());
+        let mut all_valid = true;
+        for ch in t.chars() {
+            match ch {
+                '0'..='9' | 'A'..='F' | '.' => norm.push(ch),
+                'a'..='f' => norm.push(ch.to_ascii_uppercase()),
+                _ => {
+                    all_valid = false;
+                    break;
+                }
+            }
+        }
+        if all_valid && !norm.is_empty() {
+            if norm.len() == w {
+                exact_rows.push(norm.clone());
+            }
+            valid_rows.push(norm);
+        }
+    }
+
+    if exact_rows.len() >= h {
+        return Ok(exact_rows[..h].join("\n"));
+    }
+
+    if valid_rows.len() >= h {
+        let slice = &valid_rows[..h];
+        let min_w = w.saturating_sub(2).max(1);
+        let max_w = w + 2;
+        if slice.iter().all(|r| r.len() >= min_w && r.len() <= max_w) {
+            let adjusted: Vec<String> = slice
+                .iter()
+                .map(|r| {
+                    let mut s = r.clone();
+                    if s.len() > w {
+                        s.truncate(w);
+                    } else {
+                        while s.len() < w {
+                            s.push('.');
+                        }
+                    }
+                    s
+                })
+                .collect();
+            return Ok(adjusted.join("\n"));
+        }
+    }
+
+    Err(format!(
+        "Expected {} rows of {} characters (0-9, A-F, .), got {} valid rows ({} exact width).",
+        h,
+        w,
+        valid_rows.len(),
+        exact_rows.len()
+    ))
+}
+
+/// バックエンド関数を用いてスプライトを編集し、W x H 形式を検証（必要なら1回自己修復リトライ）する
+pub fn edit_sprite_with_backend<F>(
+    w: usize,
+    h: usize,
+    sprite_label: &str,
+    current_grid: &str,
+    palette_info: &str,
+    user_prompt: &str,
+    mut call_backend: F,
+) -> Result<String, String>
+where
+    F: FnMut(&[(String, String)]) -> Result<String, String>,
+{
+    let initial_msg = format!(
+        "Edit the following Usakame sprite `{}` ({}x{}).\n\nPalette (hex index -> RGB):\n{}\n\nCurrent sprite ({} rows x {} cols):\n```\n{}\n```\n\nUser edit request:\n{}\n\nOutput ONLY the edited {} rows of {} characters (`0`-`9`, `A`-`F`, `.`).",
+        sprite_label, w, h, palette_info, h, w, current_grid, user_prompt, h, w
+    );
+
+    let mut conversation: Vec<(String, String)> = vec![("user".to_string(), initial_msg)];
+    let mut last_err = String::new();
+
+    for attempt in 1..=2 {
+        let raw_response = call_backend(&conversation)?;
+        match extract_and_validate_sprite_grid(&raw_response, w, h) {
+            Ok(grid) => return Ok(grid),
+            Err(err) => {
+                last_err = err.clone();
+                if attempt < 2 {
+                    conversation.push(("model".to_string(), raw_response));
+                    conversation.push((
+                        "user".to_string(),
+                        format!(
+                            "Invalid sprite format: {}\nPlease output ONLY {} lines, each with EXACTLY {} characters using only `0`-`9`, `A`-`F`, and `.`.",
+                            err, h, w
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
+    Err(format!("Failed to parse edited sprite: {}", last_err))
+}
+
+/// 指定された LLM プロバイダを用いてスプライトを編集する
+pub fn edit_sprite_with_provider(
+    provider: &LlmProvider,
+    w: usize,
+    h: usize,
+    sprite_label: &str,
+    current_grid: &str,
+    palette_info: &str,
+    user_prompt: &str,
+) -> Result<String, String> {
+    let system_prompt = build_sprite_edit_system_prompt();
+    edit_sprite_with_backend(
+        w,
+        h,
+        sprite_label,
+        current_grid,
+        palette_info,
+        user_prompt,
+        |conv| call_llm_http_api(provider, &system_prompt, conv),
+    )
+}

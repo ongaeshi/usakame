@@ -5471,6 +5471,97 @@ end
     rt.call_update();
 }
 
+#[test]
+fn test_llm_sprite_edit_validation_and_retry() {
+    let valid_8x8 = "```\n@SPRITE :test 8x8\n..8888..\n.888888.\n88aabb88\n88aabb88\n88888888\n.888888.\n..88..88\n..77..77\n```";
+    let parsed = llm::extract_and_validate_sprite_grid(valid_8x8, 8, 8)
+        .expect("Should parse valid 8x8 sprite grid");
+    let lines: Vec<&str> = parsed.lines().collect();
+    assert_eq!(lines.len(), 8);
+    assert_eq!(lines[2], "88AABB88");
+
+    // 1回目不正フォーマット -> 2回目で自己修復成功するバックエンドテスト
+    let mut calls = 0usize;
+    let edited = llm::edit_sprite_with_backend(
+        8,
+        8,
+        ":test",
+        "........\n........\n........\n........\n........\n........\n........\n........",
+        "0:#000000 8:#FF0000",
+        "draw a red box",
+        |_conv| {
+            calls += 1;
+            if calls == 1 {
+                Ok("invalid output".to_string())
+            } else {
+                Ok("88888888\n8......8\n8......8\n8......8\n8......8\n8......8\n8......8\n88888888".to_string())
+            }
+        },
+    )
+    .expect("Should succeed on retry");
+    assert_eq!(calls, 2);
+    assert_eq!(edited.lines().count(), 8);
+}
+
+#[test]
+fn test_sprite_editor_ai_modal_and_non_destructive_apply() {
+    let (_, tail_data, mrb_bytes) =
+        cli::compile_ruby_script_file(std::path::Path::new("examples/sprite_editor.rb"))
+            .expect("examples/sprite_editor.rb should compile");
+
+    let target_file = "examples/platformer.rb";
+    let orig_file_contents = std::fs::read_to_string(target_file).unwrap();
+
+    let mut rt = GameRuntime::new_with_args(
+        &tail_data,
+        &mrb_bytes,
+        true,
+        &[target_file.to_string()],
+    )
+    .expect("Sprite editor should initialize");
+
+    // モーダルを開いて draw / update がクラッシュしないことを確認
+    mrb_funcall(&mut rt.vm, None, "open_ai_modal", &[]).expect("open_ai_modal should succeed");
+    rt.call_update_result().expect("call_update with AI modal open should succeed");
+    rt.call_draw_result().expect("call_draw with AI modal open should succeed");
+    mrb_funcall(&mut rt.vm, None, "close_ai_modal", &[]).expect("close_ai_modal should succeed");
+
+    // 現在選択中のスプライトサイズに合わせたグリッドを適用（ファイルには保存されない）
+    let sp = mrb_funcall(&mut rt.vm, None, "current_sprite", &[]).unwrap();
+    assert!(!sp.is_nil());
+    let grid_obj = mrb_funcall(&mut rt.vm, None, "current_grid", &[]).unwrap();
+    let grid_str_obj = mrb_funcall(&mut rt.vm, None, "grid_to_text", &[grid_obj]).unwrap();
+    let grid_str = String::try_from(grid_str_obj.as_ref()).unwrap();
+    let modified_grid = grid_str
+        .lines()
+        .enumerate()
+        .map(|(idx, line)| {
+            if idx == 0 && !line.is_empty() {
+                format!("F{}", &line[1..])
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let ok_obj = mrb_funcall(
+        &mut rt.vm,
+        None,
+        "apply_ai_grid_to_current",
+        &[Rc::new(RObject::string(modified_grid))],
+    )
+    .expect("apply_ai_grid_to_current should succeed");
+    assert_eq!(ok_obj.as_ref(), &RObject::boolean(true));
+
+    let dirty_obj = mrb_funcall(&mut rt.vm, None, "any_dirty?", &[]).unwrap();
+    assert_eq!(dirty_obj.as_ref(), &RObject::boolean(true));
+
+    // ファイル自体は書き換わっていないこと
+    let after_file_contents = std::fs::read_to_string(target_file).unwrap();
+    assert_eq!(orig_file_contents, after_file_contents);
+}
+
 
 
 
