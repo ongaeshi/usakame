@@ -28,8 +28,9 @@ MOVE_SPEED = 2.0
 
 $player_id = 1
 $ground_id = 2
-$brick_id = 3
-$coin_id = 4
+$dirt_id = 3
+$brick_id = 4
+$coin_id = 5
 
 $bg_idx = 2 # Start with :mountain
 $fx_idx = 1 # Start with dim: 0.45
@@ -67,7 +68,7 @@ def solid_at?(wx, wy)
   return false if ty < 0 || tx < 0
   tile = mget(tx, ty)
   return false if tile.nil?
-  tile == $ground_id || tile == $brick_id
+  tile == $ground_id || tile == $dirt_id || tile == $brick_id
 end
 
 def solid_box?(x, y, w, h)
@@ -80,6 +81,7 @@ end
 def init
   $player_id = spr_id(:player)
   $ground_id = spr_id(:ground)
+  $dirt_id = spr_id(:dirt)
   $brick_id = spr_id(:brick)
   $coin_id = spr_id(:coin)
   reset_coins
@@ -214,7 +216,7 @@ def draw
     mx = start_mx
     while mx <= end_mx
       t = mget(mx, my)
-      if t == $ground_id || t == $brick_id
+      if t == $ground_id || t == $dirt_id || t == $brick_id
         spr(t, mx * TILE, my * TILE)
       end
       mx += 1
@@ -275,8 +277,26 @@ BBBBBBBBBBBBBBBB
 4454444454444454
 4444544444544444
 5444445444445444
-4444444444444444
-0000000000000000
+4454444454444454
+4444544444544444
+
+@SPRITE :dirt 16x16
+5444454444544445
+4454444544445444
+4444544445444454
+5444445444445444
+4454444454444454
+4444544444544444
+5444445444445444
+4454444454444454
+4444544444544444
+5444445444445444
+4454444454444454
+4444544444544444
+5444445444445444
+4454444454444454
+4444544444544444
+5444445444445444
 
 @SPRITE :brick 16x16
 1111111111111111
@@ -316,6 +336,7 @@ BBBBBBBBBBBBBBBB
 
 @MAP 0 0
 G = :ground
+D = :dirt
 B = :brick
 C = :coin
 ........................................
@@ -333,7 +354,7 @@ C = :coin
 ..................BBBBB.......C.........
 ..........C..................BBB........
 GGGGGGGGGGGGGGGG.GGGGGGGGGGGGGGGG.GGGGGG
-GGGGGGGGGGGGGGGG.GGGGGGGGGGGGGGGG.GGGGGG
+DDDDDDDDDDDDDDDD.DDDDDDDDDDDDDDDD.DDDDDD
 
 @PNG 300 bg_sky.png
 @PNG 301 bg_training.png
