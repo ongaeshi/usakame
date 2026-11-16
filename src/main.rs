@@ -2634,6 +2634,7 @@ struct BgDrawOptions {
     scroll_x: f32,
     scroll_y: f32,
     loop_x: bool,
+    mirror_x: bool,
 }
 
 fn parse_robject_f32(obj: &RObject) -> Option<f32> {
@@ -2657,6 +2658,7 @@ fn parse_bg_draw_options(args: &[Rc<RObject>], palette_rgba: &PaletteRgba) -> Bg
         scroll_x: 0.0,
         scroll_y: 0.0,
         loop_x: false,
+        mirror_x: false,
     };
 
     if let Some(a1) = args.get(1) && !matches!(a1.value, RValue::Hash(_)) {
@@ -2701,6 +2703,7 @@ fn parse_bg_draw_options(args: &[Rc<RObject>], palette_rgba: &PaletteRgba) -> Bg
                 "scroll_x" => if let Some(n) = parse_robject_f32(v) { opts.scroll_x = n; },
                 "scroll_y" => if let Some(n) = parse_robject_f32(v) { opts.scroll_y = n; },
                 "loop_x" => if let RValue::Bool(b) = v.value { opts.loop_x = b; },
+                "mirror_x" => if let RValue::Bool(b) = v.value { opts.mirror_x = b; },
                 "filter" => {
                     let f_raw = match &v.value {
                         RValue::Symbol(s) => s.name.clone(),
@@ -8582,24 +8585,32 @@ fn register_engine_api(
                 );
                 texture.set_filter(opts.filter);
                 let base_y = opts.y - opts.scroll_y;
-                if opts.loop_x {
-                    let mut offset = opts.scroll_x % draw_w;
+                if opts.loop_x || opts.mirror_x {
+                    let period = if opts.mirror_x { draw_w * 2.0 } else { draw_w };
+                    let mut offset = opts.scroll_x % period;
                     if offset < 0.0 {
-                        offset += draw_w;
+                        offset += period;
                     }
                     let mut cur_x = opts.x - offset;
+                    let mut tile_idx = 0usize;
                     while cur_x < screen_w {
+                        let x0 = cur_x.floor();
+                        let x1 = (cur_x + draw_w).floor();
+                        let tile_w = (x1 - x0).max(1.0);
+                        let flip_x = opts.mirror_x && (tile_idx % 2 == 1);
                         draw_texture_ex(
                             texture,
-                            cur_x,
+                            x0,
                             base_y,
                             color,
                             DrawTextureParams {
-                                dest_size: Some(vec2(draw_w, draw_h)),
+                                dest_size: Some(vec2(tile_w, draw_h)),
+                                flip_x,
                                 ..Default::default()
                             },
                         );
                         cur_x += draw_w;
+                        tile_idx += 1;
                     }
                 } else {
                     draw_texture_ex(
