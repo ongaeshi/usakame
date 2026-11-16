@@ -9,12 +9,8 @@ config(
 BG_IDS = [300, 301, 302]
 BG_NAMES = [":sky", ":training", ":mountain"]
 
-# Fit 640x360 backdrop height to 256px screen height
-# Note: spr() scales around the sprite's unscaled center, so compensate offset to align top-left to (0, 0)
-BG_SCALE = 256.0 / 360.0
-BG_DRAW_W = (640.0 * BG_SCALE).floor
-BG_OFFSET_X = -((640.0 - 640.0 * BG_SCALE) * 0.5)
-BG_OFFSET_Y = -((360.0 - 256.0) * 0.5)
+# 448x256 backdrops (height matches 256px screen, width 448px = 64x7 for seamless grid looping)
+BG_W = 448
 
 TILE = 16
 MAP_W = 40
@@ -176,12 +172,12 @@ end
 def draw
   cls(0)
 
-  # 1. Draw parallax looping background scaled to 256px height
+  # 1. Draw 1:1 parallax looping background (448x256)
   camera(0, 0)
   bg_id = BG_IDS[$bg_idx]
-  scroll_x = ($cam_x * 0.4).to_i % BG_DRAW_W
-  spr(bg_id, BG_OFFSET_X - scroll_x, BG_OFFSET_Y, false, false, 0.0, BG_SCALE)
-  spr(bg_id, BG_OFFSET_X + BG_DRAW_W - scroll_x, BG_OFFSET_Y, false, false, 0.0, BG_SCALE)
+  scroll_x = ($cam_x * 0.4).to_i % BG_W
+  spr(bg_id, -scroll_x, 0)
+  spr(bg_id, BG_W - scroll_x, 0)
 
   # 2. Draw visible world tiles & sprites with camera
   camera($cam_x.to_i, 0)
