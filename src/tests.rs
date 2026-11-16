@@ -3889,6 +3889,21 @@ fn test_cmd_new_and_examples_archive_workflow() {
     assert!(dir_split.join("refs/examples/sprite_editor.rb").exists());
     assert!(dir_split.join("refs/examples/tilemap_editor.rb").exists());
 
+    // examples/PROJECT_EXAMPLES に記載されたファイルのみが同梱・展開されることを検証
+    let mut expected_examples: Vec<String> =
+        cli::parse_project_examples_manifest(cli::EMBEDDED_PROJECT_EXAMPLES_MANIFEST)
+            .into_iter()
+            .map(String::from)
+            .collect();
+    expected_examples.sort();
+    expected_examples.dedup();
+    let mut actual_examples: Vec<String> = std::fs::read_dir(dir_split.join("refs/examples"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    actual_examples.sort();
+    assert_eq!(actual_examples, expected_examples);
+
     let (_, tail_split, mrb_split) =
         cli::compile_ruby_script_file(&dir_split.join("game.rb")).expect("Split game.rb should compile");
     assert!(tail_split.contains("@SPRITE 0"));

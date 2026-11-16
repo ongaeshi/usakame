@@ -48,14 +48,36 @@ fn is_ignored_bundle_entry(name: &str) -> bool {
         || name.eq_ignore_ascii_case(".DS_Store")
 }
 
-fn is_valid_example_entry(name: &str) -> bool {
-    // 隠しファイル、バックアップ、一時ファイル、システムファイルを除外
-    if is_ignored_bundle_entry(name) {
-        return false;
+fn read_manifest_entries(manifest_path: &Path, kind_label: &str) -> Vec<String> {
+    println!("cargo:rerun-if-changed={}", manifest_path.display());
+
+    let manifest = fs::read_to_string(manifest_path).unwrap_or_else(|e| {
+        panic!("Failed to read `{}`: {}", manifest_path.display(), e)
+    });
+
+    let mut result = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for (idx, raw_line) in manifest.lines().enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.contains('/') || line.contains('\\') || line.contains("..") {
+            panic!(
+                "Invalid {} name `{}` at `{}:{}`",
+                kind_label,
+                line,
+                manifest_path.display(),
+                idx + 1
+            );
+        }
+        if seen.insert(line.to_string()) {
+            result.push(line.to_string());
+        }
     }
-    // 配布・参照に必要なファイル拡張子のみを厳選同梱
-    let valid_exts = [".rb", ".spr", ".map", ".sfx", ".png", ".wav", ".ogg", ".md"];
-    valid_exts.iter().any(|ext| name.ends_with(ext))
+
+    result
 }
 
 fn write_compressed_archive(mut entries: Vec<(String, Vec<u8>)>, archive_out_path: &Path) {
@@ -81,23 +103,29 @@ fn write_compressed_archive(mut entries: Vec<(String, Vec<u8>)>, archive_out_pat
     fs::write(archive_out_path, compressed).expect("Failed to write archive");
 }
 
+/// `examples/PROJECT_EXAMPLES` に明示記載されたサンプルファイルのみをアーカイブに同梱する。
 fn build_examples_archive(examples_dir: &Path, archive_out_path: &Path) {
+    let manifest_path = examples_dir.join("PROJECT_EXAMPLES");
+    let names = read_manifest_entries(&manifest_path, "example");
     let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
-    if let Ok(read_dir) = fs::read_dir(examples_dir) {
-        for entry in read_dir.flatten() {
-            let path = entry.path();
-            if path.is_file() {
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if is_valid_example_entry(name) {
-                        println!("cargo:rerun-if-changed=examples/{}", name);
-                        if let Ok(bytes) = fs::read(&path) {
-                            entries.push((name.to_string(), bytes));
-                        }
-                    }
-                }
-            }
+
+    for name in names {
+        let example_path = examples_dir.join(&name);
+        if !example_path.is_file() {
+            panic!(
+                "Example `{}` listed in `{}` does not exist as a file: `{}`",
+                name,
+                manifest_path.display(),
+                example_path.display()
+            );
         }
+        println!("cargo:rerun-if-changed={}", example_path.display());
+        let bytes = fs::read(&example_path).unwrap_or_else(|e| {
+            panic!("Failed to read example file `{}`: {}", example_path.display(), e)
+        });
+        entries.push((name, bytes));
     }
+
     write_compressed_archive(entries, archive_out_path);
 }
 
@@ -132,37 +160,11 @@ fn collect_skill_files_recursive(
 /// `.agents/skills/PROJECT_SKILLS` に明示記載されたスキルのみをアーカイブに同梱する。
 fn build_skills_archive(skills_dir: &Path, archive_out_path: &Path) {
     let manifest_path = skills_dir.join("PROJECT_SKILLS");
-    println!("cargo:rerun-if-changed={}", manifest_path.display());
-
-    let manifest = fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
-        panic!(
-            "Failed to read `{}`: {}",
-            manifest_path.display(),
-            e
-        )
-    });
-
+    let names = read_manifest_entries(&manifest_path, "skill");
     let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
 
-    for (idx, raw_line) in manifest.lines().enumerate() {
-        let line = raw_line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if line.contains('/') || line.contains('\\') || line.contains("..") {
-            panic!(
-                "Invalid skill name `{}` at `{}:{}`",
-                line,
-                manifest_path.display(),
-                idx + 1
-            );
-        }
-        if !seen.insert(line.to_string()) {
-            continue;
-        }
-
-        let skill_dir = skills_dir.join(line);
+    for line in names {
+        let skill_dir = skills_dir.join(&line);
         if !skill_dir.is_dir() {
             panic!(
                 "Skill `{}` listed in `{}` does not exist as a directory: `{}`",
@@ -181,7 +183,7 @@ fn build_skills_archive(skills_dir: &Path, archive_out_path: &Path) {
             );
         }
         println!("cargo:rerun-if-changed={}", skill_dir.display());
-        collect_skill_files_recursive(&skill_dir, &skill_dir, line, &mut entries);
+        collect_skill_files_recursive(&skill_dir, &skill_dir, &line, &mut entries);
     }
 
     write_compressed_archive(entries, archive_out_path);

@@ -21,8 +21,11 @@ pub const EMBEDDED_SKILLS_ARCHIVE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/skills_archive.bin"));
 pub const EMBEDDED_PROJECT_SKILLS_MANIFEST: &str =
     include_str!("../.agents/skills/PROJECT_SKILLS");
+/// `examples/PROJECT_EXAMPLES` に記載されたサンプルのみを同梱したアーカイブ
 pub const EMBEDDED_EXAMPLES_ARCHIVE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/examples_archive.bin"));
+pub const EMBEDDED_PROJECT_EXAMPLES_MANIFEST: &str =
+    include_str!("../examples/PROJECT_EXAMPLES");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditorKind {
@@ -1533,7 +1536,7 @@ fn extract_archive_to_dir(archive_bytes: &[u8], dest_dir: &Path) -> Result<Vec<P
     Ok(written)
 }
 
-/// 指定ディレクトリに同梱の `examples/` ファイルをすべて展開する。
+/// 指定ディレクトリに `examples/PROJECT_EXAMPLES` で許可された `examples/` ファイルを展開する。
 pub fn extract_examples_to_dir(dest_dir: &Path) -> Result<Vec<PathBuf>, String> {
     extract_archive_to_dir(EMBEDDED_EXAMPLES_ARCHIVE, dest_dir)
 }
@@ -1543,13 +1546,23 @@ pub fn extract_project_skills_to_dir(dest_dir: &Path) -> Result<Vec<PathBuf>, St
     extract_archive_to_dir(EMBEDDED_SKILLS_ARCHIVE, dest_dir)
 }
 
-/// `PROJECT_SKILLS` マニフェスト文字列から配布対象のスキル名一覧をパースする。
-pub fn parse_project_skills_manifest(manifest: &str) -> Vec<&str> {
+/// `PROJECT_SKILLS` / `PROJECT_EXAMPLES` 形式のマニフェスト文字列から対象名一覧をパースする。
+pub fn parse_manifest_entries(manifest: &str) -> Vec<&str> {
     manifest
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .collect()
+}
+
+/// `PROJECT_SKILLS` マニフェスト文字列から配布対象のスキル名一覧をパースする。
+pub fn parse_project_skills_manifest(manifest: &str) -> Vec<&str> {
+    parse_manifest_entries(manifest)
+}
+
+/// `PROJECT_EXAMPLES` マニフェスト文字列から同梱対象のサンプルファイル名一覧をパースする。
+pub fn parse_project_examples_manifest(manifest: &str) -> Vec<&str> {
+    parse_manifest_entries(manifest)
 }
 
 /// `uk examples [dest_dir]` の実装

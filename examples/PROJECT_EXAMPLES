@@ -1,0 +1,59 @@
+# List of example files to bundle in `uk.exe` (`uk examples` / `uk new --with-refs` / `uk new --template`).
+# Only files explicitly listed here (one filename per line) are bundled.
+# Any other files under `examples/` are ignored to prevent
+# accidentally distributing work-in-progress or internal-only examples.
+
+README.md
+
+# Game Demos
+platformer.rb
+platformer_bg.png
+rabbit_knight.rb
+survivors.rb
+shooter.rb
+puzzle.rb
+card_roguelite.rb
+flappy_runner.rb
+tiny_dungeon.rb
+tiny_dungeon.spr
+tiny_dungeon.map
+tiny_dungeon.png
+
+# Cookbooks & Utils
+particles.rb
+scene_ui.rb
+scene_manager.rb
+procgen_utils.rb
+
+# Built-in Editors & Split Format
+sprite_editor.rb
+tilemap_editor.rb
+viewer.rb
+split_game.rb
+split_game.spr
+split_game.map
+split_game.sfx
+
+# Feature Showcases
+demo.rb
+declarative_sprites.rb
+sound.rb
+tilemap.rb
+mouse.rb
+pal.rb
+camera_clip.rb
+resolution.rb
+oval.rb
+
+# Background (bg) Demos
+bg_presets.rb
+bg_hd2d_demo.rb
+bg_mirror_demo.rb
+bg_parallax_demo.rb
+bg_prototype.rb
+bg_layer_far.png
+bg_layer_mid.png
+bg_layer_near.png
+bg_mountain.png
+bg_sky.png
+bg_training.png
