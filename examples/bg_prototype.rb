@@ -35,6 +35,8 @@ $vx = 0.0
 $vy = 0.0
 $facing_left = false
 $on_ground = false
+$coyote_timer = 0
+$jump_buffer = 0
 $cam_x = 0.0
 $frame = 0
 $score = 0
@@ -66,9 +68,9 @@ end
 
 def solid_box?(x, y, w, h)
   solid_at?(x, y) ||
-    solid_at?(x + w - 1.0, y) ||
-    solid_at?(x, y + h - 1.0) ||
-    solid_at?(x + w - 1.0, y + h - 1.0)
+    solid_at?(x + w - 0.01, y) ||
+    solid_at?(x, y + h - 0.01) ||
+    solid_at?(x + w - 0.01, y + h - 0.01)
 end
 
 def init
@@ -97,31 +99,45 @@ def update
     $facing_left = false
   end
 
-  # Jump
-  if $on_ground && (btnp(4) || btnp(2))
+  # Jump buffer & coyote time for responsive jumping
+  if btnp(4) || btnp(2)
+    $jump_buffer = 6
+  elsif $jump_buffer > 0
+    $jump_buffer -= 1
+  end
+
+  if $on_ground
+    $coyote_timer = 6
+  elsif $coyote_timer > 0
+    $coyote_timer -= 1
+  end
+
+  if $jump_buffer > 0 && $coyote_timer > 0
     $vy = JUMP_POWER
     $on_ground = false
+    $coyote_timer = 0
+    $jump_buffer = 0
   end
 
   # Apply gravity
   $vy += GRAVITY
   $vy = 5.5 if $vy > 5.5
 
-  # Move X with tile collision (hitbox: 12x14 inside 16x16 sprite)
+  # Move X with tile collision (hitbox: 12x14 at +2,+2 inside 16x16 sprite)
   nx = $px + $vx
   nx = 0.0 if nx < 0.0
   max_px = (MAP_W * TILE - 14).to_f
   nx = max_px if nx > max_px
-  if !solid_box?(nx + 2.0, $py + 1.0, 12.0, 14.0)
+  if !solid_box?(nx + 2.0, $py + 2.0, 12.0, 14.0)
     $px = nx
   end
 
   # Move Y with tile collision
   ny = $py + $vy
   if $vy >= 0.0
-    if solid_box?($px + 2.0, ny + 1.0, 12.0, 14.0)
-      ty = ((ny + 15.0) / TILE).floor.to_i
-      $py = (ty * TILE - 15).to_f
+    if solid_box?($px + 2.0, ny + 2.0, 12.0, 14.0)
+      ty = ((ny + 15.99) / TILE).floor.to_i
+      $py = (ty * TILE - 16).to_f
       $vy = 0.0
       $on_ground = true
     else
@@ -129,9 +145,9 @@ def update
       $on_ground = false
     end
   else
-    if solid_box?($px + 2.0, ny + 1.0, 12.0, 14.0)
-      ty = ((ny + 1.0) / TILE).floor.to_i
-      $py = ((ty + 1) * TILE - 1).to_f
+    if solid_box?($px + 2.0, ny + 2.0, 12.0, 14.0)
+      ty = ((ny + 2.0) / TILE).floor.to_i
+      $py = ((ty + 1) * TILE - 2).to_f
       $vy = 0.0
     else
       $py = ny
