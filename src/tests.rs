@@ -3885,10 +3885,6 @@ fn test_cmd_new_and_examples_archive_workflow() {
     assert!(dir_split.join("game.spr").exists());
     assert!(dir_split.join("game.map").exists());
     assert!(dir_split.join("game.sfx").exists());
-    assert!(dir_split.join("refs/examples/platformer.rb").exists());
-    assert!(dir_split.join("refs/examples/sprite_editor.rb").exists());
-    assert!(dir_split.join("refs/examples/tilemap_editor.rb").exists());
-
     // examples/PROJECT_EXAMPLES に記載されたファイルのみが同梱・展開されることを検証
     let mut expected_examples: Vec<String> =
         cli::parse_project_examples_manifest(cli::EMBEDDED_PROJECT_EXAMPLES_MANIFEST)
