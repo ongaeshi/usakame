@@ -1,25 +1,36 @@
-# Background Prototype: High-res backdrop (:sky / :training / :mountain) + Pixel-art sprites
+# Background Prototype (256x256 default screen):
+# High-res backdrop (:sky / :training / :mountain) + Pixel-art sprites
 # Run: cargo run --bin uk -- run examples/bg_prototype.rb
 
 config(
-  width: 640,
-  height: 360,
-  scale: 1.5,
-  sprite_scale: 2.0,
   title: "Usakame BG Prototype (:sky / :training / :mountain)"
 )
 
 BG_IDS = [300, 301, 302]
 BG_NAMES = [":sky", ":training", ":mountain"]
 
-TILE = 32 # 16px sprite * sprite_scale(2.0) = 32px on screen
-GRAVITY = 0.45
-JUMP_POWER = -9.2
-MOVE_SPEED = 3.4
+# Fit 640x360 backdrop height to 256px screen height
+# Note: spr() scales around the sprite's unscaled center, so compensate offset to align top-left to (0, 0)
+BG_SCALE = 256.0 / 360.0
+BG_DRAW_W = (640.0 * BG_SCALE).floor
+BG_OFFSET_X = -((640.0 - 640.0 * BG_SCALE) * 0.5)
+BG_OFFSET_Y = -((360.0 - 256.0) * 0.5)
+
+TILE = 16
+MAP_W = 40
+MAP_H = 16
+GRAVITY = 0.25
+JUMP_POWER = -5.4
+MOVE_SPEED = 2.0
+
+$player_id = 1
+$ground_id = 2
+$brick_id = 3
+$coin_id = 4
 
 $bg_idx = 0
-$px = 96.0
-$py = 220.0
+$px = 48.0
+$py = 180.0
 $vx = 0.0
 $vy = 0.0
 $facing_left = false
@@ -29,19 +40,13 @@ $frame = 0
 $score = 0
 $coins = []
 
-$player_id = 1
-$ground_id = 2
-$brick_id = 3
-$coin_id = 4
-
 def reset_coins
   $coins = []
   my = 0
-  while my < 12
+  while my < MAP_H
     mx = 0
-    while mx < 40
-      tile = mget(mx, my)
-      if tile == $coin_id
+    while mx < MAP_W
+      if mget(mx, my) == $coin_id
         $coins << { x: mx * TILE, y: my * TILE, alive: true }
       end
       mx += 1
@@ -51,8 +56,8 @@ def reset_coins
 end
 
 def solid_at?(wx, wy)
-  tx = (wx / TILE).floor
-  ty = (wy / TILE).floor
+  tx = (wx / TILE).floor.to_i
+  ty = (wy / TILE).floor.to_i
   return false if ty < 0 || tx < 0
   tile = mget(tx, ty)
   return false if tile.nil?
@@ -100,22 +105,23 @@ def update
 
   # Apply gravity
   $vy += GRAVITY
-  $vy = 10.0 if $vy > 10.0
+  $vy = 5.5 if $vy > 5.5
 
-  # Move X with tile collision (hitbox: 24x28 inside 32x32 sprite)
+  # Move X with tile collision (hitbox: 12x14 inside 16x16 sprite)
   nx = $px + $vx
   nx = 0.0 if nx < 0.0
-  nx = 1252.0 if nx > 1252.0
-  if !solid_box?(nx + 4.0, $py + 2.0, 24.0, 28.0)
+  max_px = (MAP_W * TILE - 14).to_f
+  nx = max_px if nx > max_px
+  if !solid_box?(nx + 2.0, $py + 1.0, 12.0, 14.0)
     $px = nx
   end
 
   # Move Y with tile collision
   ny = $py + $vy
   if $vy >= 0.0
-    if solid_box?($px + 4.0, ny + 2.0, 24.0, 28.0)
-      ty = ((ny + 30.0) / TILE).floor.to_i
-      $py = (ty * TILE - 30).to_f
+    if solid_box?($px + 2.0, ny + 1.0, 12.0, 14.0)
+      ty = ((ny + 15.0) / TILE).floor.to_i
+      $py = (ty * TILE - 15).to_f
       $vy = 0.0
       $on_ground = true
     else
@@ -123,9 +129,9 @@ def update
       $on_ground = false
     end
   else
-    if solid_box?($px + 4.0, ny + 2.0, 24.0, 28.0)
-      ty = ((ny + 2.0) / TILE).floor.to_i
-      $py = ((ty + 1) * TILE - 2).to_f
+    if solid_box?($px + 2.0, ny + 1.0, 12.0, 14.0)
+      ty = ((ny + 1.0) / TILE).floor.to_i
+      $py = ((ty + 1) * TILE - 1).to_f
       $vy = 0.0
     else
       $py = ny
@@ -135,18 +141,18 @@ def update
   # Collect coins
   $coins.each do |c|
     next unless c[:alive]
-    dx = ($px + 16) - (c[:x] + 16)
-    dy = ($py + 16) - (c[:y] + 16)
-    if dx * dx + dy * dy < 24 * 24
+    dx = ($px + 8.0) - (c[:x] + 8.0)
+    dy = ($py + 8.0) - (c[:y] + 8.0)
+    if dx * dx + dy * dy < 12.0 * 12.0
       c[:alive] = false
       $score += 100
     end
   end
 
   # Smooth camera follow
-  target_cam = $px - 280.0
+  target_cam = $px - 112.0
   target_cam = 0.0 if target_cam < 0.0
-  max_cam = 640.0
+  max_cam = (MAP_W * TILE - 256).to_f
   target_cam = max_cam if target_cam > max_cam
   $cam_x += (target_cam - $cam_x) * 0.15
 end
@@ -154,21 +160,25 @@ end
 def draw
   cls(0)
 
-  # 1. Draw parallax looping background (scale: 1.0 to keep 640x360)
+  # 1. Draw parallax looping background scaled to 256px height
   camera(0, 0)
   bg_id = BG_IDS[$bg_idx]
-  scroll_x = ($cam_x * 0.35).to_i % 640
-  spr(bg_id, -scroll_x, 0, false, false, 0.0, 1.0)
-  spr(bg_id, 640 - scroll_x, 0, false, false, 0.0, 1.0)
+  scroll_x = ($cam_x * 0.4).to_i % BG_DRAW_W
+  spr(bg_id, BG_OFFSET_X - scroll_x, BG_OFFSET_Y, false, false, 0.0, BG_SCALE)
+  spr(bg_id, BG_OFFSET_X + BG_DRAW_W - scroll_x, BG_OFFSET_Y, false, false, 0.0, BG_SCALE)
 
-  # 2. Draw world tiles & sprites with camera
+  # 2. Draw visible world tiles & sprites with camera
   camera($cam_x.to_i, 0)
 
-  # Draw @MAP terrain (ground & bricks, skip coin marker tile)
+  start_mx = ($cam_x / TILE).floor.to_i
+  start_mx = 0 if start_mx < 0
+  end_mx = start_mx + 17
+  end_mx = MAP_W - 1 if end_mx >= MAP_W
+
   my = 0
-  while my < 12
-    mx = 0
-    while mx < 40
+  while my < MAP_H
+    mx = start_mx
+    while mx <= end_mx
       t = mget(mx, my)
       if t == $ground_id || t == $brick_id
         spr(t, mx * TILE, my * TILE)
@@ -179,10 +189,10 @@ def draw
   end
 
   # Draw coins with gentle bobbing
-  bob = (sin($frame * 0.1) * 3.0).to_i
+  bob = (sin($frame * 0.1) * 2.0).to_i
   $coins.each do |c|
     next unless c[:alive]
-    spr(:coin, c[:x], c[:y] + bob)
+    spr($coin_id, c[:x], c[:y] + bob)
   end
 
   # Draw player sprite
@@ -190,9 +200,9 @@ def draw
 
   # 3. HUD (fixed to screen)
   camera(0, 0)
-  rectfill(8, 8, 560, 48, 1)
-  print_text("BG: #{BG_NAMES[$bg_idx]}  SCORE: #{$score}", 16, 12, 7)
-  print_text("[Arrow] Move  [Z/Up] Jump  [X/Enter] Switch BG", 16, 30, 6)
+  rectfill(4, 4, 248, 24, 1)
+  print_text("BG: #{BG_NAMES[$bg_idx]}  SCORE: #{$score}", 8, 7, 7)
+  print_text("[Arrow]Move [Z/Up]Jump [X]BG", 8, 15, 6)
 end
 
 init
@@ -275,6 +285,10 @@ BBBBBBBBBBBBBBBB
 G = :ground
 B = :brick
 C = :coin
+........................................
+........................................
+........................................
+........................................
 ........................................
 ........................................
 ........................................
