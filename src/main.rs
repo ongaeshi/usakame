@@ -1289,7 +1289,42 @@ pub fn parse_tail_resources_full(
             }
             ParsedResource::Base64Sprite(id, lines) => {
                 let joined = lines.join("");
-                if let Ok(sp) = SpriteData::from_base64(&joined) {
+                let trimmed_path = joined.trim();
+                let path_candidate = if let Some(dir) = base_dir {
+                    dir.join(trimmed_path)
+                } else {
+                    PathBuf::from(trimmed_path)
+                };
+                if !trimmed_path.is_empty() && path_candidate.is_file() {
+                    let lower = trimmed_path.to_ascii_lowercase();
+                    let fmt = if lower.ends_with(".png") {
+                        Some(ImageFormat::Png)
+                    } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+                        Some(ImageFormat::Jpeg)
+                    } else if lower.ends_with(".bmp") {
+                        Some(ImageFormat::Bmp)
+                    } else if lower.ends_with(".tga") {
+                        Some(ImageFormat::Tga)
+                    } else if lower.ends_with(".gif") {
+                        Some(ImageFormat::Gif)
+                    } else {
+                        None
+                    };
+                    match std::fs::read(&path_candidate) {
+                        Ok(bytes) => match Image::from_file_with_format(&bytes, fmt) {
+                            Ok(img) => {
+                                let sp = SpriteData::from_rgba(img.width, img.height, img.bytes);
+                                place_sprite_at_slot(*id, sp, &mut sprites, &mut banks, &mut used, &mut occupied_slots, true);
+                            }
+                            Err(e) => {
+                                eprintln!("Warning: Failed to decode @PNG {} ({}): {:?}", id, path_candidate.display(), e);
+                            }
+                        },
+                        Err(e) => {
+                            eprintln!("Warning: Failed to read @PNG {} ({}): {}", id, path_candidate.display(), e);
+                        }
+                    }
+                } else if let Ok(sp) = SpriteData::from_base64(&joined) {
                     place_sprite_at_slot(*id, sp, &mut sprites, &mut banks, &mut used, &mut occupied_slots, true);
                 }
             }
@@ -8163,7 +8198,9 @@ fn register_engine_api(
                 (16.0, 16.0)
             };
 
-            if let Some(bank) = banks_ref.get(&cur_bank_id) {
+            if let Some(bank) = banks_ref.get(&cur_bank_id)
+                && (cur_bank_id != 0 || (0..=255).contains(&id))
+            {
                 let cols = (bank.sheet_width / 16).max(1) as i32;
                 let u = ((id % cols) * 16) as f32;
                 let v = ((id / cols) * 16) as f32;
@@ -8334,7 +8371,9 @@ fn register_engine_api(
 
             let cur_bank_id = *act_spr_for_clip.borrow();
             let banks_ref = banks_for_clip.borrow();
-            if let Some(bank) = banks_ref.get(&cur_bank_id) {
+            if let Some(bank) = banks_ref.get(&cur_bank_id)
+                && (cur_bank_id != 0 || (0..=255).contains(&id))
+            {
                 let cols = (bank.sheet_width / 16).max(1) as i32;
                 let slot_u = ((id % cols) * 16) as f32;
                 let slot_v = ((id / cols) * 16) as f32;
@@ -9009,11 +9048,12 @@ pub struct GameRuntime {
     initial_globals: HashMap<String, Rc<RObject>>,
     initial_tail_map: Tilemap,
     headless: bool,
+    base_dir: Option<std::path::PathBuf>,
 }
 
 impl GameRuntime {
     pub fn new(tail_data: &str, mrb_bytes: &[u8], headless: bool) -> Result<Self, ScriptError> {
-        Self::new_with_args(tail_data, mrb_bytes, headless, &[])
+        Self::new_with_base_dir(tail_data, mrb_bytes, headless, &[], None)
     }
 
     pub fn new_with_args(
@@ -9022,8 +9062,18 @@ impl GameRuntime {
         headless: bool,
         script_args: &[String],
     ) -> Result<Self, ScriptError> {
+        Self::new_with_base_dir(tail_data, mrb_bytes, headless, script_args, None)
+    }
+
+    pub fn new_with_base_dir(
+        tail_data: &str,
+        mrb_bytes: &[u8],
+        headless: bool,
+        script_args: &[String],
+        base_dir: Option<&std::path::Path>,
+    ) -> Result<Self, ScriptError> {
         let (mut sprites_map, mut banks_map, palettes_map, sprite_names_map) =
-            parse_tail_resources_full(tail_data, None);
+            parse_tail_resources_full(tail_data, base_dir);
         static EMPTY_ALIASES: std::sync::LazyLock<HashMap<char, i32>> = std::sync::LazyLock::new(HashMap::new);
         let (tail_map, map_aliases_map) = parse_tail_map_with_symbols(tail_data, &EMPTY_ALIASES, &sprite_names_map);
         let tail_objects = parse_tail_objects(tail_data);
@@ -9153,6 +9203,7 @@ impl GameRuntime {
             initial_globals,
             initial_tail_map,
             headless,
+            base_dir: base_dir.map(|p| p.to_path_buf()),
         })
     }
 
@@ -9170,7 +9221,7 @@ impl GameRuntime {
 
     /// ランタイムを初期状態から再生成してリスタートする（トップレベルを再実行し、グローバル変数も初期化）
     pub fn restart(&mut self, tail_data: &str, mrb_bytes: &[u8]) -> Result<(), ScriptError> {
-        let new_rt = Self::new_with_args(tail_data, mrb_bytes, self.headless, &self.script_args)?;
+        let new_rt = Self::new_with_base_dir(tail_data, mrb_bytes, self.headless, &self.script_args, self.base_dir.as_deref())?;
         if *self.config.borrow() != AppConfig::default() {
             let cfg = self.config.borrow().clone();
             *new_rt.config.borrow_mut() = cfg.clone();
@@ -9186,7 +9237,7 @@ impl GameRuntime {
     /// ただしスクリプト上のトップレベル初期値や `@MAP` 自体が書き換えられた場合は新しい定義を採用する。
     pub fn hot_reload(&mut self, new_tail_data: &str, new_mrb_bytes: &[u8]) -> Result<(), ScriptError> {
         let (mut new_sprites_map, mut new_banks_map, new_palettes_map, new_names_map) =
-            parse_tail_resources_full(new_tail_data, None);
+            parse_tail_resources_full(new_tail_data, self.base_dir.as_deref());
         static EMPTY_ALIASES: std::sync::LazyLock<HashMap<char, i32>> = std::sync::LazyLock::new(HashMap::new);
         let (new_tail_map, new_aliases_map) = parse_tail_map_with_symbols(new_tail_data, &EMPTY_ALIASES, &new_names_map);
         let new_tail_objects = parse_tail_objects(new_tail_data);
@@ -10557,7 +10608,7 @@ async fn run_native_with_hot_reload(
 
     if current_error.is_none() {
         let initial_config = parse_config_from_source(&initial_source);
-        match GameRuntime::new_with_args(&initial_tail, &initial_mrb, false, &script_args) {
+        match GameRuntime::new_with_base_dir(&initial_tail, &initial_mrb, false, &script_args, script_path.parent()) {
             Ok(rt) => {
                 if initial_config != AppConfig::default() {
                     let mut cfg = rt.config.borrow_mut();
@@ -10621,7 +10672,7 @@ async fn run_native_with_hot_reload(
             match cli::compile_ruby_script_file(&script_path) {
                 Ok((new_source, new_tail, new_mrb)) => {
                     let new_parsed_config = parse_config_from_source(&new_source);
-                    match GameRuntime::new_with_args(&new_tail, &new_mrb, false, &script_args) {
+                    match GameRuntime::new_with_base_dir(&new_tail, &new_mrb, false, &script_args, script_path.parent()) {
                         Ok(mut new_rt) => {
                             if new_parsed_config != AppConfig::default() {
                                 let mut cfg = new_rt.config.borrow_mut();
@@ -10712,7 +10763,7 @@ async fn run_native_with_hot_reload(
                                 }
                                 Err(_e) => {
                                     // hot_reload に失敗した場合はインスタンス再生成での復帰を試みる
-                                    match GameRuntime::new_with_args(&new_tail, &new_mrb, false, &script_args) {
+                                    match GameRuntime::new_with_base_dir(&new_tail, &new_mrb, false, &script_args, script_path.parent()) {
                                         Ok(mut new_rt) => {
                                             if new_parsed_config != AppConfig::default() {
                                                 let mut cfg = new_rt.config.borrow_mut();
@@ -10755,7 +10806,7 @@ async fn run_native_with_hot_reload(
                             }
                         } else {
                             // ランタイムが未初期化だった場合（初回エラー等）は新規生成
-                            match GameRuntime::new_with_args(&new_tail, &new_mrb, false, &script_args) {
+                            match GameRuntime::new_with_base_dir(&new_tail, &new_mrb, false, &script_args, script_path.parent()) {
                                 Ok(mut new_rt) => {
                                     if new_parsed_config != AppConfig::default() {
                                         let mut cfg = new_rt.config.borrow_mut();
