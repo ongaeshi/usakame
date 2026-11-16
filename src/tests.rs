@@ -1012,12 +1012,12 @@ end
 #[test]
 fn test_camera_and_clip_state_and_spans() {
     let mut state = DrawState::default();
-    assert_eq!(state.cam_x, 0);
-    assert_eq!(state.cam_y, 0);
+    assert_eq!(state.cam_x, 0.0);
+    assert_eq!(state.cam_y, 0.0);
     assert_eq!(state.clip, None);
 
     // カメラオフセット (100, 50) の適用検証
-    state.set_camera(100, 50);
+    state.set_camera(100.0, 50.0);
     let raw_rect = rasterize_rectfill(120, 80, 16, 10);
     let transformed = state.transform_and_clip_spans(&raw_rect);
     assert_eq!(transformed, vec![PixelSpan::new(20, 30, 16, 10)]);
@@ -1074,12 +1074,12 @@ end
     let mut runtime = GameRuntime::new(&tail, &mrb, true).unwrap();
 
     runtime.call_update();
-    assert_eq!(runtime.draw_state.borrow().cam_x, 32);
-    assert_eq!(runtime.draw_state.borrow().cam_y, 16);
+    assert_eq!(runtime.draw_state.borrow().cam_x, 32.0);
+    assert_eq!(runtime.draw_state.borrow().cam_y, 16.0);
 
     runtime.call_draw();
-    assert_eq!(runtime.draw_state.borrow().cam_x, 12);
-    assert_eq!(runtime.draw_state.borrow().cam_y, -8);
+    assert_eq!(runtime.draw_state.borrow().cam_x, 12.0);
+    assert_eq!(runtime.draw_state.borrow().cam_y, -8.0);
     assert_eq!(runtime.draw_state.borrow().clip, None);
 }
 
@@ -1097,8 +1097,8 @@ fn test_camera_clip_example_script() {
         runtime.call_update();
         runtime.call_draw();
     }
-    assert_eq!(runtime.draw_state.borrow().cam_x, 0);
-    assert_eq!(runtime.draw_state.borrow().cam_y, 0);
+    assert_eq!(runtime.draw_state.borrow().cam_x, 0.0);
+    assert_eq!(runtime.draw_state.borrow().cam_y, 0.0);
     assert_eq!(runtime.draw_state.borrow().clip, None);
 }
 
@@ -4993,8 +4993,8 @@ run SceneA.new
 
     // Frame 1: SceneA enters
     rt.call_update_result().unwrap();
-    assert_eq!(rt.draw_state.borrow().cam_x, 20);
-    assert_eq!(rt.draw_state.borrow().cam_y, 30);
+    assert_eq!(rt.draw_state.borrow().cam_x, 20.0);
+    assert_eq!(rt.draw_state.borrow().cam_y, 30.0);
     assert!(rt.draw_state.borrow().clip.is_some());
     assert_eq!(rt.draw_state.borrow().pal_map[1], 2);
 
@@ -5011,8 +5011,8 @@ run SceneA.new
         _ => String::new(),
     };
     assert_eq!(sym_name, "b");
-    assert_eq!(rt.draw_state.borrow().cam_x, 20);
-    assert_eq!(rt.draw_state.borrow().cam_y, 30);
+    assert_eq!(rt.draw_state.borrow().cam_x, 20.0);
+    assert_eq!(rt.draw_state.borrow().cam_y, 30.0);
     assert!(rt.draw_state.borrow().clip.is_some());
     assert_eq!(rt.draw_state.borrow().pal_map[1], 2);
 
@@ -5023,8 +5023,8 @@ run SceneA.new
 
     // フレーム昇格時に reset_scene_draw_state が呼ばれる
     rt.call_update_result().unwrap();
-    assert_eq!(rt.draw_state.borrow().cam_x, 0);
-    assert_eq!(rt.draw_state.borrow().cam_y, 0);
+    assert_eq!(rt.draw_state.borrow().cam_x, 0.0);
+    assert_eq!(rt.draw_state.borrow().cam_y, 0.0);
     assert!(rt.draw_state.borrow().clip.is_none());
     assert_eq!(rt.draw_state.borrow().pal_map[1], 1); // デフォルトに戻る
 }
@@ -5561,6 +5561,89 @@ fn test_sprite_editor_ai_modal_and_non_destructive_apply() {
     let after_file_contents = std::fs::read_to_string(target_file).unwrap();
     assert_eq!(orig_file_contents, after_file_contents);
 }
+
+#[test]
+fn test_bg_presets_all_8_generate() {
+    let procedural = ["training", "checker", "space", "cyber"];
+    for name in procedural {
+        let img = bg::generate_preset_bg(name).expect("procedural preset should generate");
+        assert_eq!(img.width, 256, "preset {} width", name);
+        assert_eq!(img.height, 256, "preset {} height", name);
+        assert_eq!(img.rgba.len(), 256 * 256 * 4);
+    }
+
+    let jpegs = ["sky", "mountain", "forest", "cave", "city"];
+    for name in jpegs {
+        let img = bg::generate_preset_bg(name).expect("jpeg preset should decode");
+        assert_eq!(img.width, 448, "preset {} width", name);
+        assert_eq!(img.height, 256, "preset {} height", name);
+        assert_eq!(img.rgba.len(), 448 * 256 * 4);
+    }
+
+    assert!(bg::generate_preset_bg("nonexistent_bg").is_none());
+}
+
+#[test]
+fn test_bg_api_kwargs_and_camera_f32_headless() {
+    let script = r##"
+def update
+  camera(12.5, -4.25)
+end
+
+def draw
+  cls(0)
+  bg(:sky, dim: 0.4, mirror_x: true, filter: :linear)
+  bg(:space, scroll_y: -16, loop_y: true, mirror_y: false)
+  bg(:training, { tint: "#88B8FF", alpha: 0.8 })
+  bg(:cyber, 0, 0, scale: 1.0, fit: :screen)
+end
+"##;
+    let (tail, mrb) =
+        cli::compile_ruby_script_str_with_filename(script, Some("test_bg_kwargs.rb")).unwrap();
+    let mut rt = GameRuntime::new(&tail, &mrb, true).expect("init should succeed");
+    rt.call_update_result().unwrap();
+    assert!((rt.draw_state.borrow().cam_x - 12.5).abs() < 1e-5);
+    assert!((rt.draw_state.borrow().cam_y - (-4.25)).abs() < 1e-5);
+
+    rt.call_draw_result().unwrap();
+    let bgs = rt.bgs.borrow();
+    assert!(bgs.contains_key("sky"));
+    assert!(bgs.contains_key("space"));
+    assert!(bgs.contains_key("training"));
+    assert!(bgs.contains_key("cyber"));
+}
+
+#[test]
+fn test_bg_directive_file_and_bundle_inline() {
+    let temp_dir = std::env::temp_dir().join("usakame_test_bg_inline");
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    // 既存の 448x256 JPEG を一時ディレクトリにコピーして @BG 外部参照をテスト
+    let jpg_bytes = include_bytes!("../assets/bg/sky.jpg");
+    std::fs::write(temp_dir.join("custom_sky.jpg"), jpg_bytes).unwrap();
+
+    let tail = "@BG :custom custom_sky.jpg\n";
+    let bgs_direct = bg::parse_tail_bgs(tail, Some(&temp_dir));
+    let img_direct = bgs_direct.get("custom").expect("should load @BG from file");
+    assert_eq!(img_direct.width, 448);
+    assert_eq!(img_direct.height, 256);
+
+    // bundle::inline_bank_file_paths_in_tail で Base64 埋め込みに変換しても読み込めること
+    let inlined = bundle::inline_bank_file_paths_in_tail(tail, &temp_dir);
+    assert!(inlined.contains("@BG :custom"));
+    assert!(!inlined.contains("custom_sky.jpg"));
+
+    let bgs_inlined = bg::parse_tail_bgs(&inlined, None);
+    let img_inlined = bgs_inlined
+        .get("custom")
+        .expect("should load @BG from inlined base64");
+    assert_eq!(img_inlined.width, 448);
+    assert_eq!(img_inlined.height, 256);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
 
 
 

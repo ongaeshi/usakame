@@ -1,16 +1,13 @@
-# Background Prototype (256x256 default screen):
-# High-res backdrop (:sky / :training / :mountain) + Pixel-art sprites
+# Background Preset Demo (256x256 default screen):
+# Built-in 8 Presets (:sky / :mountain / :forest / :cave / :city / :space / :cyber / :training)
 # Run: cargo run --bin uk -- run examples/bg_prototype.rb
 
 config(
-  title: "Usakame BG Prototype (:sky / :training / :mountain)"
+  title: "Usakame BG Presets Demo"
 )
 
-BG_IDS = [300, 301, 302]
-BG_NAMES = [":sky", ":training", ":mountain"]
-
-# 448x256 backdrops (height matches 256px screen, width 448px = 64x7 for seamless grid looping)
-BG_W = 448
+BG_PRESETS = [:sky, :mountain, :forest, :cave, :city, :space, :cyber, :training]
+BG_NAMES = [":sky", ":mountain", ":forest", ":cave", ":city", ":space", ":cyber", ":training"]
 
 TILE = 16
 MAP_W = 40
@@ -82,7 +79,7 @@ def update
 
   # Switch background with X / Enter (btnp 5)
   if btnp(5)
-    $bg_idx = ($bg_idx + 1) % BG_IDS.size
+    $bg_idx = ($bg_idx + 1) % BG_PRESETS.size
   end
 
   # Horizontal movement
@@ -172,15 +169,12 @@ end
 def draw
   cls(0)
 
-  # 1. Draw 1:1 parallax looping background (448x256)
+  # 1. Draw built-in preset background with parallax & mirror_x
   camera(0, 0)
-  bg_id = BG_IDS[$bg_idx]
-  scroll_x = ($cam_x * 0.4).to_i % BG_W
-  spr(bg_id, -scroll_x, 0)
-  spr(bg_id, BG_W - scroll_x, 0)
+  bg(BG_PRESETS[$bg_idx], dim: 0.30, scroll_x: $cam_x * 0.4, mirror_x: true)
 
   # 2. Draw visible world tiles & sprites with camera
-  camera($cam_x.to_i, 0)
+  camera($cam_x, 0)
 
   start_mx = ($cam_x / TILE).floor.to_i
   start_mx = 0 if start_mx < 0
@@ -313,7 +307,3 @@ C = :coin
 ..........C..................BBB........
 GGGGGGGGGGGGGGGG.GGGGGGGGGGGGGGGG.GGGGGG
 GGGGGGGGGGGGGGGG.GGGGGGGGGGGGGGGG.GGGGGG
-
-@PNG 300 bg_sky.png
-@PNG 301 bg_training.png
-@PNG 302 bg_mountain.png

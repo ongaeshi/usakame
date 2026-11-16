@@ -1,3 +1,4 @@
+pub mod bg;
 pub mod bundle;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cli;
@@ -2635,6 +2636,8 @@ struct BgDrawOptions {
     scroll_y: f32,
     loop_x: bool,
     mirror_x: bool,
+    loop_y: bool,
+    mirror_y: bool,
 }
 
 fn parse_robject_f32(obj: &RObject) -> Option<f32> {
@@ -2645,7 +2648,76 @@ fn parse_robject_f32(obj: &RObject) -> Option<f32> {
     }
 }
 
-fn parse_bg_draw_options(args: &[Rc<RObject>], palette_rgba: &PaletteRgba) -> BgDrawOptions {
+fn apply_bg_kv_option(opts: &mut BgDrawOptions, key: &str, v: &RObject, palette_rgba: &PaletteRgba) {
+    let key_str = key.trim_start_matches(':');
+    match key_str {
+        "x" => if let Some(n) = parse_robject_f32(v) { opts.x = n; },
+        "y" => if let Some(n) = parse_robject_f32(v) { opts.y = n; },
+        "scale" => if let Some(n) = parse_robject_f32(v) { opts.scale = n; },
+        "fit" => {
+            opts.fit_screen = match &v.value {
+                RValue::Bool(b) => *b,
+                RValue::Symbol(s) => {
+                    let st = s.name.trim_start_matches(':');
+                    st == "screen" || st == "height"
+                }
+                RValue::String(s, _) => {
+                    let binding = s.borrow();
+                    let st = String::from_utf8_lossy(&binding);
+                    let st = st.trim_start_matches(':');
+                    st == "screen" || st == "height"
+                }
+                _ => false,
+            };
+        }
+        "dim" => if let Some(n) = parse_robject_f32(v) { opts.dim = n.clamp(0.0, 1.0); },
+        "alpha" => if let Some(n) = parse_robject_f32(v) { opts.alpha = n.clamp(0.0, 1.0); },
+        "scroll_x" => if let Some(n) = parse_robject_f32(v) { opts.scroll_x = n; },
+        "scroll_y" => if let Some(n) = parse_robject_f32(v) { opts.scroll_y = n; },
+        "loop_x" => if let RValue::Bool(b) = v.value { opts.loop_x = b; },
+        "mirror_x" => if let RValue::Bool(b) = v.value { opts.mirror_x = b; },
+        "loop_y" => if let RValue::Bool(b) = v.value { opts.loop_y = b; },
+        "mirror_y" => if let RValue::Bool(b) = v.value { opts.mirror_y = b; },
+        "filter" => {
+            let f_raw = match &v.value {
+                RValue::Symbol(s) => s.name.clone(),
+                RValue::String(s, _) => String::from_utf8_lossy(&s.borrow()).to_string(),
+                _ => String::new(),
+            };
+            let f_str = f_raw.trim_start_matches(':');
+            if f_str == "nearest" {
+                opts.filter = FilterMode::Nearest;
+            } else if f_str == "linear" {
+                opts.filter = FilterMode::Linear;
+            }
+        }
+        "tint" => match &v.value {
+            RValue::Integer(idx) => {
+                let c = palette_rgba[(*idx).clamp(0, 15) as usize];
+                opts.tint = Color::new(c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0, 1.0);
+            }
+            RValue::String(s, _) => {
+                let st = String::from_utf8_lossy(&s.borrow()).to_string();
+                if let Some(rgba) = config::parse_hex_color(&st) {
+                    opts.tint = Color::new(rgba[0] as f32 / 255.0, rgba[1] as f32 / 255.0, rgba[2] as f32 / 255.0, 1.0);
+                }
+            }
+            RValue::Array(ary) => {
+                let a = ary.borrow();
+                if a.len() >= 3 {
+                    let r = parse_robject_f32(&a[0]).unwrap_or(255.0) / 255.0;
+                    let g = parse_robject_f32(&a[1]).unwrap_or(255.0) / 255.0;
+                    let b = parse_robject_f32(&a[2]).unwrap_or(255.0) / 255.0;
+                    opts.tint = Color::new(r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0), 1.0);
+                }
+            }
+            _ => {}
+        },
+        _ => {}
+    }
+}
+
+fn parse_bg_draw_options(vm: &VM, args: &[Rc<RObject>], palette_rgba: &PaletteRgba) -> BgDrawOptions {
     let mut opts = BgDrawOptions {
         x: 0.0,
         y: 0.0,
@@ -2659,6 +2731,8 @@ fn parse_bg_draw_options(args: &[Rc<RObject>], palette_rgba: &PaletteRgba) -> Bg
         scroll_y: 0.0,
         loop_x: false,
         mirror_x: false,
+        loop_y: false,
+        mirror_y: false,
     };
 
     if let Some(a1) = args.get(1) && !matches!(a1.value, RValue::Hash(_)) {
@@ -2677,73 +2751,138 @@ fn parse_bg_draw_options(args: &[Rc<RObject>], palette_rgba: &PaletteRgba) -> Bg
                 RValue::String(s, _) => String::from_utf8_lossy(&s.borrow()).to_string(),
                 _ => continue,
             };
-            let key_str = raw_key.trim_start_matches(':');
-            match key_str {
-                "x" => if let Some(n) = parse_robject_f32(v) { opts.x = n; },
-                "y" => if let Some(n) = parse_robject_f32(v) { opts.y = n; },
-                "scale" => if let Some(n) = parse_robject_f32(v) { opts.scale = n; },
-                "fit" => {
-                    opts.fit_screen = match &v.value {
-                        RValue::Bool(b) => *b,
-                        RValue::Symbol(s) => {
-                            let st = s.name.trim_start_matches(':');
-                            st == "screen" || st == "height"
-                        }
-                        RValue::String(s, _) => {
-                            let binding = s.borrow();
-                            let st = String::from_utf8_lossy(&binding);
-                            let st = st.trim_start_matches(':');
-                            st == "screen" || st == "height"
-                        }
-                        _ => false,
-                    };
-                }
-                "dim" => if let Some(n) = parse_robject_f32(v) { opts.dim = n.clamp(0.0, 1.0); },
-                "alpha" => if let Some(n) = parse_robject_f32(v) { opts.alpha = n.clamp(0.0, 1.0); },
-                "scroll_x" => if let Some(n) = parse_robject_f32(v) { opts.scroll_x = n; },
-                "scroll_y" => if let Some(n) = parse_robject_f32(v) { opts.scroll_y = n; },
-                "loop_x" => if let RValue::Bool(b) = v.value { opts.loop_x = b; },
-                "mirror_x" => if let RValue::Bool(b) = v.value { opts.mirror_x = b; },
-                "filter" => {
-                    let f_raw = match &v.value {
-                        RValue::Symbol(s) => s.name.clone(),
-                        RValue::String(s, _) => String::from_utf8_lossy(&s.borrow()).to_string(),
-                        _ => String::new(),
-                    };
-                    let f_str = f_raw.trim_start_matches(':');
-                    if f_str == "nearest" {
-                        opts.filter = FilterMode::Nearest;
-                    } else if f_str == "linear" {
-                        opts.filter = FilterMode::Linear;
-                    }
-                }
-                "tint" => match &v.value {
-                    RValue::Integer(idx) => {
-                        let c = palette_rgba[(*idx).clamp(0, 15) as usize];
-                        opts.tint = Color::new(c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0, 1.0);
-                    }
-                    RValue::String(s, _) => {
-                        let st = String::from_utf8_lossy(&s.borrow()).to_string();
-                        if let Some(rgba) = config::parse_hex_color(&st) {
-                            opts.tint = Color::new(rgba[0] as f32 / 255.0, rgba[1] as f32 / 255.0, rgba[2] as f32 / 255.0, 1.0);
-                        }
-                    }
-                    RValue::Array(ary) => {
-                        let a = ary.borrow();
-                        if a.len() >= 3 {
-                            let r = parse_robject_f32(&a[0]).unwrap_or(255.0) / 255.0;
-                            let g = parse_robject_f32(&a[1]).unwrap_or(255.0) / 255.0;
-                            let b = parse_robject_f32(&a[2]).unwrap_or(255.0) / 255.0;
-                            opts.tint = Color::new(r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0), 1.0);
-                        }
-                    }
-                    _ => {}
-                },
-                _ => {}
-            }
+            apply_bg_kv_option(&mut opts, &raw_key, v, palette_rgba);
+        }
+    }
+
+    if let Some(kwargs) = vm.get_kwargs() {
+        for (k, v) in kwargs.iter() {
+            apply_bg_kv_option(&mut opts, k, v, palette_rgba);
+        }
+    }
+    if let Some(ref kargs) = *vm.kargs.borrow() {
+        for (sym, v) in kargs.iter() {
+            apply_bg_kv_option(&mut opts, &sym.name, v, palette_rgba);
         }
     }
     opts
+}
+
+fn resolve_bg_key(arg: &RObject) -> Option<String> {
+    match &arg.value {
+        RValue::Symbol(s) => Some(s.name.trim_start_matches(':').to_string()),
+        RValue::String(s, _) => {
+            let st = String::from_utf8_lossy(&s.borrow()).to_string();
+            Some(st.trim_start_matches(':').to_string())
+        }
+        RValue::Integer(n) => Some(n.to_string()),
+        RValue::Float(f) => Some((*f as i32).to_string()),
+        _ => None,
+    }
+}
+
+fn draw_bg_texture(
+    texture: &Texture2D,
+    tex_w: u16,
+    tex_h: u16,
+    screen_w: f32,
+    screen_h: f32,
+    opts: &BgDrawOptions,
+) {
+    let scale = if opts.fit_screen && tex_h > 0 {
+        screen_h / tex_h as f32
+    } else {
+        opts.scale
+    };
+    let draw_w = tex_w as f32 * scale;
+    let draw_h = tex_h as f32 * scale;
+    if draw_w <= 0.0 || draw_h <= 0.0 {
+        return;
+    }
+    let bright = 1.0 - opts.dim;
+    let color = Color::new(
+        opts.tint.r * bright,
+        opts.tint.g * bright,
+        opts.tint.b * bright,
+        opts.alpha,
+    );
+    texture.set_filter(opts.filter);
+
+    let repeat_x = opts.loop_x || opts.mirror_x;
+    let repeat_y = opts.loop_y || opts.mirror_y;
+
+    let (start_x, period_x) = if repeat_x {
+        let p = if opts.mirror_x { draw_w * 2.0 } else { draw_w };
+        let mut off = opts.scroll_x % p;
+        if off < 0.0 {
+            off += p;
+        }
+        (opts.x - off, p)
+    } else {
+        (opts.x - opts.scroll_x, 0.0)
+    };
+    let _ = period_x;
+
+    let (start_y, period_y) = if repeat_y {
+        let p = if opts.mirror_y { draw_h * 2.0 } else { draw_h };
+        let mut off = opts.scroll_y % p;
+        if off < 0.0 {
+            off += p;
+        }
+        (opts.y - off, p)
+    } else {
+        (opts.y - opts.scroll_y, 0.0)
+    };
+    let _ = period_y;
+
+    let mut cur_y = start_y;
+    let mut tile_y = 0usize;
+    loop {
+        if repeat_y && cur_y >= screen_h {
+            break;
+        }
+        let y0 = if repeat_y { cur_y.floor() } else { cur_y };
+        let y1 = if repeat_y { (cur_y + draw_h).floor() } else { cur_y + draw_h };
+        let tile_h = if repeat_y { (y1 - y0).max(1.0) } else { draw_h };
+        let flip_y = opts.mirror_y && (tile_y % 2 == 1);
+
+        let mut cur_x = start_x;
+        let mut tile_x = 0usize;
+        loop {
+            if repeat_x && cur_x >= screen_w {
+                break;
+            }
+            let x0 = if repeat_x { cur_x.floor() } else { cur_x };
+            let x1 = if repeat_x { (cur_x + draw_w).floor() } else { cur_x + draw_w };
+            let tile_w = if repeat_x { (x1 - x0).max(1.0) } else { draw_w };
+            let flip_x = opts.mirror_x && (tile_x % 2 == 1);
+
+            draw_texture_ex(
+                texture,
+                x0,
+                y0,
+                color,
+                DrawTextureParams {
+                    dest_size: Some(vec2(tile_w, tile_h)),
+                    flip_x,
+                    flip_y,
+                    ..Default::default()
+                },
+            );
+
+            if !repeat_x {
+                break;
+            }
+            cur_x += draw_w;
+            tile_x += 1;
+        }
+
+        if !repeat_y {
+            break;
+        }
+        cur_y += draw_h;
+        tile_y += 1;
+    }
 }
 
 fn draw_bank_rect(
@@ -2982,10 +3121,10 @@ pub fn intersect_screen_clip_ex(x: i32, y: i32, w: i32, h: i32, sw: i32, sh: i32
 }
 
 /// 描画ステート（カメラオフセット、画面クリッピング領域、カラーパレット置換・透過設定）
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DrawState {
-    pub cam_x: i32,
-    pub cam_y: i32,
+    pub cam_x: f32,
+    pub cam_y: f32,
     pub clip: Option<PixelSpan>,
     pub pal_map: [u8; 16],
     pub palt_mask: u16,
@@ -2998,8 +3137,8 @@ pub struct DrawState {
 impl Default for DrawState {
     fn default() -> Self {
         Self {
-            cam_x: 0,
-            cam_y: 0,
+            cam_x: 0.0,
+            cam_y: 0.0,
             clip: None,
             pal_map: DEFAULT_PAL_MAP,
             palt_mask: 0,
@@ -3012,14 +3151,14 @@ impl Default for DrawState {
 }
 
 impl DrawState {
-    pub fn set_camera(&mut self, x: i32, y: i32) {
+    pub fn set_camera(&mut self, x: f32, y: f32) {
         self.cam_x = x;
         self.cam_y = y;
     }
 
     pub fn reset_camera(&mut self) {
-        self.cam_x = 0;
-        self.cam_y = 0;
+        self.cam_x = 0.0;
+        self.cam_y = 0.0;
     }
 
     pub fn set_clip(&mut self, x: i32, y: i32, w: i32, h: i32) {
@@ -3081,8 +3220,8 @@ impl DrawState {
             if s.w <= 0 || s.h <= 0 {
                 continue;
             }
-            let sx = s.x.saturating_sub(self.cam_x);
-            let sy = s.y.saturating_sub(self.cam_y);
+            let sx = s.x.saturating_sub(self.cam_x.round() as i32);
+            let sy = s.y.saturating_sub(self.cam_y.round() as i32);
             if let Some(clip) = self.clip {
                 let x0 = sx.max(clip.x);
                 let y0 = sy.max(clip.y);
@@ -4605,6 +4744,7 @@ fn rebind_object_to_vm(obj: &Rc<RObject>, vm: &VM) -> Rc<RObject> {
 fn register_engine_api(
     vm: &mut VM,
     sprites: Rc<RefCell<HashMap<i32, SpriteData>>>,
+    bgs: Rc<RefCell<HashMap<String, bg::BgImage>>>,
     banks: Rc<RefCell<HashMap<i32, BankData>>>,
     active_spr_bank: Rc<RefCell<i32>>,
     active_map_bank: Rc<RefCell<i32>>,
@@ -4895,8 +5035,8 @@ fn register_engine_api(
         obj_class.clone(),
         "camera",
         Box::new(move |_vm, args| {
-            let x = arg_i32(args, 0, 0);
-            let y = arg_i32(args, 1, 0);
+            let x = arg_f32(args, 0, 0.0);
+            let y = arg_f32(args, 1, 0.0);
             state_for_cam.borrow_mut().set_camera(x, y);
             Ok(Rc::new(RObject::nil()))
         }),
@@ -5972,8 +6112,8 @@ fn register_engine_api(
             let b = arg_i32(args, 6, 255).clamp(0, 255) as u8;
             if w > 0 && h > 0 {
                 let state = state_for_rect_rgb.borrow();
-                let sx = (x - state.cam_x) as f32;
-                let sy = (y - state.cam_y) as f32;
+                let sx = x as f32 - state.cam_x;
+                let sy = y as f32 - state.cam_y;
                 draw_rectangle(
                     sx,
                     sy,
@@ -7450,21 +7590,29 @@ fn register_engine_api(
         );
 
         // bg(id, x = 0, y = 0, opts = {}): 高解像度背景描画 (ヘッドレス用)
+        let bgs_for_headless_bg = bgs.clone();
+        let sprites_for_headless_bg = sprites.clone();
         let names_for_headless_bg = sprite_names.clone();
         let state_for_headless_bg = draw_state.clone();
         mrb_define_cmethod(
             vm,
             obj_class.clone(),
             "bg",
-            Box::new(move |_vm, args| {
+            Box::new(move |vm, args| {
                 let state = *state_for_headless_bg.borrow();
-                let id = if let Some(first) = args.first() {
-                    resolve_sprite_arg(first, &names_for_headless_bg.borrow()).unwrap_or(0)
-                } else {
-                    0
-                };
-                let _opts = parse_bg_draw_options(args, &state.palette_rgba);
-                let _ = id;
+                let _opts = parse_bg_draw_options(vm, args, &state.palette_rgba);
+                if let Some(first) = args.first()
+                    && let Some(key) = resolve_bg_key(first)
+                {
+                    let mut bgs_mut = bgs_for_headless_bg.borrow_mut();
+                    if !bgs_mut.contains_key(&key) {
+                        if let Some(preset) = bg::generate_preset_bg(&key) {
+                            bgs_mut.insert(key, preset);
+                        } else if let Some(id) = resolve_sprite_arg(first, &names_for_headless_bg.borrow()) {
+                            let _ = sprites_for_headless_bg.borrow().get(&id);
+                        }
+                    }
+                }
                 Ok(Rc::new(RObject::nil()))
             }),
         );
@@ -7512,10 +7660,8 @@ fn register_engine_api(
                         if tile_id < 0 {
                             continue;
                         }
-                        let draw_x =
-                            (sx + dx * step - state.cam_x) as f32;
-                        let draw_y =
-                            (sy + dy * step - state.cam_y) as f32;
+                        let draw_x = (sx + dx * step) as f32 - state.cam_x;
+                        let draw_y = (sy + dy * step) as f32 - state.cam_y;
                         if draw_x + 16.0 * sp_scale <= 0.0
                             || draw_x >= sw
                             || draw_y + 16.0 * sp_scale <= 0.0
@@ -8540,7 +8686,8 @@ fn register_engine_api(
         }),
     );
 
-    // bg(id, x = 0, y = 0, opts = {}): 高解像度背景描画 (dim / tint / filter / scroll / loop_x 対応)
+    // bg(id, x = 0, y = 0, opts = {}): 高解像度背景描画 (プリセット / @BG / dim / tint / filter / scroll / loop / mirror 対応)
+    let bgs_for_bg = bgs.clone();
     let names_for_bg = sprite_names.clone();
     let sprites_for_bg = sprites.clone();
     let state_for_bg = draw_state.clone();
@@ -8549,80 +8696,40 @@ fn register_engine_api(
         vm,
         obj_class.clone(),
         "bg",
-        Box::new(move |_vm, args| {
+        Box::new(move |vm, args| {
             let state = *state_for_bg.borrow();
             if state.is_clip_empty() {
                 return Ok(Rc::new(RObject::nil()));
             }
-            let id = if let Some(first) = args.first() {
-                resolve_sprite_arg(first, &names_for_bg.borrow()).unwrap_or(0)
-            } else {
-                0
+            let opts = parse_bg_draw_options(vm, args, &state.palette_rgba);
+            let screen_w = cfg_for_bg.borrow().screen_width as f32;
+            let screen_h = cfg_for_bg.borrow().screen_height as f32;
+            let Some(first) = args.first() else {
+                return Ok(Rc::new(RObject::nil()));
             };
-            let opts = parse_bg_draw_options(args, &state.palette_rgba);
-            let sprites_ref = sprites_for_bg.borrow();
-            if let Some(sprite) = sprites_ref.get(&id)
-                && let Some(ref texture) = sprite.texture
-            {
-                let screen_w = cfg_for_bg.borrow().screen_width as f32;
-                let screen_h = cfg_for_bg.borrow().screen_height as f32;
-                let scale = if opts.fit_screen && sprite.height > 0 {
-                    screen_h / sprite.height as f32
-                } else {
-                    opts.scale
-                };
-                let draw_w = sprite.width as f32 * scale;
-                let draw_h = sprite.height as f32 * scale;
-                if draw_w <= 0.0 || draw_h <= 0.0 {
+            if let Some(key) = resolve_bg_key(first) {
+                let mut bgs_mut = bgs_for_bg.borrow_mut();
+                if !bgs_mut.contains_key(&key) {
+                    if let Some(mut preset) = bg::generate_preset_bg(&key) {
+                        preset.build_texture();
+                        bgs_mut.insert(key.clone(), preset);
+                    }
+                }
+                if let Some(bg_img) = bgs_mut.get_mut(&key) {
+                    bg_img.build_texture();
+                    if let Some(ref texture) = bg_img.texture {
+                        draw_bg_texture(texture, bg_img.width, bg_img.height, screen_w, screen_h, &opts);
+                    }
                     return Ok(Rc::new(RObject::nil()));
                 }
-                let bright = 1.0 - opts.dim;
-                let color = Color::new(
-                    opts.tint.r * bright,
-                    opts.tint.g * bright,
-                    opts.tint.b * bright,
-                    opts.alpha,
-                );
-                texture.set_filter(opts.filter);
-                let base_y = opts.y - opts.scroll_y;
-                if opts.loop_x || opts.mirror_x {
-                    let period = if opts.mirror_x { draw_w * 2.0 } else { draw_w };
-                    let mut offset = opts.scroll_x % period;
-                    if offset < 0.0 {
-                        offset += period;
-                    }
-                    let mut cur_x = opts.x - offset;
-                    let mut tile_idx = 0usize;
-                    while cur_x < screen_w {
-                        let x0 = cur_x.floor();
-                        let x1 = (cur_x + draw_w).floor();
-                        let tile_w = (x1 - x0).max(1.0);
-                        let flip_x = opts.mirror_x && (tile_idx % 2 == 1);
-                        draw_texture_ex(
-                            texture,
-                            x0,
-                            base_y,
-                            color,
-                            DrawTextureParams {
-                                dest_size: Some(vec2(tile_w, draw_h)),
-                                flip_x,
-                                ..Default::default()
-                            },
-                        );
-                        cur_x += draw_w;
-                        tile_idx += 1;
-                    }
-                } else {
-                    draw_texture_ex(
-                        texture,
-                        opts.x - opts.scroll_x,
-                        base_y,
-                        color,
-                        DrawTextureParams {
-                            dest_size: Some(vec2(draw_w, draw_h)),
-                            ..Default::default()
-                        },
-                    );
+            }
+            // 後方互換フォールバック: @PNG によるスプライトID指定
+            if let Some(id) = resolve_sprite_arg(first, &names_for_bg.borrow()) {
+                let sprites_ref = sprites_for_bg.borrow();
+                if let Some(sprite) = sprites_ref.get(&id)
+                    && let Some(ref texture) = sprite.texture
+                {
+                    draw_bg_texture(texture, sprite.width, sprite.height, screen_w, screen_h, &opts);
                 }
             }
             Ok(Rc::new(RObject::nil()))
@@ -8731,8 +8838,8 @@ fn register_engine_api(
                     if tile_id < 0 {
                         continue;
                     }
-                    let draw_x = (sx + dx * step - state.cam_x) as f32;
-                    let draw_y = (sy + dy * step - state.cam_y) as f32;
+                    let draw_x = (sx + dx * step) as f32 - state.cam_x;
+                    let draw_y = (sy + dy * step) as f32 - state.cam_y;
                     let tile_size_scaled = SPRITE_SIZE as f32 * sp_scale;
                     if draw_x + tile_size_scaled <= 0.0
                         || draw_x >= sw
@@ -8900,8 +9007,8 @@ fn register_engine_api(
                 .first()
                 .and_then(|v| String::try_from(v.as_ref()).ok())
                 .unwrap_or_default();
-            let x = (arg_i32(args, 1, 0).saturating_sub(state.cam_x)) as f32;
-            let y = (arg_i32(args, 2, 0).saturating_sub(state.cam_y)) as f32;
+            let x = arg_f32(args, 1, 0.0) - state.cam_x;
+            let y = arg_f32(args, 2, 0.0) - state.cam_y;
             let col = arg_i32(args, 3, 7);
             let size = parse_text_size_arg(args, cfg_for_print.borrow().resolved_text_size());
             font_for_print.draw_text_crisp_ex(&text, x, y, state.map_color(col), &emoji_for_print, size);
@@ -9261,6 +9368,7 @@ pub struct GameRuntime {
     pub next_scene: Rc<RefCell<Option<NextSceneRequest>>>,
     pub is_hot_reloading: Rc<RefCell<bool>>,
     pub sprites: Rc<RefCell<HashMap<i32, SpriteData>>>,
+    pub bgs: Rc<RefCell<HashMap<String, bg::BgImage>>>,
     pub banks: Rc<RefCell<HashMap<i32, BankData>>>,
     pub active_spr_bank: Rc<RefCell<i32>>,
     pub active_map_bank: Rc<RefCell<i32>>,
@@ -9307,6 +9415,7 @@ impl GameRuntime {
     ) -> Result<Self, ScriptError> {
         let (mut sprites_map, mut banks_map, palettes_map, sprite_names_map) =
             parse_tail_resources_full(tail_data, base_dir);
+        let mut bgs_map = bg::parse_tail_bgs(tail_data, base_dir);
         static EMPTY_ALIASES: std::sync::LazyLock<HashMap<char, i32>> = std::sync::LazyLock::new(HashMap::new);
         let (tail_map, map_aliases_map) = parse_tail_map_with_symbols(tail_data, &EMPTY_ALIASES, &sprite_names_map);
         let tail_objects = parse_tail_objects(tail_data);
@@ -9329,12 +9438,16 @@ impl GameRuntime {
             for sprite in sprites_map.values_mut() {
                 sprite.build_texture();
             }
+            for bg_img in bgs_map.values_mut() {
+                bg_img.build_texture();
+            }
             for bank in banks_map.values_mut() {
                 bank.build_texture();
             }
         }
 
         let sprites = Rc::new(RefCell::new(sprites_map));
+        let bgs = Rc::new(RefCell::new(bgs_map));
         let banks = Rc::new(RefCell::new(banks_map));
         let active_spr_bank = Rc::new(RefCell::new(0));
         let active_map_bank = Rc::new(RefCell::new(0));
@@ -9361,6 +9474,7 @@ impl GameRuntime {
         register_engine_api(
             &mut vm,
             sprites.clone(),
+            bgs.clone(),
             banks.clone(),
             active_spr_bank.clone(),
             active_map_bank.clone(),
@@ -9416,6 +9530,7 @@ impl GameRuntime {
             next_scene,
             is_hot_reloading,
             sprites,
+            bgs,
             banks,
             active_spr_bank,
             active_map_bank,
@@ -9471,6 +9586,7 @@ impl GameRuntime {
     pub fn hot_reload(&mut self, new_tail_data: &str, new_mrb_bytes: &[u8]) -> Result<(), ScriptError> {
         let (mut new_sprites_map, mut new_banks_map, new_palettes_map, new_names_map) =
             parse_tail_resources_full(new_tail_data, self.base_dir.as_deref());
+        let mut new_bgs_map = bg::parse_tail_bgs(new_tail_data, self.base_dir.as_deref());
         static EMPTY_ALIASES: std::sync::LazyLock<HashMap<char, i32>> = std::sync::LazyLock::new(HashMap::new);
         let (new_tail_map, new_aliases_map) = parse_tail_map_with_symbols(new_tail_data, &EMPTY_ALIASES, &new_names_map);
         let new_tail_objects = parse_tail_objects(new_tail_data);
@@ -9521,6 +9637,7 @@ impl GameRuntime {
         register_engine_api(
             &mut new_vm,
             self.sprites.clone(),
+            self.bgs.clone(),
             self.banks.clone(),
             self.active_spr_bank.clone(),
             self.active_map_bank.clone(),
@@ -9574,11 +9691,15 @@ impl GameRuntime {
             for sprite in new_sprites_map.values_mut() {
                 sprite.build_texture();
             }
+            for bg_img in new_bgs_map.values_mut() {
+                bg_img.build_texture();
+            }
             for bank in new_banks_map.values_mut() {
                 bank.build_texture();
             }
         }
         *self.sprites.borrow_mut() = new_sprites_map;
+        *self.bgs.borrow_mut() = new_bgs_map;
         *self.banks.borrow_mut() = new_banks_map;
         *self.active_spr_bank.borrow_mut() = 0;
         *self.active_map_bank.borrow_mut() = 0;
@@ -9592,6 +9713,7 @@ impl GameRuntime {
         register_engine_api(
             &mut new_vm,
             self.sprites.clone(),
+            self.bgs.clone(),
             self.banks.clone(),
             self.active_spr_bank.clone(),
             self.active_map_bank.clone(),
@@ -9650,7 +9772,7 @@ impl GameRuntime {
     /// シーン切り替え時に描画ステート（camera, clip, pal, palt）を初期状態にリセットする
     pub fn reset_scene_draw_state(&mut self) {
         let mut state = self.draw_state.borrow_mut();
-        state.set_camera(0, 0);
+        state.set_camera(0.0, 0.0);
         state.reset_clip();
         state.reset_pal();
         state.reset_palt();

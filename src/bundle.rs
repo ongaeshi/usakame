@@ -380,15 +380,81 @@ pub fn pack_script_to_standalone_source(script_path: &Path) -> Result<String, St
     }
 }
 
-/// `@BANK <id> path/to/image.png` のような外部ファイル参照を Base64 にインライン化する
+/// `@BANK <id> path/to/image.png` / `@BG <name> path/to/image.png` / `@PNG <id> path/to/image.png` のような外部ファイル参照を Base64 にインライン化する
 pub fn inline_bank_file_paths_in_tail(tail_data: &str, base_dir: &Path) -> String {
     let mut out_lines = Vec::new();
     let mut in_bank_block = false;
     let mut current_bank_id = None;
+    let mut in_bg_block = false;
+    let mut current_bg_name: Option<String> = None;
+    let mut in_png_block = false;
+    let mut current_png_id: Option<i32> = None;
 
     for line in tail_data.lines() {
         let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("@BG") {
+            in_bank_block = false;
+            current_bank_id = None;
+            in_png_block = false;
+            current_png_id = None;
+            in_bg_block = true;
+            let mut parts = rest.split_whitespace();
+            if let Some(bg_name) = parts.next() {
+                current_bg_name = Some(bg_name.to_string());
+                let inline_content = parts.collect::<Vec<_>>().join(" ");
+                if !inline_content.is_empty() {
+                    let path_candidate = base_dir.join(&inline_content);
+                    if path_candidate.is_file() {
+                        if let Ok(bytes) = std::fs::read(&path_candidate) {
+                            let b64 = encode_base64(&bytes);
+                            out_lines.push(format!("@BG {}", bg_name));
+                            out_lines.push(b64);
+                            in_bg_block = false;
+                            current_bg_name = None;
+                            continue;
+                        }
+                    }
+                }
+            }
+            out_lines.push(line.to_string());
+            continue;
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("@PNG") {
+            in_bank_block = false;
+            current_bank_id = None;
+            in_bg_block = false;
+            current_bg_name = None;
+            in_png_block = true;
+            let mut parts = rest.split_whitespace();
+            if let Some(id_str) = parts.next()
+                && let Ok(id) = id_str.parse::<i32>()
+            {
+                current_png_id = Some(id);
+                let inline_content = parts.collect::<Vec<_>>().join(" ");
+                if !inline_content.is_empty() {
+                    let path_candidate = base_dir.join(&inline_content);
+                    if path_candidate.is_file() {
+                        if let Ok(bytes) = std::fs::read(&path_candidate) {
+                            let b64 = encode_base64(&bytes);
+                            out_lines.push(format!("@PNG {}", id));
+                            out_lines.push(b64);
+                            in_png_block = false;
+                            current_png_id = None;
+                            continue;
+                        }
+                    }
+                }
+            }
+            out_lines.push(line.to_string());
+            continue;
+        }
+
         if let Some(rest) = trimmed.strip_prefix("@SHEET") {
+            in_bg_block = false;
+            current_bg_name = None;
+            in_png_block = false;
+            current_png_id = None;
             let mut parts = rest.split_whitespace();
             if let Some(id_str) = parts.next()
                 && let Ok(id) = id_str.parse::<i32>()
@@ -448,6 +514,42 @@ pub fn inline_bank_file_paths_in_tail(tail_data: &str, base_dir: &Path) -> Strin
             continue;
         }
 
+        if in_bg_block {
+            if trimmed.starts_with('@') {
+                in_bg_block = false;
+                current_bg_name = None;
+            } else if current_bg_name.is_some() {
+                let path_candidate = base_dir.join(trimmed);
+                if path_candidate.is_file() {
+                    if let Ok(bytes) = std::fs::read(&path_candidate) {
+                        let b64 = encode_base64(&bytes);
+                        out_lines.push(b64);
+                        in_bg_block = false;
+                        current_bg_name = None;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        if in_png_block {
+            if trimmed.starts_with('@') {
+                in_png_block = false;
+                current_png_id = None;
+            } else if current_png_id.is_some() {
+                let path_candidate = base_dir.join(trimmed);
+                if path_candidate.is_file() {
+                    if let Ok(bytes) = std::fs::read(&path_candidate) {
+                        let b64 = encode_base64(&bytes);
+                        out_lines.push(b64);
+                        in_png_block = false;
+                        current_png_id = None;
+                        continue;
+                    }
+                }
+            }
+        }
+
         if in_bank_block {
             if trimmed.starts_with('@') {
                 in_bank_block = false;
@@ -497,6 +599,7 @@ pub fn unpack_tail_data_to_sections(
             || trimmed.starts_with("@PALETTE")
             || trimmed.starts_with("@BANK")
             || trimmed.starts_with("@PNG")
+            || trimmed.starts_with("@BG")
             || trimmed.starts_with("@SHEET")
             || trimmed.starts_with("@B64")
         {
