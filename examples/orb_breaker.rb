@@ -38,7 +38,7 @@ CELL_H     = 26.0
 GRID_X0    = 16.0
 GRID_Y0    = 34.0
 
-SUBSTEPS      = 4
+SUBSTEPS      = 3
 ORB_RADIUS    = 3.5
 ORB_BASE_SPD  = 3.85
 AIM_MIN_ANG   = -2.92  # 約 -167度 (左向き限界)
@@ -484,8 +484,8 @@ end
 # ------------------------------------------------------------------------------
 class Target
   attr_accessor :kind, :shape, :x, :y, :w, :h
-  attr_accessor :r, :hp, :max_hp, :spr_name, :flash_t
-  attr_accessor :sx, :sy, :col, :row, :hit_cd
+  attr_accessor :r, :hw, :hh, :hp, :max_hp, :spr_name
+  attr_accessor :flash_t, :sx, :sy, :col, :row, :hit_cd
   attr_accessor :is_boss, :score_val
 
   def initialize(opts)
@@ -495,6 +495,8 @@ class Target
     @y = opts[:y].to_f
     @w = (opts[:w] || 24).to_f
     @h = (opts[:h] || 20).to_f
+    @hw = @w * 0.5
+    @hh = @h * 0.5
     @r = (opts[:r] || 10.0).to_f
     @hp = opts[:hp] || 5
     @max_hp = @hp
@@ -629,74 +631,88 @@ class Orb
 end
 
 # ------------------------------------------------------------------------------
-# 物理エンジン (固定サブステップ + 位置補正 + 予測線シミュレーション)
+# 物理エンジン (固定サブステップ + 位置補正 + ゼロアロケーション判定 + 予測線)
 # ------------------------------------------------------------------------------
 class PhysicsWorld
-  # 単一円の移動・反射ステップ（本番・予測で共通利用）
-  def self.step_circle_walls(pos_x, pos_y, vx, vy, r)
+  # オーブの壁衝突を直接更新 (アロケーションなし)
+  def self.step_orb_walls(orb)
+    r = orb.r
     hit_wall = false
-    if pos_x - r < ARENA_LEFT
-      pos_x = ARENA_LEFT + r
-      vx = vx.abs
+    if orb.x - r < ARENA_LEFT
+      orb.x = ARENA_LEFT + r
+      orb.vx = orb.vx.abs
       hit_wall = true
-    elsif pos_x + r > ARENA_RIGHT
-      pos_x = ARENA_RIGHT - r
-      vx = -vx.abs
+    elsif orb.x + r > ARENA_RIGHT
+      orb.x = ARENA_RIGHT - r
+      orb.vx = -orb.vx.abs
       hit_wall = true
     end
 
-    if pos_y - r < ARENA_TOP
-      pos_y = ARENA_TOP + r
-      vy = vy.abs
+    if orb.y - r < ARENA_TOP
+      orb.y = ARENA_TOP + r
+      orb.vy = orb.vy.abs
       hit_wall = true
     end
 
     if hit_wall
-      vx, vy = prevent_horizontal_stuck(vx, vy)
+      prevent_horizontal_stuck_orb(orb)
     end
-    [pos_x, pos_y, vx, vy, hit_wall]
+    hit_wall
   end
 
-  def self.prevent_horizontal_stuck(vx, vy)
-    spd = hypot(vx, vy)
-    return [vx, vy] if spd < 0.001
-    if vy.abs < 0.25 * (spd / ORB_BASE_SPD)
+  def self.prevent_horizontal_stuck_orb(orb)
+    vx = orb.vx
+    vy = orb.vy
+    spd_sq = vx * vx + vy * vy
+    return if spd_sq < 0.0001
+    if vy.abs < 0.25
+      spd = sqrt(spd_sq)
       sign_y = (vy >= 0.0 ? 1.0 : -1.0)
-      vy = sign_y * 0.32 * (spd / ORB_BASE_SPD)
+      vy = sign_y * 0.32
       len = hypot(vx, vy)
-      vx = (vx / len) * spd
-      vy = (vy / len) * spd
+      orb.vx = (vx / len) * spd
+      orb.vy = (vy / len) * spd
     end
-    [vx, vy]
   end
 
-  # 円 vs 円 衝突判定 (二乗距離事前チェック付き)
-  # 衝突時: [true, nx, ny, overlap] / 非衝突時: [false, 0, 0, 0]
+  def self.reflect_orb(orb, nx, ny)
+    dot = orb.vx * nx + orb.vy * ny
+    return if dot >= 0.0
+    orb.vx = orb.vx - 2.0 * dot * nx
+    orb.vy = orb.vy - 2.0 * dot * ny
+    prevent_horizontal_stuck_orb(orb)
+  end
+
+  # 円 vs 円 衝突判定 (非衝突時は nil を返しアロケーションゼロ)
+  # 衝突時のみ [nx, ny, overlap] を返す
   def self.collide_circle_circle(cx1, cy1, r1, cx2, cy2, r2)
-    dx = cx1 - cx2
-    dy = cy1 - cy2
     r_sum = r1 + r2
+    dx = cx1 - cx2
+    return nil if dx >= r_sum || dx <= -r_sum
+    dy = cy1 - cy2
+    return nil if dy >= r_sum || dy <= -r_sum
+
     dist_sq = dx * dx + dy * dy
-    return [false, 0.0, 0.0, 0.0] if dist_sq >= r_sum * r_sum
+    return nil if dist_sq >= r_sum * r_sum
 
     if dist_sq < 0.0001
-      return [true, 0.0, -1.0, r_sum]
+      return [0.0, -1.0, r_sum]
     end
     dist = sqrt(dist_sq)
-    nx = dx / dist
-    ny = dy / dist
-    overlap = r_sum - dist
-    [true, nx, ny, overlap]
+    [dx / dist, dy / dist, r_sum - dist]
   end
 
-  # 円 vs AABB矩形 衝突判定 (二乗距離事前チェック付き)
-  def self.collide_circle_rect(cx, cy, r, rx, ry, rw, rh)
-    half_w = rw * 0.5
-    half_h = rh * 0.5
-    left = rx - half_w
-    right = rx + half_w
-    top = ry - half_h
-    bottom = ry + half_h
+  # 円 vs AABB矩形 衝突判定 (非衝突時は nil を返しアロケーションゼロ)
+  # 衝突時のみ [nx, ny, overlap] を返す
+  def self.collide_circle_rect(cx, cy, r, rx, ry, hw, hh)
+    left = rx - hw
+    return nil if cx + r <= left
+    right = rx + hw
+    return nil if cx - r >= right
+    top = ry - hh
+    return nil if cy + r <= top
+    bottom = ry + hh
+    return nil if cy - r >= bottom
 
     closest_x = clamp_f(cx, left, right)
     closest_y = clamp_f(cy, top, bottom)
@@ -704,10 +720,9 @@ class PhysicsWorld
     dx = cx - closest_x
     dy = cy - closest_y
     dist_sq = dx * dx + dy * dy
-    return [false, 0.0, 0.0, 0.0] if dist_sq >= r * r
+    return nil if dist_sq >= r * r
 
     if dist_sq < 0.0001
-      # 円中心が矩形内部にある場合は最も近い辺へ押し戻す
       d_left = (cx - left).abs
       d_right = (right - cx).abs
       d_top = (cy - top).abs
@@ -730,62 +745,66 @@ class PhysicsWorld
         nx = 0.0
         ny = 1.0
       end
-      return [true, nx, ny, r + m]
+      return [nx, ny, r + m]
     end
 
     dist = sqrt(dist_sq)
-    nx = dx / dist
-    ny = dy / dist
-    overlap = r - dist
-    [true, nx, ny, overlap]
-  end
-
-  def self.reflect_velocity(vx, vy, nx, ny)
-    dot = vx * nx + vy * ny
-    return [vx, vy] if dot >= 0.0
-    rvx = vx - 2.0 * dot * nx
-    rvy = vy - 2.0 * dot * ny
-    prevent_horizontal_stuck(rvx, rvy)
+    [dx / dist, dy / dist, r - dist]
   end
 
   # 予測ガイド線シミュレーション (最初の1回反射 + 数ステップ先まで)
   def self.predict_trajectory(start_x, start_y, ang, targets)
-    px = start_x.to_f
-    py = start_y.to_f
-    vx = cos(ang) * ORB_BASE_SPD
-    vy = sin(ang) * ORB_BASE_SPD
+    sim = Orb.new(start_x, start_y, cos(ang) * ORB_BASE_SPD, sin(ang) * ORB_BASE_SPD, :normal, ORB_RADIUS)
     sub_dt = 1.0 / SUBSTEPS
 
-    pts = [[px, py]]
+    pts = [[sim.x, sim.y]]
     bounces = 0
     post_bounce_steps = 0
     first_hit = nil
 
     step = 0
-    while step < 90
+    while step < 48
       sub = 0
       while sub < SUBSTEPS
-        px += vx * sub_dt
-        py += vy * sub_dt
+        sim.x += sim.vx * sub_dt
+        sim.y += sim.vy * sub_dt
 
-        px, py, vx, vy, hit_w = step_circle_walls(px, py, vx, vy, ORB_RADIUS)
-        if hit_w
-          first_hit = [px, py] if first_hit.nil?
+        if step_orb_walls(sim)
+          first_hit = [sim.x, sim.y] if first_hit.nil?
           bounces += 1
         end
 
-        targets.each do |tgt|
+        sx = sim.x
+        sy = sim.y
+        i = 0
+        t_len = targets.size
+        while i < t_len
+          tgt = targets[i]
+          i += 1
           next unless tgt.alive?
+          tx = tgt.x
+          ty = tgt.y
           if tgt.shape == :circle
-            hit, nx, ny, overlap = collide_circle_circle(px, py, ORB_RADIUS, tgt.x, tgt.y, tgt.r)
+            rs = ORB_RADIUS + tgt.r
+            dx = sx - tx
+            next if dx >= rs || dx <= -rs
+            dy = sy - ty
+            next if dy >= rs || dy <= -rs
+            hit = collide_circle_circle(sx, sy, ORB_RADIUS, tx, ty, tgt.r)
           else
-            hit, nx, ny, overlap = collide_circle_rect(px, py, ORB_RADIUS, tgt.x, tgt.y, tgt.w, tgt.h)
+            dx = sx - tx
+            px = tgt.hw + ORB_RADIUS
+            next if dx >= px || dx <= -px
+            dy = sy - ty
+            py = tgt.hh + ORB_RADIUS
+            next if dy >= py || dy <= -py
+            hit = collide_circle_rect(sx, sy, ORB_RADIUS, tx, ty, tgt.hw, tgt.hh)
           end
-          if hit
-            px += nx * overlap
-            py += ny * overlap
-            vx, vy = reflect_velocity(vx, vy, nx, ny)
-            first_hit = [px, py] if first_hit.nil?
+          if !hit.nil?
+            sim.x += hit[0] * hit[2]
+            sim.y += hit[1] * hit[2]
+            reflect_orb(sim, hit[0], hit[1])
+            first_hit = [sim.x, sim.y] if first_hit.nil?
             bounces += 1
             break
           end
@@ -795,12 +814,12 @@ class PhysicsWorld
         sub += 1
       end
 
-      pts << [px, py] if step % 2 == 0
+      pts << [sim.x, sim.y] if step % 2 == 0
       if bounces >= 1
         post_bounce_steps += 1
-        break if post_bounce_steps >= 14 || bounces >= 2
+        break if post_bounce_steps >= 10 || bounces >= 2
       end
-      break if py > LAUNCH_Y
+      break if sim.y > LAUNCH_Y
       step += 1
     end
 
@@ -1078,6 +1097,9 @@ class BattleScene
     @banner_text = @run.boss_wave? ? sprintf("BOSS WAVE %d!", @run.wave) : sprintf("WAVE %d - %s", @run.wave, @run.stage_name)
     @banner_timer = 75
     @hurt_flash = 0
+    @preview_ang = nil
+    @preview_pts = nil
+    @preview_hit = nil
 
     setup_wave
   end
@@ -1364,25 +1386,49 @@ class BattleScene
       orb.boost_t -= 1 if orb.boost_t > 0
       spd_scale = (orb.boost_t > 0 ? 1.28 : 1.0)
 
+      t_len = @targets.size
+      orb_r = orb.r
+      step_x = orb.vx * sub_dt * spd_scale
+      step_y = orb.vy * sub_dt * spd_scale
+
       sub = 0
       while sub < SUBSTEPS
-        orb.x += orb.vx * sub_dt * spd_scale
-        orb.y += orb.vy * sub_dt * spd_scale
+        orb.x += step_x
+        orb.y += step_y
 
-        orb.x, orb.y, orb.vx, orb.vy, hit_w = PhysicsWorld.step_circle_walls(orb.x, orb.y, orb.vx, orb.vy, orb.r)
-        if hit_w
+        if PhysicsWorld.step_orb_walls(orb)
           @fx.spawn_sparks(orb.x, orb.y, orb.col_id, 3, 1.4)
+          step_x = orb.vx * sub_dt * spd_scale
+          step_y = orb.vy * sub_dt * spd_scale
         end
 
-        @targets.each do |tgt|
+        ox = orb.x
+        oy = orb.y
+        ti = 0
+        while ti < t_len
+          tgt = @targets[ti]
+          ti += 1
           next unless tgt.alive?
+          tx = tgt.x
+          ty = tgt.y
           if tgt.shape == :circle
-            hit, nx, ny, overlap = PhysicsWorld.collide_circle_circle(orb.x, orb.y, orb.r, tgt.x, tgt.y, tgt.r)
+            rs = orb_r + tgt.r
+            dx = ox - tx
+            next if dx >= rs || dx <= -rs
+            dy = oy - ty
+            next if dy >= rs || dy <= -rs
+            hit = PhysicsWorld.collide_circle_circle(ox, oy, orb_r, tx, ty, tgt.r)
           else
-            hit, nx, ny, overlap = PhysicsWorld.collide_circle_rect(orb.x, orb.y, orb.r, tgt.x, tgt.y, tgt.w, tgt.h)
+            dx = ox - tx
+            px = tgt.hw + orb_r
+            next if dx >= px || dx <= -px
+            dy = oy - ty
+            py = tgt.hh + orb_r
+            next if dy >= py || dy <= -py
+            hit = PhysicsWorld.collide_circle_rect(ox, oy, orb_r, tx, ty, tgt.hw, tgt.hh)
           end
 
-          next unless hit
+          next if hit.nil?
 
           is_pierce = (orb.type == :pierce && tgt.kind != :bumper)
           if is_pierce
@@ -1390,9 +1436,13 @@ class BattleScene
             next if orb.pierce_hit_ids.has_key?(tid)
             orb.pierce_hit_ids[tid] = true
           else
-            orb.x += nx * overlap
-            orb.y += ny * overlap
-            orb.vx, orb.vy = PhysicsWorld.reflect_velocity(orb.vx, orb.vy, nx, ny)
+            orb.x += hit[0] * hit[2]
+            orb.y += hit[1] * hit[2]
+            PhysicsWorld.reflect_orb(orb, hit[0], hit[1])
+            ox = orb.x
+            oy = orb.y
+            step_x = orb.vx * sub_dt * spd_scale
+            step_y = orb.vy * sub_dt * spd_scale
           end
 
           handle_orb_hit(orb, tgt, new_spawns)
@@ -1566,6 +1616,7 @@ class BattleScene
       @banner_timer = 40
     else
       @state = :aim
+      @preview_pts = nil
     end
   end
 
@@ -1632,7 +1683,12 @@ class BattleScene
   end
 
   def draw_aim_preview
-    pts, first_hit = PhysicsWorld.predict_trajectory(@launch_x, LAUNCH_Y, @aim_ang, @targets)
+    if @preview_pts.nil? || @preview_ang.nil? || (@aim_ang - @preview_ang).abs > 0.0005
+      @preview_ang = @aim_ang
+      @preview_pts, @preview_hit = PhysicsWorld.predict_trajectory(@launch_x, LAUNCH_Y, @aim_ang, @targets)
+    end
+    pts = @preview_pts
+    first_hit = @preview_hit
     i = 0
     while i < pts.size
       pt = pts[i]
