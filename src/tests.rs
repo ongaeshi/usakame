@@ -5655,6 +5655,38 @@ fn test_bg_directive_file_and_bundle_inline() {
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
+#[test]
+fn test_float_sub_and_add_integer_literal() {
+    let script = r#"
+@hook_y = 120.5
+@res_sub = @hook_y - 10
+@res_add = @hook_y + 10
+@res_neg = -10.5 - 3
+@res_zero = 0.0 - 1
+
+raise "sub failed" unless @res_sub == 110.5
+raise "add failed" unless @res_add == 130.5
+raise "neg failed" unless @res_neg == -13.5
+raise "zero failed" unless @res_zero == -1.0
+
+def update
+  @hook_y = @hook_y - 1
+  @res_sub = @hook_y - 10
+  @res_add = @hook_y + 10
+end
+
+def draw
+  cls(0)
+end
+"#;
+    let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
+    let mut rt = GameRuntime::new(&tail, &mrb, true).unwrap();
+    for _ in 0..5 {
+        rt.call_update_result().unwrap();
+        rt.call_draw_result().unwrap();
+    }
+}
+
 
 
 

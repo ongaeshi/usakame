@@ -10,7 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 macroquad = { version = "0.4", features = ["audio"] }
-mrubyedge = { version = "2.1", features = ["mruby-random"] }
+mrubyedge = { git = "https://github.com/mrubyedge/mrubyedge.git", features = ["mruby-random"] }
 png = "0.17"
 gif = "0.13"
 image = { version = "0.24", default-features = false, features = ["jpeg"] }

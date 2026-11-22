@@ -4535,7 +4535,7 @@ fn mrb_object_instance_variables(
         .keys()
         .map(|k| {
             if k.starts_with('@') {
-                k.clone()
+                k.to_string()
             } else {
                 format!("@{}", k)
             }
@@ -4707,9 +4707,12 @@ fn rebind_object_to_vm(obj: &Rc<RObject>, vm: &VM) -> Rc<RObject> {
                 });
             }
 
-            let mut new_ivars = mrubyedge::yamrb::value::RHashMap::default();
-            for (k, v) in obj.ivar.borrow().iter() {
-                new_ivars.insert(k.clone(), rebind_object_to_vm(v, vm));
+            let mut new_ivars = mrubyedge::yamrb::value::IvarMap::new();
+            let ivars = obj.ivar.borrow();
+            for k in ivars.keys() {
+                if let Some(v) = ivars.get(k) {
+                    new_ivars.insert(k.clone(), rebind_object_to_vm(v, vm));
+                }
             }
             *new_obj.ivar.borrow_mut() = new_ivars;
 
@@ -10227,14 +10230,16 @@ fn mrb_sub_game_ivars(_vm: &mut VM, _args: &[Rc<RObject>]) -> Result<Rc<RObject>
             let mut list: Vec<(String, String)> = Vec::new();
             if let Some(ref scene) = sub.runtime.current_scene {
                 let ivars = scene.ivar.borrow();
-                for (k, v) in ivars.iter() {
-                    let name = if k.starts_with('@') {
-                        k.clone()
-                    } else {
-                        format!("@{}", k)
-                    };
-                    let val_str = format_val_for_inspector(v);
-                    list.push((name, val_str));
+                for k in ivars.keys() {
+                    if let Some(v) = ivars.get(k) {
+                        let name = if k.starts_with('@') {
+                            k.to_string()
+                        } else {
+                            format!("@{}", k)
+                        };
+                        let val_str = format_val_for_inspector(v);
+                        list.push((name, val_str));
+                    }
                 }
             }
             list.sort_by(|a, b| a.0.cmp(&b.0));
