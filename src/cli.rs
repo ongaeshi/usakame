@@ -1808,7 +1808,7 @@ square T180 L16 c5 e5 g5 c6
 
 const PROJECT_AGENTS_MD: &str = r#"# AGENTS.md ({{PROJECT_TITLE}})
 
-このプロジェクトはレトロゲームエンジン **Usakame (`uk`)** で作成された Ruby ゲームプロジェクトです。
+このプロジェクトはゲームエンジン **Usakame (`uk`)** で作成された Ruby ゲームプロジェクトです。
 AI エージェントがコードの生成・編集・デバッグを行う際は、以下のガイドラインを必ず遵守してください。
 
 ---

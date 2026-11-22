@@ -1,13 +1,13 @@
 ---
 name: usakame-sprite-fast
 description: >-
-  Rapidly generate large batches of lightweight pixel art sprites (@SPRITE) for the Usakame (uk) retro game engine with minimal latency and token overhead.
+  Rapidly generate large batches of lightweight pixel art sprites (@SPRITE) for the Usakame (uk) game engine with minimal latency and token overhead.
   Use when the user wants fast prototyping, bulk sprite generation (many enemies, items, tiles, icons, bullets), or quick PICO-8 style 2-3 color flat sprites without spending time on complex custom palettes or multi-layer shading.
 ---
 
 # Usakame Fast & Bulk Sprite Generator (`usakame-sprite-fast`)
 
-This skill is optimized for **speed, low latency, and high-volume batch generation** of sprites in the **Usakame (`uk`)** retro game engine.
+This skill is optimized for **speed, low latency, and high-volume batch generation** of sprites in the **Usakame (`uk`)** game engine.
 Wait times and output tokens are minimized by stripping away per-sprite custom palette design, 4-layer shading math, and manual slot ID calculations.
 
 > **When to use which skill:**

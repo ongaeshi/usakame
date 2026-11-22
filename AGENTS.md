@@ -6,7 +6,7 @@
 
 ## 1. プロジェクト概要
 
-* **Usakame** は、Rust（Macroquad）と軽量 Ruby VM **mrubyedge**（mruby-compiler2）で構築されたレトロゲームエンジンです。
+* **Usakame** は、Rust（Macroquad）と軽量 Ruby VM **mrubyedge**（mruby-compiler2）で構築されたゲームエンジンです。
 * ゲーム本体やサンプルコード（`game.rb`, `examples/*.rb`）は Ruby で記述され、ネイティブおよび WebAssembly（WASM）環境で実行されます。
 
 ---

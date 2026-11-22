@@ -1,13 +1,13 @@
 ---
 name: usakame-sprite
 description: >-
-  Generate high-quality pixel art sprites, custom color palettes (@PALETTE), and sprite-generation prompts for the Usakame (uk) retro game engine.
+  Generate high-quality pixel art sprites, custom color palettes (@PALETTE), and sprite-generation prompts for the Usakame (uk) game engine.
   Use when the user asks to create, draw, generate, or prompt for rich, detailed Usakame sprites (16x16, 32x32, 48x48, @PALETTE custom palettes, @SPRITE text pattern, or PNG/SHEET). For fast bulk generation or lightweight prototyping, prefer usakame-sprite-fast.
 ---
 
 # Usakame Sprite & Palette Designer
 
-This skill guides the creation of high-quality pixel art sprites (`@SPRITE`), custom 16-color palettes (`@PALETTE`), and generation prompts optimized for the **Usakame (`uk`)** retro game engine.
+This skill guides the creation of high-quality pixel art sprites (`@SPRITE`), custom 16-color palettes (`@PALETTE`), and generation prompts optimized for the **Usakame (`uk`)** game engine.
 
 > **When to use which skill:**
 > - **`usakame-sprite` (this skill)**: Hero characters, bosses, key monsters, and rich 16-bit SNES/GBA-style pixel art with dedicated `@PALETTE` 3–4 step color ramps.

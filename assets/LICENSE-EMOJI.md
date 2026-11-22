@@ -8,4 +8,4 @@ The built-in 16×16 emoji sprite atlas (`assets/emoji_atlas.png`) is derived fro
 
 ## Modifications
 
-The original vector color emoji glyphs (`COLR`/`CPAL`) were rasterized to `16 × 16` pixel-art sprites, quantized to 15-bit RGB555 colors with 1-bit transparency for use in the Usakame retro game engine.
+The original vector color emoji glyphs (`COLR`/`CPAL`) were rasterized to `16 × 16` pixel-art sprites, quantized to 15-bit RGB555 colors with 1-bit transparency for use in the Usakame game engine.

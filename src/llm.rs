@@ -660,7 +660,7 @@ pub fn generate_verified_game_rb(
 
 /// スプライト編集用のシステムプロンプトを構築する
 pub fn build_sprite_edit_system_prompt() -> String {
-    r#"You are an expert pixel artist for the **Usakame (`uk`)** retro game engine.
+    r#"You are an expert pixel artist for the **Usakame (`uk`)** game engine.
 Your job is to edit or create a single sprite frame in Usakame's `@SPRITE` text format.
 
 # FORMAT RULES
