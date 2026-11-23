@@ -5687,6 +5687,71 @@ end
     }
 }
 
+#[test]
+fn test_alpha_argument_and_draw_state_color_alpha() {
+    let state = DrawState::default();
+    let base = state.map_color(7);
+    assert!((base.a - 1.0).abs() < 1e-6);
+
+    let half = state.map_color_with_alpha(7, 0.5);
+    assert!((half.r - base.r).abs() < 1e-6);
+    assert!((half.g - base.g).abs() < 1e-6);
+    assert!((half.b - base.b).abs() < 1e-6);
+    assert!((half.a - 0.5).abs() < 1e-6);
+
+    let zero = state.map_color_with_alpha(7, -0.5);
+    assert!((zero.a - 0.0).abs() < 1e-6);
+
+    let clamped = state.map_color_with_alpha(7, 2.0);
+    assert!((clamped.a - 1.0).abs() < 1e-6);
+
+    let script = r##"
+def update
+end
+
+def draw
+  cls(0)
+  pset(1, 2, 7, 0.5)
+  line(0, 0, 10, 10, 8, 0.4)
+  rect(4, 4, 20, 12, 9, 0.6)
+  rectfill(10, 10, 32, 24, 12, 0.5)
+  rectfill(10, 10, 32, 24, 12, 0.0)
+  circ(64, 64, 12, 10, 0.3)
+  circfill(64, 64, 10, 11, 0.7)
+  oval(100, 100, 12, 6, 13, 0.5)
+  ovalfill(100, 100, 10, 5, 14, 0.25)
+  tri(10, 10, 20, 10, 15, 20, 7, 0.8)
+  trifill(30, 10, 40, 10, 35, 20, 8, 0.4)
+  print_text("FADE", 20, 20, 7, 8, 0.5)
+
+  spr(:hero, 50, 50)
+  spr(:hero, 50, 50, true, 1, 45.0, 1.5, 0.5)
+  spr(:hero, 50, 50, false, nil, 0.0, 1.0, 0.0)
+  spr("✨", 80, 80, false, nil, 15.0, 1.2, 0.6)
+  spr_ex(:hero, 90, 90, 30.0, 1.2, 0.8, true, true, 1, 0.5)
+  spr_ext(:hero, 90, 90, 0.0, 1.0, nil, false, false, nil, 0.25)
+  spr_rot(:hero, 90, 90, 90.0, 1.0, nil, false, false, nil, 0.75)
+  spr_clip(:hero, 120, 120, 0, 0, 8, 8, false, false, 1, 0.5)
+  blt(140, 140, :hero, 0, 0, 16, 16, 0.0, 1.0, 1, 0.5)
+  $alpha_test_ok = true
+end
+
+__END__
+@PALETTE 1
+0: #000000
+1: #ffffff
+
+@SPRITE :hero 16x16 pal:1
+0000000000000000
+0111111111111110
+0000000000000000
+"##;
+    let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
+    let mut rt = GameRuntime::new(&tail, &mrb, true).unwrap();
+    rt.call_update_result().unwrap();
+    rt.call_draw_result().unwrap();
+}
+
 
 
 

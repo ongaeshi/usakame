@@ -286,7 +286,7 @@ impl BitmapFont {
                             emoji_tex,
                             cur_x,
                             cur_y,
-                            WHITE,
+                            Color::new(1.0, 1.0, 1.0, color.a),
                             DrawTextureParams::default(),
                         );
                     }
@@ -425,7 +425,7 @@ impl BitmapFont {
                         emoji_tex,
                         cur_x,
                         cur_y,
-                        WHITE,
+                        Color::new(1.0, 1.0, 1.0, color.a),
                         DrawTextureParams::default(),
                     );
                 }

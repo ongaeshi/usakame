@@ -2022,6 +2022,18 @@ fn arg_bool(args: &[Rc<RObject>], index: usize, default: bool) -> bool {
         .unwrap_or(default)
 }
 
+fn arg_alpha(args: &[Rc<RObject>], index: usize) -> f32 {
+    arg_f32(args, index, 1.0).clamp(0.0, 1.0)
+}
+
+fn arg_opt_i32(args: &[Rc<RObject>], index: usize) -> Option<i32> {
+    args.get(index).and_then(|v| match &v.value {
+        RValue::Integer(i) => Some(*i as i32),
+        RValue::Float(f) => Some(*f as i32),
+        _ => None,
+    })
+}
+
 fn robject_to_u32(obj: &Rc<RObject>) -> Option<u32> {
     match &obj.value {
         RValue::Integer(i) => Some(*i as u32),
@@ -2584,9 +2596,10 @@ fn draw_sprite_transformed(
     flip_y: bool,
     rotate_deg: f32,
     scale: f32,
+    alpha: f32,
 ) {
     draw_sprite_transformed_ext(
-        sprite, state, x, y, flip_x, flip_y, rotate_deg, scale, scale,
+        sprite, state, x, y, flip_x, flip_y, rotate_deg, scale, scale, alpha,
     );
 }
 
@@ -2600,7 +2613,12 @@ fn draw_sprite_transformed_ext(
     rotate_deg: f32,
     scale_x: f32,
     scale_y: f32,
+    alpha: f32,
 ) {
+    let alpha = alpha.clamp(0.0, 1.0);
+    if alpha <= 0.0 {
+        return;
+    }
     let Some((draw_x, draw_y, params)) = compute_sprite_draw_params_ext(
         sprite.width as f32,
         sprite.height as f32,
@@ -2614,12 +2632,13 @@ fn draw_sprite_transformed_ext(
     ) else {
         return;
     };
+    let tint = Color::new(1.0, 1.0, 1.0, alpha);
     if state.is_default_palette() {
         if let Some(ref texture) = sprite.texture {
-            draw_texture_ex(texture, draw_x, draw_y, WHITE, params);
+            draw_texture_ex(texture, draw_x, draw_y, tint, params);
         }
     } else if let Some(texture) = sprite.get_or_build_pal_texture(&state.pal_map, state.palt_mask, &state.palette_rgba) {
-        draw_texture_ex(&texture, draw_x, draw_y, WHITE, params);
+        draw_texture_ex(&texture, draw_x, draw_y, tint, params);
     }
 }
 
@@ -2898,9 +2917,10 @@ fn draw_bank_rect(
     flip_y: bool,
     rotate_deg: f32,
     scale: f32,
+    alpha: f32,
 ) {
     draw_bank_rect_ext(
-        bank, state, x, y, u, v, w, h, flip_x, flip_y, rotate_deg, scale, scale,
+        bank, state, x, y, u, v, w, h, flip_x, flip_y, rotate_deg, scale, scale, alpha,
     );
 }
 
@@ -2918,8 +2938,11 @@ fn draw_bank_rect_ext(
     rotate_deg: f32,
     scale_x: f32,
     scale_y: f32,
+    alpha: f32,
 ) {
-    if !scale_x.is_finite()
+    let alpha = alpha.clamp(0.0, 1.0);
+    if alpha <= 0.0
+        || !scale_x.is_finite()
         || !scale_y.is_finite()
         || scale_x.abs() < f32::EPSILON
         || scale_y.abs() < f32::EPSILON
@@ -2972,13 +2995,14 @@ fn draw_bank_rect_ext(
     };
 
     bank.ensure_texture();
+    let tint = Color::new(1.0, 1.0, 1.0, alpha);
 
     if state.is_default_palette() {
         if let Some(ref texture) = *bank.texture.borrow() {
-            draw_texture_ex(texture, draw_x, draw_y, WHITE, params);
+            draw_texture_ex(texture, draw_x, draw_y, tint, params);
         }
     } else if let Some(texture) = bank.get_or_build_pal_texture(&state.pal_map, state.palt_mask, &state.palette_rgba) {
-        draw_texture_ex(&texture, draw_x, draw_y, WHITE, params);
+        draw_texture_ex(&texture, draw_x, draw_y, tint, params);
     }
 }
 
@@ -3016,8 +3040,10 @@ fn draw_pixel_data_direct(
     flip_x: bool,
     flip_y: bool,
     scale: f32,
+    alpha: f32,
 ) {
-    if data.is_empty() || scale <= 0.0 {
+    let alpha = alpha.clamp(0.0, 1.0);
+    if data.is_empty() || scale <= 0.0 || alpha <= 0.0 {
         return;
     }
     let size = 16;
@@ -3071,7 +3097,7 @@ fn draw_pixel_data_direct(
             let draw_w = span_len * scale;
             let draw_h = scale;
 
-            let final_color = state.map_color(col);
+            let final_color = state.map_color_with_alpha(col, alpha);
             draw_rectangle(draw_x, draw_y, draw_w, draw_h, final_color);
         }
     }
@@ -3208,6 +3234,12 @@ impl DrawState {
     pub fn map_color(&self, col: i32) -> Color {
         let rgba = self.palette_rgba[self.map_color_index(col)];
         Color::from_rgba(rgba[0], rgba[1], rgba[2], rgba[3])
+    }
+
+    pub fn map_color_with_alpha(&self, col: i32, alpha: f32) -> Color {
+        let mut c = self.map_color(col);
+        c.a *= alpha.clamp(0.0, 1.0);
+        c
     }
 
     /// ワールド座標系のスパン群にカメラオフセット `(-cam_x, -cam_y)` とクリッピング矩形 `clip` を適用する
@@ -6096,7 +6128,7 @@ fn register_engine_api(
         }),
     );
 
-    // rectfill_rgb(x, y, w, h, r, g, b): 任意のRGB値で塗りつぶし矩形を描画
+    // rectfill_rgb(x, y, w, h, r, g, b, alpha = 1.0): 任意のRGB値で塗りつぶし矩形を描画
     let state_for_rect_rgb = draw_state.clone();
     mrb_define_cmethod(
         vm,
@@ -6113,7 +6145,8 @@ fn register_engine_api(
             let r = arg_i32(args, 4, 255).clamp(0, 255) as u8;
             let g = arg_i32(args, 5, 255).clamp(0, 255) as u8;
             let b = arg_i32(args, 6, 255).clamp(0, 255) as u8;
-            if w > 0 && h > 0 {
+            let alpha = arg_alpha(args, 7);
+            if w > 0 && h > 0 && alpha > 0.0 {
                 let state = state_for_rect_rgb.borrow();
                 let sx = x as f32 - state.cam_x;
                 let sy = y as f32 - state.cam_y;
@@ -6122,7 +6155,7 @@ fn register_engine_api(
                     sy,
                     w as f32,
                     h as f32,
-                    Color::from_rgba(r, g, b, 255),
+                    Color::from_rgba(r, g, b, (alpha * 255.0).round() as u8),
                 );
             }
             Ok(Rc::new(RObject::nil()))
@@ -7063,6 +7096,7 @@ fn register_engine_api(
                 let rotate = arg_f32(args, 7, 0.0);
                 let scale = arg_f32(args, 8, 1.0);
                 let pal_arg = args.get(9);
+                let alpha = arg_alpha(args, 10);
 
                 if let Some(arg) = pal_arg && !arg.is_nil() {
                     let pid = match &arg.value {
@@ -7075,7 +7109,7 @@ fn register_engine_api(
                     }
                 }
 
-                if raw_w == 0.0 || raw_h == 0.0 || scale <= 0.0 {
+                if raw_w == 0.0 || raw_h == 0.0 || scale <= 0.0 || alpha <= 0.0 {
                     return Ok(Rc::new(RObject::nil()));
                 }
                 let flip_x = raw_w < 0.0;
@@ -7324,53 +7358,15 @@ fn register_engine_api(
                 let default_scale = cfg_for_headless_spr.borrow().sprite_scale;
                 let x = arg_f32(args, 1, 0.0) - state.cam_x as f32;
                 let y = arg_f32(args, 2, 0.0) - state.cam_y as f32;
+                let flip_x = arg_bool(args, 3, false);
+                let pal_override = arg_opt_i32(args, 4);
+                let rotate = arg_f32(args, 5, 0.0);
+                let scale = arg_f32(args, 6, default_scale);
+                let alpha = arg_alpha(args, 7);
+                let flip_y = false;
 
-                let mut has_explicit_tiles = false;
-                let mut tile_w = 1;
-                let mut tile_h = 1;
-                let mut flip_x = false;
-                let mut flip_y = false;
-                let mut rotate = 0.0;
-                let mut scale = default_scale;
-                let mut pal_override: Option<i32> = None;
-
-                if let Some(arg3) = args.get(3) {
-                    match &arg3.value {
-                        RValue::Bool(b) => {
-                            flip_x = *b;
-                            if let Some(arg4) = args.get(4) {
-                                match &arg4.value {
-                                    RValue::Bool(fy) => {
-                                        flip_y = *fy;
-                                        rotate = arg_f32(args, 5, 0.0);
-                                        scale = arg_f32(args, 6, default_scale);
-                                    }
-                                    RValue::Integer(p) => {
-                                        pal_override = Some(*p as i32);
-                                    }
-                                    RValue::Float(p) => {
-                                        pal_override = Some(*p as i32);
-                                    }
-                                    _ => {
-                                        if args.len() >= 6 {
-                                            flip_y = arg_bool(args, 4, false);
-                                            rotate = arg_f32(args, 5, 0.0);
-                                            scale = arg_f32(args, 6, default_scale);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        _ => {
-                            has_explicit_tiles = true;
-                            tile_w = arg_i32(args, 3, 1).max(1);
-                            tile_h = arg_i32(args, 4, 1).max(1);
-                            flip_x = arg_bool(args, 5, false);
-                            flip_y = arg_bool(args, 6, false);
-                            rotate = arg_f32(args, 7, 0.0);
-                            scale = arg_f32(args, 8, default_scale);
-                        }
-                    }
+                if alpha <= 0.0 {
+                    return Ok(Rc::new(RObject::nil()));
                 }
 
                 if let Some(pid) = pal_override {
@@ -7426,9 +7422,7 @@ fn register_engine_api(
                 let cur_bank_id = *act_spr_for_headless.borrow();
                 let banks_ref = banks_for_headless_spr.borrow();
                 let sprites_ref = sprites_for_headless.borrow();
-                let (draw_w, draw_h) = if has_explicit_tiles {
-                    ((tile_w * 16) as f32, (tile_h * 16) as f32)
-                } else if let Some(sp) = sprites_ref.get(&id) {
+                let (draw_w, draw_h) = if let Some(sp) = sprites_ref.get(&id) {
                     (sp.width as f32, sp.height as f32)
                 } else {
                     (16.0, 16.0)
@@ -7467,7 +7461,7 @@ fn register_engine_api(
             }),
         );
 
-        // spr_ext(id, x = 0, y = 0, rot = 0, scale_x = 1.0, scale_y = nil, flip_x = false, flip_y = false, pal = nil)
+        // spr_ext(id, x = 0, y = 0, rot = 0, scale_x = 1.0, scale_y = nil, flip_x = false, flip_y = false, pal = nil, alpha = 1.0)
         for name in ["spr_ext", "spr_ex", "spr_rot"] {
             let names_for_ext = sprite_names.clone();
             let sprites_for_ext = sprites.clone();
@@ -7495,6 +7489,10 @@ fn register_engine_api(
                     let flip_x = arg_bool(args, 6, false);
                     let flip_y = arg_bool(args, 7, false);
                     let pal_arg = args.get(8);
+                    let alpha = arg_alpha(args, 9);
+                    if alpha <= 0.0 {
+                        return Ok(Rc::new(RObject::nil()));
+                    }
 
                     if let Some(arg) = pal_arg && !arg.is_nil() {
                         let pid = match &arg.value {
@@ -7548,7 +7546,7 @@ fn register_engine_api(
             );
         }
 
-        // spr_clip(id, x, y, u, v, w, h, flip_x = false, flip_y = false, pal = nil)
+        // spr_clip(id, x, y, u, v, w, h, flip_x = false, flip_y = false, pal = nil, alpha = 1.0)
         let names_for_headless_clip = sprite_names.clone();
         let state_for_headless_clip = draw_state.clone();
         let palettes_for_headless_clip = palettes.clone();
@@ -7575,6 +7573,10 @@ fn register_engine_api(
                 let flip_x = arg_bool(args, 7, false);
                 let flip_y = arg_bool(args, 8, false);
                 let pal_arg = args.get(9);
+                let alpha = arg_alpha(args, 10);
+                if alpha <= 0.0 {
+                    return Ok(Rc::new(RObject::nil()));
+                }
 
                 if let Some(arg) = pal_arg && !arg.is_nil() {
                     let pid = match &arg.value {
@@ -7845,7 +7847,7 @@ fn register_engine_api(
         }),
     );
 
-    // pset(x = 0, y = 0, col = 7): 1ドット描画
+    // pset(x = 0, y = 0, col = 7, alpha = 1.0): 1ドット描画
     let state_for_pset = draw_state.clone();
     mrb_define_cmethod(
         vm,
@@ -7855,14 +7857,18 @@ fn register_engine_api(
             let x = arg_i32(args, 0, 0);
             let y = arg_i32(args, 1, 0);
             let col = arg_i32(args, 2, 7);
+            let alpha = arg_alpha(args, 3);
+            if alpha <= 0.0 {
+                return Ok(Rc::new(RObject::nil()));
+            }
             let state = *state_for_pset.borrow();
             let spans = state.transform_and_clip_spans(&[PixelSpan::new(x, y, 1, 1)]);
-            draw_spans(&spans, state.map_color(col));
+            draw_spans(&spans, state.map_color_with_alpha(col, alpha));
             Ok(Rc::new(RObject::nil()))
         }),
     );
 
-    // line(x0 = 0, y0 = 0, x1 = 0, y1 = 0, col = 7): 直線描画（ブレゼンハム 1px）
+    // line(x0 = 0, y0 = 0, x1 = 0, y1 = 0, col = 7, alpha = 1.0): 直線描画（ブレゼンハム 1px）
     let state_for_line = draw_state.clone();
     mrb_define_cmethod(
         vm,
@@ -7874,15 +7880,19 @@ fn register_engine_api(
             let x1 = arg_i32(args, 2, 0);
             let y1 = arg_i32(args, 3, 0);
             let col = arg_i32(args, 4, 7);
+            let alpha = arg_alpha(args, 5);
+            if alpha <= 0.0 {
+                return Ok(Rc::new(RObject::nil()));
+            }
             let raw = rasterize_line(x0, y0, x1, y1);
             let state = *state_for_line.borrow();
             let spans = state.transform_and_clip_spans(&raw);
-            draw_spans(&spans, state.map_color(col));
+            draw_spans(&spans, state.map_color_with_alpha(col, alpha));
             Ok(Rc::new(RObject::nil()))
         }),
     );
 
-    // rect(x = 0, y = 0, w = 16, h = 16, col = 7): 枠線のみの矩形
+    // rect(x = 0, y = 0, w = 16, h = 16, col = 7, alpha = 1.0): 枠線のみの矩形
     let state_for_rect = draw_state.clone();
     mrb_define_cmethod(
         vm,
@@ -7894,15 +7904,19 @@ fn register_engine_api(
             let w = arg_i32(args, 2, 16);
             let h = arg_i32(args, 3, 16);
             let col = arg_i32(args, 4, 7);
+            let alpha = arg_alpha(args, 5);
+            if alpha <= 0.0 {
+                return Ok(Rc::new(RObject::nil()));
+            }
             let raw = rasterize_rect(x, y, w, h);
             let state = *state_for_rect.borrow();
             let spans = state.transform_and_clip_spans(&raw);
-            draw_spans(&spans, state.map_color(col));
+            draw_spans(&spans, state.map_color_with_alpha(col, alpha));
             Ok(Rc::new(RObject::nil()))
         }),
     );
 
-    // rectfill(x = 0, y = 0, w = 16, h = 16, col = 7): 塗りつぶし矩形
+    // rectfill(x = 0, y = 0, w = 16, h = 16, col = 7, alpha = 1.0): 塗りつぶし矩形
     let state_for_rectfill = draw_state.clone();
     mrb_define_cmethod(
         vm,
@@ -7914,15 +7928,19 @@ fn register_engine_api(
             let w = arg_i32(args, 2, 16);
             let h = arg_i32(args, 3, 16);
             let col = arg_i32(args, 4, 7);
+            let alpha = arg_alpha(args, 5);
+            if alpha <= 0.0 {
+                return Ok(Rc::new(RObject::nil()));
+            }
             let raw = rasterize_rectfill(x, y, w, h);
             let state = *state_for_rectfill.borrow();
             let spans = state.transform_and_clip_spans(&raw);
-            draw_spans(&spans, state.map_color(col));
+            draw_spans(&spans, state.map_color_with_alpha(col, alpha));
             Ok(Rc::new(RObject::nil()))
         }),
     );
 
-    // circ(x = 0, y = 0, r = 4, col = 7) / circle(x = 0, y = 0, r = 4, col = 7): 枠線のみの円
+    // circ(x = 0, y = 0, r = 4, col = 7, alpha = 1.0) / circle(...): 枠線のみの円
     for name in ["circ", "circle"] {
         let state_for_circ = draw_state.clone();
         mrb_define_cmethod(
@@ -7934,16 +7952,20 @@ fn register_engine_api(
                 let y = arg_i32(args, 1, 0);
                 let r = arg_i32(args, 2, 4);
                 let col = arg_i32(args, 3, 7);
+                let alpha = arg_alpha(args, 4);
+                if alpha <= 0.0 {
+                    return Ok(Rc::new(RObject::nil()));
+                }
                 let raw = rasterize_circ(x, y, r);
                 let state = *state_for_circ.borrow();
                 let spans = state.transform_and_clip_spans(&raw);
-                draw_spans(&spans, state.map_color(col));
+                draw_spans(&spans, state.map_color_with_alpha(col, alpha));
                 Ok(Rc::new(RObject::nil()))
             }),
         );
     }
 
-    // circfill(x = 0, y = 0, r = 4, col = 7) / circlefill(x = 0, y = 0, r = 4, col = 7): 塗りつぶし円
+    // circfill(x = 0, y = 0, r = 4, col = 7, alpha = 1.0) / circlefill(...): 塗りつぶし円
     for name in ["circfill", "circlefill"] {
         let state_for_circfill = draw_state.clone();
         mrb_define_cmethod(
@@ -7955,16 +7977,20 @@ fn register_engine_api(
                 let y = arg_i32(args, 1, 0);
                 let r = arg_i32(args, 2, 4);
                 let col = arg_i32(args, 3, 7);
+                let alpha = arg_alpha(args, 4);
+                if alpha <= 0.0 {
+                    return Ok(Rc::new(RObject::nil()));
+                }
                 let raw = rasterize_circfill(x, y, r);
                 let state = *state_for_circfill.borrow();
                 let spans = state.transform_and_clip_spans(&raw);
-                draw_spans(&spans, state.map_color(col));
+                draw_spans(&spans, state.map_color_with_alpha(col, alpha));
                 Ok(Rc::new(RObject::nil()))
             }),
         );
     }
 
-    // oval(x = 0, y = 0, rx = 6, ry = 4, col = 7) / ellipse(x = 0, y = 0, rx = 6, ry = 4, col = 7): 枠線のみの楕円
+    // oval(x = 0, y = 0, rx = 6, ry = 4, col = 7, alpha = 1.0) / ellipse(...): 枠線のみの楕円
     for name in ["oval", "ellipse"] {
         let state_for_oval = draw_state.clone();
         mrb_define_cmethod(
@@ -7977,16 +8003,20 @@ fn register_engine_api(
                 let rx = arg_i32(args, 2, 6);
                 let ry = arg_i32(args, 3, 4);
                 let col = arg_i32(args, 4, 7);
+                let alpha = arg_alpha(args, 5);
+                if alpha <= 0.0 {
+                    return Ok(Rc::new(RObject::nil()));
+                }
                 let raw = rasterize_oval(x, y, rx, ry);
                 let state = *state_for_oval.borrow();
                 let spans = state.transform_and_clip_spans(&raw);
-                draw_spans(&spans, state.map_color(col));
+                draw_spans(&spans, state.map_color_with_alpha(col, alpha));
                 Ok(Rc::new(RObject::nil()))
             }),
         );
     }
 
-    // ovalfill(x = 0, y = 0, rx = 6, ry = 4, col = 7) / ellipsefill(x = 0, y = 0, rx = 6, ry = 4, col = 7): 塗りつぶし楕円
+    // ovalfill(x = 0, y = 0, rx = 6, ry = 4, col = 7, alpha = 1.0) / ellipsefill(...): 塗りつぶし楕円
     for name in ["ovalfill", "ellipsefill"] {
         let state_for_ovalfill = draw_state.clone();
         mrb_define_cmethod(
@@ -7999,16 +8029,20 @@ fn register_engine_api(
                 let rx = arg_i32(args, 2, 6);
                 let ry = arg_i32(args, 3, 4);
                 let col = arg_i32(args, 4, 7);
+                let alpha = arg_alpha(args, 5);
+                if alpha <= 0.0 {
+                    return Ok(Rc::new(RObject::nil()));
+                }
                 let raw = rasterize_ovalfill(x, y, rx, ry);
                 let state = *state_for_ovalfill.borrow();
                 let spans = state.transform_and_clip_spans(&raw);
-                draw_spans(&spans, state.map_color(col));
+                draw_spans(&spans, state.map_color_with_alpha(col, alpha));
                 Ok(Rc::new(RObject::nil()))
             }),
         );
     }
 
-    // tri(x0 = 0, y0 = 0, x1 = 8, y1 = 0, x2 = 4, y2 = 8, col = 7): 枠線のみの三角形
+    // tri(x0 = 0, y0 = 0, x1 = 8, y1 = 0, x2 = 4, y2 = 8, col = 7, alpha = 1.0): 枠線のみの三角形
     let state_for_tri = draw_state.clone();
     mrb_define_cmethod(
         vm,
@@ -8022,15 +8056,19 @@ fn register_engine_api(
             let x2 = arg_i32(args, 4, 4);
             let y2 = arg_i32(args, 5, 8);
             let col = arg_i32(args, 6, 7);
+            let alpha = arg_alpha(args, 7);
+            if alpha <= 0.0 {
+                return Ok(Rc::new(RObject::nil()));
+            }
             let raw = rasterize_tri(x0, y0, x1, y1, x2, y2);
             let state = *state_for_tri.borrow();
             let spans = state.transform_and_clip_spans(&raw);
-            draw_spans(&spans, state.map_color(col));
+            draw_spans(&spans, state.map_color_with_alpha(col, alpha));
             Ok(Rc::new(RObject::nil()))
         }),
     );
 
-    // trifill(x0 = 0, y0 = 0, x1 = 8, y1 = 0, x2 = 4, y2 = 8, col = 7): 塗りつぶし三角形
+    // trifill(x0 = 0, y0 = 0, x1 = 8, y1 = 0, x2 = 4, y2 = 8, col = 7, alpha = 1.0): 塗りつぶし三角形
     let state_for_trifill = draw_state.clone();
     mrb_define_cmethod(
         vm,
@@ -8044,15 +8082,19 @@ fn register_engine_api(
             let x2 = arg_i32(args, 4, 4);
             let y2 = arg_i32(args, 5, 8);
             let col = arg_i32(args, 6, 7);
+            let alpha = arg_alpha(args, 7);
+            if alpha <= 0.0 {
+                return Ok(Rc::new(RObject::nil()));
+            }
             let raw = rasterize_trifill(x0, y0, x1, y1, x2, y2);
             let state = *state_for_trifill.borrow();
             let spans = state.transform_and_clip_spans(&raw);
-            draw_spans(&spans, state.map_color(col));
+            draw_spans(&spans, state.map_color_with_alpha(col, alpha));
             Ok(Rc::new(RObject::nil()))
         }),
     );
 
-    // blt(x, y, bank, u, v, w, h, rotate = 0, scale = 1.0, pal = nil): ピクセル矩形転送
+    // blt(x, y, bank, u, v, w, h, rotate = 0, scale = 1.0, pal = nil, alpha = 1.0): ピクセル矩形転送
     let banks_for_blt = banks.clone();
     let state_for_blt = draw_state.clone();
     let palettes_for_blt = palettes.clone();
@@ -8095,6 +8137,7 @@ fn register_engine_api(
             let rotate = arg_f32(args, 7, 0.0);
             let scale = arg_f32(args, 8, 1.0);
             let pal_arg = args.get(9);
+            let alpha = arg_alpha(args, 10);
 
             if let Some(arg) = pal_arg && !arg.is_nil() {
                 let pid = match &arg.value {
@@ -8107,7 +8150,7 @@ fn register_engine_api(
                 }
             }
 
-            if raw_w == 0.0 || raw_h == 0.0 || scale <= 0.0 {
+            if raw_w == 0.0 || raw_h == 0.0 || scale <= 0.0 || alpha <= 0.0 {
                 return Ok(Rc::new(RObject::nil()));
             }
 
@@ -8131,6 +8174,7 @@ fn register_engine_api(
                     flip_y,
                     rotate,
                     scale,
+                    alpha,
                 );
             }
             Ok(Rc::new(RObject::nil()))
@@ -8369,6 +8413,7 @@ fn register_engine_api(
     let cfg_for_spr = config.clone();
     let names_for_spr = sprite_names.clone();
     let palettes_for_spr = palettes.clone();
+    // spr(id, x = 0, y = 0, flip_x = false, pal = nil, rotate = 0.0, scale = default_scale, alpha = 1.0)
     mrb_define_cmethod(
         vm,
         obj_class.clone(),
@@ -8381,53 +8426,15 @@ fn register_engine_api(
             let default_scale = cfg_for_spr.borrow().sprite_scale;
             let x = arg_f32(args, 1, 0.0) - state.cam_x as f32;
             let y = arg_f32(args, 2, 0.0) - state.cam_y as f32;
+            let flip_x = arg_bool(args, 3, false);
+            let pal_override = arg_opt_i32(args, 4);
+            let rotate = arg_f32(args, 5, 0.0);
+            let scale = arg_f32(args, 6, default_scale);
+            let alpha = arg_alpha(args, 7);
+            let flip_y = false;
 
-            let mut has_explicit_tiles = false;
-            let mut tile_w = 1;
-            let mut tile_h = 1;
-            let mut flip_x = false;
-            let mut flip_y = false;
-            let mut rotate = 0.0;
-            let mut scale = default_scale;
-            let mut pal_override: Option<i32> = None;
-
-            if let Some(arg3) = args.get(3) {
-                match &arg3.value {
-                    RValue::Bool(b) => {
-                        flip_x = *b;
-                        if let Some(arg4) = args.get(4) {
-                            match &arg4.value {
-                                RValue::Bool(fy) => {
-                                    flip_y = *fy;
-                                    rotate = arg_f32(args, 5, 0.0);
-                                    scale = arg_f32(args, 6, default_scale);
-                                }
-                                RValue::Integer(p) => {
-                                    pal_override = Some(*p as i32);
-                                }
-                                RValue::Float(p) => {
-                                    pal_override = Some(*p as i32);
-                                }
-                                _ => {
-                                    if args.len() >= 6 {
-                                        flip_y = arg_bool(args, 4, false);
-                                        rotate = arg_f32(args, 5, 0.0);
-                                        scale = arg_f32(args, 6, default_scale);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    _ => {
-                        has_explicit_tiles = true;
-                        tile_w = arg_i32(args, 3, 1).max(1);
-                        tile_h = arg_i32(args, 4, 1).max(1);
-                        flip_x = arg_bool(args, 5, false);
-                        flip_y = arg_bool(args, 6, false);
-                        rotate = arg_f32(args, 7, 0.0);
-                        scale = arg_f32(args, 8, default_scale);
-                    }
-                }
+            if alpha <= 0.0 {
+                return Ok(Rc::new(RObject::nil()));
             }
 
             if let Some(pid) = pal_override {
@@ -8439,7 +8446,7 @@ fn register_engine_api(
             if let Some(first) = args.first() {
                 if let RValue::Array(ref ary_cell) = first.value {
                     let ary = ary_cell.borrow();
-                    draw_pixel_data_direct(&ary, &state, x, y, flip_x, flip_y, scale);
+                    draw_pixel_data_direct(&ary, &state, x, y, flip_x, flip_y, scale, alpha);
                     return Ok(Rc::new(RObject::nil()));
                 }
                 if matches!(first.value, RValue::String(_, _)) {
@@ -8460,15 +8467,15 @@ fn register_engine_api(
                                 let cols = (bank.sheet_width / 16).max(1) as i32;
                                 let u = ((id % cols) * 16) as f32;
                                 let v = ((id / cols) * 16) as f32;
-                                draw_bank_rect(bank, &state, x, y, u, v, draw_w, draw_h, flip_x, flip_y, rotate, scale);
+                                draw_bank_rect(bank, &state, x, y, u, v, draw_w, draw_h, flip_x, flip_y, rotate, scale, alpha);
                             } else if let Some(sp) = sprites_ref.get(&id) {
-                                draw_sprite_transformed(sp, &state, x, y, flip_x, flip_y, rotate, scale);
+                                draw_sprite_transformed(sp, &state, x, y, flip_x, flip_y, rotate, scale, alpha);
                             }
                             return Ok(Rc::new(RObject::nil()));
                         }
                         let mut atlas_ref = emoji_for_spr.borrow_mut();
                         if let Some(sprite) = atlas_ref.get_or_insert(&s, true) {
-                            draw_sprite_transformed(sprite, &state, x, y, flip_x, flip_y, rotate, scale);
+                            draw_sprite_transformed(sprite, &state, x, y, flip_x, flip_y, rotate, scale, alpha);
                         }
                     }
                     return Ok(Rc::new(RObject::nil()));
@@ -8483,9 +8490,7 @@ fn register_engine_api(
             let cur_bank_id = *act_spr_for_spr.borrow();
             let banks_ref = banks_for_spr.borrow();
             let sprites_ref = sprites_for_spr.borrow();
-            let (draw_w, draw_h) = if has_explicit_tiles {
-                ((tile_w * 16) as f32, (tile_h * 16) as f32)
-            } else if let Some(sp) = sprites_ref.get(&id) {
+            let (draw_w, draw_h) = if let Some(sp) = sprites_ref.get(&id) {
                 (sp.width as f32, sp.height as f32)
             } else {
                 (16.0, 16.0)
@@ -8510,15 +8515,16 @@ fn register_engine_api(
                     flip_y,
                     rotate,
                     scale,
+                    alpha,
                 );
             } else if let Some(sprite) = sprites_ref.get(&id) {
-                draw_sprite_transformed(sprite, &state, x, y, flip_x, flip_y, rotate, scale);
+                draw_sprite_transformed(sprite, &state, x, y, flip_x, flip_y, rotate, scale, alpha);
             }
             Ok(Rc::new(RObject::nil()))
         }),
     );
 
-    // spr_ext(id, x = 0, y = 0, rot = 0, scale_x = 1.0, scale_y = nil, flip_x = false, flip_y = false, pal = nil)
+    // spr_ext(id, x = 0, y = 0, rot = 0, scale_x = 1.0, scale_y = nil, flip_x = false, flip_y = false, pal = nil, alpha = 1.0)
     for name in ["spr_ext", "spr_ex", "spr_rot"] {
         let names_for_ext = sprite_names.clone();
         let sprites_for_ext = sprites.clone();
@@ -8548,6 +8554,10 @@ fn register_engine_api(
                 let flip_x = arg_bool(args, 6, false);
                 let flip_y = arg_bool(args, 7, false);
                 let pal_arg = args.get(8);
+                let alpha = arg_alpha(args, 9);
+                if alpha <= 0.0 {
+                    return Ok(Rc::new(RObject::nil()));
+                }
 
                 if let Some(arg) = pal_arg && !arg.is_nil() {
                     let pid = match &arg.value {
@@ -8579,15 +8589,15 @@ fn register_engine_api(
                                     let cols = (bank.sheet_width / 16).max(1) as i32;
                                     let u = ((id % cols) * 16) as f32;
                                     let v = ((id / cols) * 16) as f32;
-                                    draw_bank_rect_ext(bank, &state, x, y, u, v, draw_w, draw_h, flip_x, flip_y, rot, scale_x, scale_y);
+                                    draw_bank_rect_ext(bank, &state, x, y, u, v, draw_w, draw_h, flip_x, flip_y, rot, scale_x, scale_y, alpha);
                                 } else if let Some(sp) = sprites_ref.get(&id) {
-                                    draw_sprite_transformed_ext(sp, &state, x, y, flip_x, flip_y, rot, scale_x, scale_y);
+                                    draw_sprite_transformed_ext(sp, &state, x, y, flip_x, flip_y, rot, scale_x, scale_y, alpha);
                                 }
                                 return Ok(Rc::new(RObject::nil()));
                             }
                             let mut atlas_ref = emoji_for_ext.borrow_mut();
                             if let Some(sp) = atlas_ref.get_or_insert(&s, true) {
-                                draw_sprite_transformed_ext(sp, &state, x, y, flip_x, flip_y, rot, scale_x, scale_y);
+                                draw_sprite_transformed_ext(sp, &state, x, y, flip_x, flip_y, rot, scale_x, scale_y, alpha);
                             }
                         }
                         return Ok(Rc::new(RObject::nil()));
@@ -8612,16 +8622,16 @@ fn register_engine_api(
                     let cols = (bank.sheet_width / 16).max(1) as i32;
                     let u = ((id % cols) * 16) as f32;
                     let v = ((id / cols) * 16) as f32;
-                    draw_bank_rect_ext(bank, &state, x, y, u, v, draw_w, draw_h, flip_x, flip_y, rot, scale_x, scale_y);
+                    draw_bank_rect_ext(bank, &state, x, y, u, v, draw_w, draw_h, flip_x, flip_y, rot, scale_x, scale_y, alpha);
                 } else if let Some(sp) = sprites_ref.get(&id) {
-                    draw_sprite_transformed_ext(sp, &state, x, y, flip_x, flip_y, rot, scale_x, scale_y);
+                    draw_sprite_transformed_ext(sp, &state, x, y, flip_x, flip_y, rot, scale_x, scale_y, alpha);
                 }
                 Ok(Rc::new(RObject::nil()))
             }),
         );
     }
 
-    // spr_clip(id, x, y, u, v, w, h, flip_x = false, flip_y = false, pal = nil)
+    // spr_clip(id, x, y, u, v, w, h, flip_x = false, flip_y = false, pal = nil, alpha = 1.0)
     let names_for_clip = sprite_names.clone();
     let banks_for_clip = banks.clone();
     let act_spr_for_clip = active_spr_bank.clone();
@@ -8650,6 +8660,10 @@ fn register_engine_api(
             let flip_x = arg_bool(args, 7, false);
             let flip_y = arg_bool(args, 8, false);
             let pal_arg = args.get(9);
+            let alpha = arg_alpha(args, 10);
+            if alpha <= 0.0 {
+                return Ok(Rc::new(RObject::nil()));
+            }
 
             if let Some(arg) = pal_arg && !arg.is_nil() {
                 let pid = match &arg.value {
@@ -8683,6 +8697,7 @@ fn register_engine_api(
                     flip_y,
                     0.0,
                     1.0,
+                    alpha,
                 );
             }
             Ok(Rc::new(RObject::nil()))
@@ -8739,7 +8754,7 @@ fn register_engine_api(
         }),
     );
 
-    // draw_sprite_data(pixels, x = 0, y = 0, scale = 1.0, flip_x = false, flip_y = false): ピクセル配列ダイレクト描画
+    // draw_sprite_data(pixels, x = 0, y = 0, scale = 1.0, flip_x = false, flip_y = false, alpha = 1.0): ピクセル配列ダイレクト描画
     let state_for_draw_sp_data = draw_state.clone();
     let cfg_for_draw_sp_data = config.clone();
     mrb_define_cmethod(
@@ -8757,11 +8772,12 @@ fn register_engine_api(
             let scale = arg_f32(args, 3, default_scale);
             let flip_x = arg_bool(args, 4, false);
             let flip_y = arg_bool(args, 5, false);
+            let alpha = arg_alpha(args, 6);
 
             if let Some(first) = args.first() {
                 if let RValue::Array(ref ary_cell) = first.value {
                     let ary = ary_cell.borrow();
-                    draw_pixel_data_direct(&ary, &state, x, y, flip_x, flip_y, scale);
+                    draw_pixel_data_direct(&ary, &state, x, y, flip_x, flip_y, scale, alpha);
                 }
             }
             Ok(Rc::new(RObject::nil()))
@@ -8785,11 +8801,12 @@ fn register_engine_api(
             let scale = arg_f32(args, 3, default_scale);
             let flip_x = arg_bool(args, 4, false);
             let flip_y = arg_bool(args, 5, false);
+            let alpha = arg_alpha(args, 6);
 
             if let Some(first) = args.first() {
                 if let RValue::Array(ref ary_cell) = first.value {
                     let ary = ary_cell.borrow();
-                    draw_pixel_data_direct(&ary, &state, x, y, flip_x, flip_y, scale);
+                    draw_pixel_data_direct(&ary, &state, x, y, flip_x, flip_y, scale, alpha);
                 }
             }
             Ok(Rc::new(RObject::nil()))
@@ -8868,10 +8885,11 @@ fn register_engine_api(
                             false,
                             0.0,
                             sp_scale,
+                            1.0,
                         );
                     } else if let Some(sprite) = sprites_ref.get(&tile_id) {
                         draw_sprite_transformed(
-                            sprite, &state, draw_x, draw_y, false, false, 0.0, sp_scale,
+                            sprite, &state, draw_x, draw_y, false, false, 0.0, sp_scale, 1.0,
                         );
                     }
                 }
@@ -9014,7 +9032,17 @@ fn register_engine_api(
             let y = arg_f32(args, 2, 0.0) - state.cam_y;
             let col = arg_i32(args, 3, 7);
             let size = parse_text_size_arg(args, cfg_for_print.borrow().resolved_text_size());
-            font_for_print.draw_text_crisp_ex(&text, x, y, state.map_color(col), &emoji_for_print, size);
+            let alpha = arg_alpha(args, 5);
+            if alpha > 0.0 {
+                font_for_print.draw_text_crisp_ex(
+                    &text,
+                    x,
+                    y,
+                    state.map_color_with_alpha(col, alpha),
+                    &emoji_for_print,
+                    size,
+                );
+            }
             Ok(Rc::new(RObject::nil()))
         }),
     );
