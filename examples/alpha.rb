@@ -200,7 +200,7 @@ class AlphaDemoScene
       y = fw[:y].to_i
       tx = (fw[:x] - fw[:vx] * 3.5).to_i
       ty = (fw[:y] - fw[:vy] * 3.5).to_i
-      line(tx, ty, x, y, fw[:col], a * 0.6)
+      line(tx, ty, x, y, fw[:col], 1, a * 0.6)
       circfill(x, y, fw[:r] + 2, fw[:col], a * 0.22)
       circfill(x, y, fw[:r], fw[:col], a * 0.85)
     end
@@ -221,12 +221,12 @@ class AlphaDemoScene
 
     # 7. 半透明ガラス風 HUD とフェードテキスト（rectfill / rect / print_text alpha）
     rectfill(4, 4, 248, 22, 0, 0.55)
-    rect(4, 4, 248, 22, 12, 0.45)
+    rect(4, 4, 248, 22, 12, 1, 0.45)
     print_text("ALPHA BLENDING DEMO", 12, 8, 10, 8, 0.95)
     print_text("TRAIL:#{@trails.size} FW:#{@fireworks.size}", 156, 8, 6, 8, 0.8)
 
     rectfill(4, 232, 248, 20, 0, 0.55)
-    rect(4, 232, 248, 20, 7, 0.25)
+    rect(4, 232, 248, 20, 7, 1, 0.25)
     pulse = 0.45 + 0.55 * (0.5 + 0.5 * sin(@t * 0.07))
     print_text("ARROWS:MOVE  Z:DASH  X/CLICK:FIREWORK", 12, 238, 7, 8, pulse)
   end

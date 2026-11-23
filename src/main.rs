@@ -2035,6 +2035,52 @@ fn arg_opt_i32(args: &[Rc<RObject>], index: usize) -> Option<i32> {
     })
 }
 
+fn robject_to_i32(obj: &Rc<RObject>) -> Option<i32> {
+    match &obj.value {
+        RValue::Integer(i) => Some(*i as i32),
+        RValue::Float(f) => Some(*f as i32),
+        _ => i32::try_from(obj.as_ref()).ok(),
+    }
+}
+
+fn arg_points(args: &[Rc<RObject>], index: usize) -> Vec<(i32, i32)> {
+    let Some(obj) = args.get(index) else {
+        return Vec::new();
+    };
+    let RValue::Array(arr) = &obj.value else {
+        return Vec::new();
+    };
+    let elems = arr.borrow();
+    if elems.is_empty() {
+        return Vec::new();
+    }
+    if matches!(elems[0].value, RValue::Array(_)) {
+        let mut pts = Vec::with_capacity(elems.len());
+        for item in elems.iter() {
+            if let RValue::Array(pair) = &item.value {
+                let p = pair.borrow();
+                if p.len() >= 2
+                    && let (Some(x), Some(y)) = (robject_to_i32(&p[0]), robject_to_i32(&p[1]))
+                {
+                    pts.push((x, y));
+                }
+            }
+        }
+        pts
+    } else {
+        let mut pts = Vec::with_capacity(elems.len() / 2);
+        let mut i = 0;
+        while i + 1 < elems.len() {
+            if let (Some(x), Some(y)) = (robject_to_i32(&elems[i]), robject_to_i32(&elems[i + 1]))
+            {
+                pts.push((x, y));
+            }
+            i += 2;
+        }
+        pts
+    }
+}
+
 fn robject_to_u32(obj: &Rc<RObject>) -> Option<u32> {
     match &obj.value {
         RValue::Integer(i) => Some(*i as u32),
@@ -3549,6 +3595,25 @@ pub fn rasterize_rect(x: i32, y: i32, w: i32, h: i32) -> Vec<PixelSpan> {
     ]
 }
 
+/// 枠線のみの矩形 `(x, y, w, h)` を太さ `width`（内側基準・直角・重複なし）でラスタライズする
+pub fn rasterize_rect_with_width(x: i32, y: i32, w: i32, h: i32, width: i32) -> Vec<PixelSpan> {
+    if width <= 1 {
+        return rasterize_rect(x, y, w, h);
+    }
+    if w <= 0 || h <= 0 {
+        return Vec::new();
+    }
+    if width.saturating_mul(2) >= w || width.saturating_mul(2) >= h {
+        return rasterize_rectfill(x, y, w, h);
+    }
+    vec![
+        PixelSpan::new(x, y, w, width),
+        PixelSpan::new(x, y + h - width, w, width),
+        PixelSpan::new(x, y + width, width, h - 2 * width),
+        PixelSpan::new(x + w - width, y + width, width, h - 2 * width),
+    ]
+}
+
 /// 塗りつぶし矩形 `(x, y, w, h)` をラスタライズする
 pub fn rasterize_rectfill(x: i32, y: i32, w: i32, h: i32) -> Vec<PixelSpan> {
     if w <= 0 || h <= 0 {
@@ -3773,6 +3838,219 @@ pub fn rasterize_trifill(x0: i32, y0: i32, x1: i32, y1: i32, x2: i32, y2: i32) -
         }
     }
     spans
+}
+
+/// `h == 1` の水平スパン群をソート・結合し、重複ピクセルなしの最小スパン列にまとめる
+fn merge_horizontal_spans(mut spans: Vec<PixelSpan>) -> Vec<PixelSpan> {
+    if spans.is_empty() {
+        return spans;
+    }
+    spans.sort_unstable_by(|a, b| a.y.cmp(&b.y).then_with(|| a.x.cmp(&b.x)));
+    let mut merged: Vec<PixelSpan> = Vec::with_capacity(spans.len());
+    for s in spans {
+        if s.w <= 0 || s.h <= 0 {
+            continue;
+        }
+        if let Some(last) = merged.last_mut()
+            && last.y == s.y
+            && last.h == s.h
+            && s.x <= last.x.saturating_add(last.w)
+        {
+            let end = last.x.saturating_add(last.w).max(s.x.saturating_add(s.w));
+            last.w = end - last.x;
+        } else {
+            merged.push(s);
+        }
+    }
+    merged
+}
+
+/// 太さ `width` の丸端点直線（カプセル形状）を重複なし水平スパンにラスタライズする
+pub fn rasterize_thick_line(x0: i32, y0: i32, x1: i32, y1: i32, width: i32) -> Vec<PixelSpan> {
+    if width <= 1 {
+        return rasterize_line(x0, y0, x1, y1);
+    }
+
+    let offset = if width % 2 == 0 { 0.5_f64 } else { 0.0_f64 };
+    let r = if width % 2 == 0 {
+        (width as f64) * 0.5
+    } else {
+        (width as f64) * 0.5 - 0.25
+    };
+    let r2 = r * r;
+
+    let sx0 = x0 as f64 + offset;
+    let sy0 = y0 as f64 + offset;
+    let sx1 = x1 as f64 + offset;
+    let sy1 = y1 as f64 + offset;
+
+    let min_y = (sy0.min(sy1) - r).ceil() as i32;
+    let max_y = (sy0.max(sy1) + r).floor() as i32;
+    if min_y > max_y {
+        return Vec::new();
+    }
+
+    let vx = sx1 - sx0;
+    let vy = sy1 - sy0;
+    let len_sq = vx * vx + vy * vy;
+    let band_quad = if len_sq > 0.0 {
+        let inv_len = 1.0 / len_sq.sqrt();
+        let nx = -vy * inv_len * r;
+        let ny = vx * inv_len * r;
+        Some([
+            (sx0 + nx, sy0 + ny),
+            (sx1 + nx, sy1 + ny),
+            (sx1 - nx, sy1 - ny),
+            (sx0 - nx, sy0 - ny),
+        ])
+    } else {
+        None
+    };
+
+    let mut spans = Vec::with_capacity((max_y - min_y + 1) as usize);
+    for y in min_y..=max_y {
+        let yf = y as f64;
+        let mut row_min = i32::MAX;
+        let mut row_max = i32::MIN;
+
+        let dy0 = yf - sy0;
+        let dy0_2 = dy0 * dy0;
+        if dy0_2 <= r2 {
+            let dx = (r2 - dy0_2).sqrt();
+            let lx = (sx0 - dx).ceil() as i32;
+            let rx = (sx0 + dx).floor() as i32;
+            if lx <= rx {
+                row_min = row_min.min(lx);
+                row_max = row_max.max(rx);
+            }
+        }
+
+        let dy1 = yf - sy1;
+        let dy1_2 = dy1 * dy1;
+        if dy1_2 <= r2 {
+            let dx = (r2 - dy1_2).sqrt();
+            let lx = (sx1 - dx).ceil() as i32;
+            let rx = (sx1 + dx).floor() as i32;
+            if lx <= rx {
+                row_min = row_min.min(lx);
+                row_max = row_max.max(rx);
+            }
+        }
+
+        if let Some(q) = &band_quad {
+            let mut bx_min = f64::INFINITY;
+            let mut bx_max = f64::NEG_INFINITY;
+            for i in 0..4 {
+                let (ax, ay) = q[i];
+                let (bx, by) = q[(i + 1) % 4];
+                if ay != by && ((ay <= yf && yf <= by) || (by <= yf && yf <= ay)) {
+                    let x = ax + (yf - ay) * (bx - ax) / (by - ay);
+                    bx_min = bx_min.min(x);
+                    bx_max = bx_max.max(x);
+                }
+            }
+            if bx_min <= bx_max {
+                let lx = bx_min.ceil() as i32;
+                let rx = bx_max.floor() as i32;
+                if lx <= rx {
+                    row_min = row_min.min(lx);
+                    row_max = row_max.max(rx);
+                }
+            }
+        }
+
+        if row_min <= row_max {
+            spans.push(PixelSpan::new(row_min, y, row_max - row_min + 1, 1));
+        }
+    }
+    spans
+}
+
+/// 連続線分（`closed = false`: ポリライン、`closed = true`: 多角形枠線）を重複なしでラスタライズする
+pub fn rasterize_polyline(points: &[(i32, i32)], width: i32, closed: bool) -> Vec<PixelSpan> {
+    if points.is_empty() {
+        return Vec::new();
+    }
+    if points.len() == 1 {
+        return if width <= 1 {
+            vec![PixelSpan::new(points[0].0, points[0].1, 1, 1)]
+        } else {
+            rasterize_thick_line(points[0].0, points[0].1, points[0].0, points[0].1, width)
+        };
+    }
+
+    let edge_count = if closed {
+        points.len()
+    } else {
+        points.len() - 1
+    };
+
+    if width <= 1 {
+        let mut pts = Vec::new();
+        for i in 0..edge_count {
+            let (x0, y0) = points[i];
+            let (x1, y1) = points[(i + 1) % points.len()];
+            trace_line_points(x0, y0, x1, y1, |x, y| pts.push((x, y)));
+        }
+        return points_to_horizontal_spans(pts);
+    }
+
+    let mut all_spans = Vec::new();
+    for i in 0..edge_count {
+        let (x0, y0) = points[i];
+        let (x1, y1) = points[(i + 1) % points.len()];
+        all_spans.extend(rasterize_thick_line(x0, y0, x1, y1, width));
+    }
+    merge_horizontal_spans(all_spans)
+}
+
+/// 任意頂点数の塗りつぶし多角形（Even-Odd 規則＋輪郭包含）を重複なし水平スパンにラスタライズする
+pub fn rasterize_polyfill(points: &[(i32, i32)]) -> Vec<PixelSpan> {
+    if points.len() < 3 {
+        return Vec::new();
+    }
+    let min_y = points.iter().map(|p| p.1).min().unwrap_or(0);
+    let max_y = points.iter().map(|p| p.1).max().unwrap_or(-1);
+    if min_y > max_y {
+        return Vec::new();
+    }
+
+    let n = points.len();
+    let mut spans = Vec::with_capacity((max_y - min_y + 1) as usize * 2);
+    let mut xs: Vec<i32> = Vec::with_capacity(n);
+
+    for y in min_y..=max_y {
+        xs.clear();
+        for i in 0..n {
+            let (x0, y0) = points[i];
+            let (x1, y1) = points[(i + 1) % n];
+            if (y0 <= y && y < y1) || (y1 <= y && y < y0) {
+                let x = x0 as f64 + ((y - y0) as f64) * ((x1 - x0) as f64) / ((y1 - y0) as f64);
+                xs.push(x.round() as i32);
+            }
+        }
+        xs.sort_unstable();
+        let mut j = 0;
+        while j + 1 < xs.len() {
+            let lx = xs[j];
+            let rx = xs[j + 1];
+            if lx <= rx {
+                spans.push(PixelSpan::new(lx, y, rx - lx + 1, 1));
+            }
+            j += 2;
+        }
+    }
+
+    // 輪郭線を含めることで最下端・水平辺の1px欠けを防止する
+    let mut edge_pts = Vec::new();
+    for i in 0..n {
+        let (x0, y0) = points[i];
+        let (x1, y1) = points[(i + 1) % n];
+        trace_line_points(x0, y0, x1, y1, |x, y| edge_pts.push((x, y)));
+    }
+    spans.extend(points_to_horizontal_spans(edge_pts));
+
+    merge_horizontal_spans(spans)
 }
 
 /// Ruby 引数から SFX 指定（整数ID / 文字列 / シンボル）を取り出す
@@ -7048,9 +7326,14 @@ fn register_engine_api(
                 let x1 = arg_i32(args, 2, 0);
                 let y1 = arg_i32(args, 3, 0);
                 let col = arg_i32(args, 4, 7);
-                let spans = rasterize_line(x0, y0, x1, y1);
+                let width = arg_i32(args, 5, 1);
+                let alpha = arg_alpha(args, 6);
+                if alpha <= 0.0 {
+                    return Ok(Rc::new(RObject::nil()));
+                }
+                let spans = rasterize_thick_line(x0, y0, x1, y1, width);
                 let state = *state_for_line.borrow();
-                let _ = state.map_color(col);
+                let _ = state.map_color_with_alpha(col, alpha);
                 let _ = state.transform_and_clip_spans(&spans);
                 Ok(Rc::new(RObject::nil()))
             }),
@@ -7066,9 +7349,14 @@ fn register_engine_api(
                 let w = arg_i32(args, 2, 16);
                 let h = arg_i32(args, 3, 16);
                 let col = arg_i32(args, 4, 7);
-                let spans = rasterize_rect(x, y, w, h);
+                let width = arg_i32(args, 5, 1);
+                let alpha = arg_alpha(args, 6);
+                if alpha <= 0.0 {
+                    return Ok(Rc::new(RObject::nil()));
+                }
+                let spans = rasterize_rect_with_width(x, y, w, h, width);
                 let state = *state_for_rect.borrow();
-                let _ = state.map_color(col);
+                let _ = state.map_color_with_alpha(col, alpha);
                 let _ = state.transform_and_clip_spans(&spans);
                 Ok(Rc::new(RObject::nil()))
             }),
@@ -7182,9 +7470,18 @@ fn register_engine_api(
                 let x2 = arg_i32(args, 4, 4);
                 let y2 = arg_i32(args, 5, 8);
                 let col = arg_i32(args, 6, 7);
-                let spans = rasterize_tri(x0, y0, x1, y1, x2, y2);
+                let width = arg_i32(args, 7, 1);
+                let alpha = arg_alpha(args, 8);
+                if alpha <= 0.0 {
+                    return Ok(Rc::new(RObject::nil()));
+                }
+                let spans = if width <= 1 {
+                    rasterize_tri(x0, y0, x1, y1, x2, y2)
+                } else {
+                    rasterize_polyline(&[(x0, y0), (x1, y1), (x2, y2)], width, true)
+                };
                 let state = *state_for_tri.borrow();
-                let _ = state.map_color(col);
+                let _ = state.map_color_with_alpha(col, alpha);
                 let _ = state.transform_and_clip_spans(&spans);
                 Ok(Rc::new(RObject::nil()))
             }),
@@ -7209,6 +7506,122 @@ fn register_engine_api(
                 Ok(Rc::new(RObject::nil()))
             }),
         );
+        let state_for_polyline = draw_state.clone();
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            "polyline",
+            Box::new(move |_vm, args| {
+                let pts = arg_points(args, 0);
+                let col = arg_i32(args, 1, 7);
+                let width = arg_i32(args, 2, 1);
+                let alpha = arg_alpha(args, 3);
+                if alpha <= 0.0 || pts.is_empty() {
+                    return Ok(Rc::new(RObject::nil()));
+                }
+                let spans = rasterize_polyline(&pts, width, false);
+                let state = *state_for_polyline.borrow();
+                let _ = state.map_color_with_alpha(col, alpha);
+                let _ = state.transform_and_clip_spans(&spans);
+                Ok(Rc::new(RObject::nil()))
+            }),
+        );
+        let state_for_quad = draw_state.clone();
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            "quad",
+            Box::new(move |_vm, args| {
+                let x0 = arg_i32(args, 0, 0);
+                let y0 = arg_i32(args, 1, 0);
+                let x1 = arg_i32(args, 2, 8);
+                let y1 = arg_i32(args, 3, 0);
+                let x2 = arg_i32(args, 4, 8);
+                let y2 = arg_i32(args, 5, 8);
+                let x3 = arg_i32(args, 6, 0);
+                let y3 = arg_i32(args, 7, 8);
+                let col = arg_i32(args, 8, 7);
+                let width = arg_i32(args, 9, 1);
+                let alpha = arg_alpha(args, 10);
+                if alpha <= 0.0 {
+                    return Ok(Rc::new(RObject::nil()));
+                }
+                let spans = rasterize_polyline(&[(x0, y0), (x1, y1), (x2, y2), (x3, y3)], width, true);
+                let state = *state_for_quad.borrow();
+                let _ = state.map_color_with_alpha(col, alpha);
+                let _ = state.transform_and_clip_spans(&spans);
+                Ok(Rc::new(RObject::nil()))
+            }),
+        );
+        let state_for_quadfill = draw_state.clone();
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            "quadfill",
+            Box::new(move |_vm, args| {
+                let x0 = arg_i32(args, 0, 0);
+                let y0 = arg_i32(args, 1, 0);
+                let x1 = arg_i32(args, 2, 8);
+                let y1 = arg_i32(args, 3, 0);
+                let x2 = arg_i32(args, 4, 8);
+                let y2 = arg_i32(args, 5, 8);
+                let x3 = arg_i32(args, 6, 0);
+                let y3 = arg_i32(args, 7, 8);
+                let col = arg_i32(args, 8, 7);
+                let alpha = arg_alpha(args, 9);
+                if alpha <= 0.0 {
+                    return Ok(Rc::new(RObject::nil()));
+                }
+                let spans = rasterize_polyfill(&[(x0, y0), (x1, y1), (x2, y2), (x3, y3)]);
+                let state = *state_for_quadfill.borrow();
+                let _ = state.map_color_with_alpha(col, alpha);
+                let _ = state.transform_and_clip_spans(&spans);
+                Ok(Rc::new(RObject::nil()))
+            }),
+        );
+        for name in ["poly", "polygon"] {
+            let state_for_poly = draw_state.clone();
+            mrb_define_cmethod(
+                vm,
+                obj_class.clone(),
+                name,
+                Box::new(move |_vm, args| {
+                    let pts = arg_points(args, 0);
+                    let col = arg_i32(args, 1, 7);
+                    let width = arg_i32(args, 2, 1);
+                    let alpha = arg_alpha(args, 3);
+                    if alpha <= 0.0 || pts.is_empty() {
+                        return Ok(Rc::new(RObject::nil()));
+                    }
+                    let spans = rasterize_polyline(&pts, width, true);
+                    let state = *state_for_poly.borrow();
+                    let _ = state.map_color_with_alpha(col, alpha);
+                    let _ = state.transform_and_clip_spans(&spans);
+                    Ok(Rc::new(RObject::nil()))
+                }),
+            );
+        }
+        for name in ["polyfill", "polygonfill"] {
+            let state_for_polyfill = draw_state.clone();
+            mrb_define_cmethod(
+                vm,
+                obj_class.clone(),
+                name,
+                Box::new(move |_vm, args| {
+                    let pts = arg_points(args, 0);
+                    let col = arg_i32(args, 1, 7);
+                    let alpha = arg_alpha(args, 2);
+                    if alpha <= 0.0 || pts.len() < 3 {
+                        return Ok(Rc::new(RObject::nil()));
+                    }
+                    let spans = rasterize_polyfill(&pts);
+                    let state = *state_for_polyfill.borrow();
+                    let _ = state.map_color_with_alpha(col, alpha);
+                    let _ = state.transform_and_clip_spans(&spans);
+                    Ok(Rc::new(RObject::nil()))
+                }),
+            );
+        }
         let emoji_for_headless_print = emoji_atlas.clone();
         let state_for_headless_print = draw_state.clone();
         mrb_define_cmethod(
@@ -8050,7 +8463,7 @@ fn register_engine_api(
         }),
     );
 
-    // line(x0 = 0, y0 = 0, x1 = 0, y1 = 0, col = 7, alpha = 1.0): 直線描画（ブレゼンハム 1px）
+    // line(x0 = 0, y0 = 0, x1 = 0, y1 = 0, col = 7, width = 1, alpha = 1.0): 直線描画（1pxブレゼンハム / 太線カプセル）
     let state_for_line = draw_state.clone();
     mrb_define_cmethod(
         vm,
@@ -8062,11 +8475,12 @@ fn register_engine_api(
             let x1 = arg_i32(args, 2, 0);
             let y1 = arg_i32(args, 3, 0);
             let col = arg_i32(args, 4, 7);
-            let alpha = arg_alpha(args, 5);
+            let width = arg_i32(args, 5, 1);
+            let alpha = arg_alpha(args, 6);
             if alpha <= 0.0 {
                 return Ok(Rc::new(RObject::nil()));
             }
-            let raw = rasterize_line(x0, y0, x1, y1);
+            let raw = rasterize_thick_line(x0, y0, x1, y1, width);
             let state = *state_for_line.borrow();
             let spans = state.transform_and_clip_spans(&raw);
             draw_spans(&spans, state.map_color_with_alpha(col, alpha));
@@ -8074,7 +8488,7 @@ fn register_engine_api(
         }),
     );
 
-    // rect(x = 0, y = 0, w = 16, h = 16, col = 7, alpha = 1.0): 枠線のみの矩形
+    // rect(x = 0, y = 0, w = 16, h = 16, col = 7, width = 1, alpha = 1.0): 枠線のみの矩形
     let state_for_rect = draw_state.clone();
     mrb_define_cmethod(
         vm,
@@ -8086,11 +8500,12 @@ fn register_engine_api(
             let w = arg_i32(args, 2, 16);
             let h = arg_i32(args, 3, 16);
             let col = arg_i32(args, 4, 7);
-            let alpha = arg_alpha(args, 5);
+            let width = arg_i32(args, 5, 1);
+            let alpha = arg_alpha(args, 6);
             if alpha <= 0.0 {
                 return Ok(Rc::new(RObject::nil()));
             }
-            let raw = rasterize_rect(x, y, w, h);
+            let raw = rasterize_rect_with_width(x, y, w, h, width);
             let state = *state_for_rect.borrow();
             let spans = state.transform_and_clip_spans(&raw);
             draw_spans(&spans, state.map_color_with_alpha(col, alpha));
@@ -8224,7 +8639,7 @@ fn register_engine_api(
         );
     }
 
-    // tri(x0 = 0, y0 = 0, x1 = 8, y1 = 0, x2 = 4, y2 = 8, col = 7, alpha = 1.0): 枠線のみの三角形
+    // tri(x0 = 0, y0 = 0, x1 = 8, y1 = 0, x2 = 4, y2 = 8, col = 7, width = 1, alpha = 1.0): 枠線のみの三角形
     let state_for_tri = draw_state.clone();
     mrb_define_cmethod(
         vm,
@@ -8238,11 +8653,16 @@ fn register_engine_api(
             let x2 = arg_i32(args, 4, 4);
             let y2 = arg_i32(args, 5, 8);
             let col = arg_i32(args, 6, 7);
-            let alpha = arg_alpha(args, 7);
+            let width = arg_i32(args, 7, 1);
+            let alpha = arg_alpha(args, 8);
             if alpha <= 0.0 {
                 return Ok(Rc::new(RObject::nil()));
             }
-            let raw = rasterize_tri(x0, y0, x1, y1, x2, y2);
+            let raw = if width <= 1 {
+                rasterize_tri(x0, y0, x1, y1, x2, y2)
+            } else {
+                rasterize_polyline(&[(x0, y0), (x1, y1), (x2, y2)], width, true)
+            };
             let state = *state_for_tri.borrow();
             let spans = state.transform_and_clip_spans(&raw);
             draw_spans(&spans, state.map_color_with_alpha(col, alpha));
@@ -8275,6 +8695,132 @@ fn register_engine_api(
             Ok(Rc::new(RObject::nil()))
         }),
     );
+
+    // polyline(points, col = 7, width = 1, alpha = 1.0): 連続線分描画
+    let state_for_polyline = draw_state.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "polyline",
+        Box::new(move |_vm, args| {
+            let pts = arg_points(args, 0);
+            let col = arg_i32(args, 1, 7);
+            let width = arg_i32(args, 2, 1);
+            let alpha = arg_alpha(args, 3);
+            if alpha <= 0.0 || pts.is_empty() {
+                return Ok(Rc::new(RObject::nil()));
+            }
+            let raw = rasterize_polyline(&pts, width, false);
+            let state = *state_for_polyline.borrow();
+            let spans = state.transform_and_clip_spans(&raw);
+            draw_spans(&spans, state.map_color_with_alpha(col, alpha));
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
+
+    // quad(x0, y0, x1, y1, x2, y2, x3, y3, col = 7, width = 1, alpha = 1.0): 枠線のみの四角形
+    let state_for_quad = draw_state.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "quad",
+        Box::new(move |_vm, args| {
+            let x0 = arg_i32(args, 0, 0);
+            let y0 = arg_i32(args, 1, 0);
+            let x1 = arg_i32(args, 2, 8);
+            let y1 = arg_i32(args, 3, 0);
+            let x2 = arg_i32(args, 4, 8);
+            let y2 = arg_i32(args, 5, 8);
+            let x3 = arg_i32(args, 6, 0);
+            let y3 = arg_i32(args, 7, 8);
+            let col = arg_i32(args, 8, 7);
+            let width = arg_i32(args, 9, 1);
+            let alpha = arg_alpha(args, 10);
+            if alpha <= 0.0 {
+                return Ok(Rc::new(RObject::nil()));
+            }
+            let raw = rasterize_polyline(&[(x0, y0), (x1, y1), (x2, y2), (x3, y3)], width, true);
+            let state = *state_for_quad.borrow();
+            let spans = state.transform_and_clip_spans(&raw);
+            draw_spans(&spans, state.map_color_with_alpha(col, alpha));
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
+
+    // quadfill(x0, y0, x1, y1, x2, y2, x3, y3, col = 7, alpha = 1.0): 塗りつぶし四角形
+    let state_for_quadfill = draw_state.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "quadfill",
+        Box::new(move |_vm, args| {
+            let x0 = arg_i32(args, 0, 0);
+            let y0 = arg_i32(args, 1, 0);
+            let x1 = arg_i32(args, 2, 8);
+            let y1 = arg_i32(args, 3, 0);
+            let x2 = arg_i32(args, 4, 8);
+            let y2 = arg_i32(args, 5, 8);
+            let x3 = arg_i32(args, 6, 0);
+            let y3 = arg_i32(args, 7, 8);
+            let col = arg_i32(args, 8, 7);
+            let alpha = arg_alpha(args, 9);
+            if alpha <= 0.0 {
+                return Ok(Rc::new(RObject::nil()));
+            }
+            let raw = rasterize_polyfill(&[(x0, y0), (x1, y1), (x2, y2), (x3, y3)]);
+            let state = *state_for_quadfill.borrow();
+            let spans = state.transform_and_clip_spans(&raw);
+            draw_spans(&spans, state.map_color_with_alpha(col, alpha));
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
+
+    // poly(points, col = 7, width = 1, alpha = 1.0) / polygon(...): 枠線のみの多角形
+    for name in ["poly", "polygon"] {
+        let state_for_poly = draw_state.clone();
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            name,
+            Box::new(move |_vm, args| {
+                let pts = arg_points(args, 0);
+                let col = arg_i32(args, 1, 7);
+                let width = arg_i32(args, 2, 1);
+                let alpha = arg_alpha(args, 3);
+                if alpha <= 0.0 || pts.is_empty() {
+                    return Ok(Rc::new(RObject::nil()));
+                }
+                let raw = rasterize_polyline(&pts, width, true);
+                let state = *state_for_poly.borrow();
+                let spans = state.transform_and_clip_spans(&raw);
+                draw_spans(&spans, state.map_color_with_alpha(col, alpha));
+                Ok(Rc::new(RObject::nil()))
+            }),
+        );
+    }
+
+    // polyfill(points, col = 7, alpha = 1.0) / polygonfill(...): 塗りつぶし多角形
+    for name in ["polyfill", "polygonfill"] {
+        let state_for_polyfill = draw_state.clone();
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            name,
+            Box::new(move |_vm, args| {
+                let pts = arg_points(args, 0);
+                let col = arg_i32(args, 1, 7);
+                let alpha = arg_alpha(args, 2);
+                if alpha <= 0.0 || pts.len() < 3 {
+                    return Ok(Rc::new(RObject::nil()));
+                }
+                let raw = rasterize_polyfill(&pts);
+                let state = *state_for_polyfill.borrow();
+                let spans = state.transform_and_clip_spans(&raw);
+                draw_spans(&spans, state.map_color_with_alpha(col, alpha));
+                Ok(Rc::new(RObject::nil()))
+            }),
+        );
+    }
 
     // blt(x, y, bank, u, v, w, h, rotate = 0, scale = 1.0, pal = nil, alpha = 1.0): ピクセル矩形転送
     let banks_for_blt = banks.clone();

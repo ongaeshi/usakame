@@ -5712,15 +5712,15 @@ end
 def draw
   cls(0)
   pset(1, 2, 7, 0.5)
-  line(0, 0, 10, 10, 8, 0.4)
-  rect(4, 4, 20, 12, 9, 0.6)
+  line(0, 0, 10, 10, 8, 1, 0.4)
+  rect(4, 4, 20, 12, 9, 1, 0.6)
   rectfill(10, 10, 32, 24, 12, 0.5)
   rectfill(10, 10, 32, 24, 12, 0.0)
   circ(64, 64, 12, 10, 0.3)
   circfill(64, 64, 10, 11, 0.7)
   oval(100, 100, 12, 6, 13, 0.5)
   ovalfill(100, 100, 10, 5, 14, 0.25)
-  tri(10, 10, 20, 10, 15, 20, 7, 0.8)
+  tri(10, 10, 20, 10, 15, 20, 7, 1, 0.8)
   trifill(30, 10, 40, 10, 35, 20, 8, 0.4)
   print_text("FADE", 20, 20, 7, 8, 0.5)
 
@@ -5803,6 +5803,123 @@ run SceneA.new
     assert_eq!(rt.draw_state.borrow().blend, BlendMode::Mul);
     rt.call_update_result().unwrap();
     assert_eq!(rt.draw_state.borrow().blend, BlendMode::Normal);
+}
+
+#[test]
+fn test_rasterize_thick_line_and_overdraw_free() {
+    use std::collections::HashSet;
+
+    fn collect_pixels(spans: &[PixelSpan]) -> Vec<(i32, i32)> {
+        let mut pts = Vec::new();
+        for s in spans {
+            for dy in 0..s.h {
+                for dx in 0..s.w {
+                    pts.push((s.x + dx, s.y + dy));
+                }
+            }
+        }
+        pts
+    }
+
+    // width <= 1 は rasterize_line と完全一致
+    assert_eq!(rasterize_thick_line(2, 3, 12, 9, 1), rasterize_line(2, 3, 12, 9));
+    assert_eq!(rasterize_thick_line(2, 3, 12, 9, 0), rasterize_line(2, 3, 12, 9));
+
+    // 水平線の太さ確認 (width=2, 3, 4) と重複ピクセルなし検証
+    for w in [2, 3, 4, 5] {
+        let spans = rasterize_thick_line(10, 20, 30, 20, w);
+        let pts = collect_pixels(&spans);
+        let uniq: HashSet<_> = pts.iter().copied().collect();
+        assert_eq!(pts.len(), uniq.len(), "width={w} should have no overdraw");
+        // 中心線付近の y 範囲がちょうど w 本あること
+        let ys_at_mid: Vec<_> = uniq.iter().filter(|&&(x, _)| x == 20).map(|&(_, y)| y).collect();
+        assert_eq!(ys_at_mid.len(), w as usize, "width={w} should have thickness {w} at x=20");
+    }
+
+    // 長さ 0 の線分は円形キャップとして描画される
+    let dot3 = collect_pixels(&rasterize_thick_line(50, 50, 50, 50, 3));
+    assert!(dot3.contains(&(50, 50)));
+    assert!(dot3.contains(&(49, 50)));
+    assert!(dot3.contains(&(51, 50)));
+    assert!(dot3.contains(&(50, 49)));
+    assert!(dot3.contains(&(50, 51)));
+
+    // 斜め太線の重複なし検証
+    let diag = collect_pixels(&rasterize_thick_line(10, 10, 40, 30, 6));
+    let diag_uniq: HashSet<_> = diag.iter().copied().collect();
+    assert_eq!(diag.len(), diag_uniq.len());
+}
+
+#[test]
+fn test_rasterize_polyline_and_polyfill() {
+    use std::collections::HashSet;
+
+    fn collect_pixels(spans: &[PixelSpan]) -> Vec<(i32, i32)> {
+        let mut pts = Vec::new();
+        for s in spans {
+            for dy in 0..s.h {
+                for dx in 0..s.w {
+                    pts.push((s.x + dx, s.y + dy));
+                }
+            }
+        }
+        pts
+    }
+
+    // 太線ポリラインの接続部で重複がないこと
+    let pl = collect_pixels(&rasterize_polyline(&[(10, 10), (30, 10), (30, 30)], 4, false));
+    let pl_uniq: HashSet<_> = pl.iter().copied().collect();
+    assert_eq!(pl.len(), pl_uniq.len());
+    assert!(pl_uniq.contains(&(30, 10)));
+
+    // 矩形ポリゴン塗りつぶし: 10..=19 x 20..=29 -> 10x10 = 100px
+    let rect_poly = collect_pixels(&rasterize_polyfill(&[(10, 20), (19, 20), (19, 29), (10, 29)]));
+    let rect_uniq: HashSet<_> = rect_poly.iter().copied().collect();
+    assert_eq!(rect_poly.len(), 100);
+    assert_eq!(rect_uniq.len(), 100);
+
+    // 凹 L 字型多角形: 凹み部分 (18, 12) は塗られず、L 字内部 (12, 12), (18, 18) は塗られる
+    let l_shape = &[(10, 10), (15, 10), (15, 15), (20, 15), (20, 20), (10, 20)];
+    let l_pts = collect_pixels(&rasterize_polyfill(l_shape));
+    let l_uniq: HashSet<_> = l_pts.iter().copied().collect();
+    assert_eq!(l_pts.len(), l_uniq.len());
+    assert!(l_uniq.contains(&(12, 12)));
+    assert!(l_uniq.contains(&(18, 18)));
+    assert!(!l_uniq.contains(&(18, 12)));
+}
+
+#[test]
+fn test_polygon_and_thick_line_apis_headless() {
+    let script = r#"
+def draw
+  cls(0)
+  line(10, 10, 50, 30, 7, 3, 0.8)
+  rect(10, 180, 40, 20, 8, 3, 0.7)
+  tri(60, 180, 90, 180, 75, 205, 9, 3, 0.6)
+  polyline([[10, 50], [40, 60], [70, 50]], 11, 4, 0.7)
+  polyline([10, 80, 40, 90, 70, 80], 12, 2)
+  quad(100, 10, 140, 15, 135, 45, 95, 40, 8, 2, 0.9)
+  quadfill(100, 60, 140, 65, 135, 95, 95, 90, 9, 0.6)
+  poly([[160, 20], [180, 10], [200, 20], [190, 40], [170, 40]], 10, 2, 0.5)
+  polygon([160, 60, 180, 50, 200, 60, 190, 80, 170, 80], 13)
+  polyfill([[160, 100], [180, 90], [200, 100], [190, 120], [170, 120]], 14, 0.75)
+  polygonfill([160, 140, 180, 130, 200, 140, 190, 160, 170, 160], 15)
+end
+"#;
+    let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
+    let mut rt = GameRuntime::new(&tail, &mrb, true).unwrap();
+    rt.call_draw_result().unwrap();
+}
+
+#[test]
+fn test_rasterize_rect_with_width() {
+    assert_eq!(rasterize_rect_with_width(10, 20, 16, 12, 1), rasterize_rect(10, 20, 16, 12));
+    let spans = rasterize_rect_with_width(10, 20, 16, 12, 3);
+    let pixel_count: usize = spans.iter().map(|s| s.pixel_count()).sum();
+    // 16*12 - 10*6 = 192 - 60 = 132 ピクセル（重複なし）
+    assert_eq!(pixel_count, 132);
+    // width*2 >= h の場合は全塗りつぶしになる
+    assert_eq!(rasterize_rect_with_width(0, 0, 10, 6, 3), rasterize_rectfill(0, 0, 10, 6));
 }
 
 

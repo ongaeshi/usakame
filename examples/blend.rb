@@ -209,7 +209,7 @@ class BlendDemoScene
       sy = sp[:y].to_i
       tx = (sp[:x] - sp[:vx] * 3.0).to_i
       ty = (sp[:y] - sp[:vy] * 3.0).to_i
-      line(tx, ty, sx, sy, sp[:col], a * 0.7)
+      line(tx, ty, sx, sy, sp[:col], 1, a * 0.7)
       circfill(sx, sy, 3, sp[:col], a * 0.45)
     end
 
@@ -218,7 +218,7 @@ class BlendDemoScene
     # ==========================================================
     blend(:normal)
     rectfill(4, 4, 248, 22, 0, 0.6)
-    rect(4, 4, 248, 22, 10, 0.5)
+    rect(4, 4, 248, 22, 10, 1, 0.5)
     mode_label = @night_mode ? "MUL NIGHT:ON" : "MUL NIGHT:OFF"
     print_text("BLEND DEMO (:add/:mul)", 10, 8, 10)
     print_text(mode_label, 174, 8, @night_mode ? 12 : 6)
