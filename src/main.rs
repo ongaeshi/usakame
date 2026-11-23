@@ -2689,11 +2689,23 @@ fn draw_sprite_transformed_ext(
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BgFitMode {
+    Auto,
+    None,
+    Screen,
+    Cover,
+    Height,
+    Width,
+    Contain,
+}
+
 struct BgDrawOptions {
     x: f32,
     y: f32,
     scale: f32,
-    fit_screen: bool,
+    scale_specified: bool,
+    fit_mode: BgFitMode,
     dim: f32,
     alpha: f32,
     tint: Color,
@@ -2719,21 +2731,40 @@ fn apply_bg_kv_option(opts: &mut BgDrawOptions, key: &str, v: &RObject, palette_
     match key_str {
         "x" => if let Some(n) = parse_robject_f32(v) { opts.x = n; },
         "y" => if let Some(n) = parse_robject_f32(v) { opts.y = n; },
-        "scale" => if let Some(n) = parse_robject_f32(v) { opts.scale = n; },
+        "scale" => if let Some(n) = parse_robject_f32(v) {
+            opts.scale = n;
+            opts.scale_specified = true;
+        },
         "fit" => {
-            opts.fit_screen = match &v.value {
-                RValue::Bool(b) => *b,
-                RValue::Symbol(s) => {
-                    let st = s.name.trim_start_matches(':');
-                    st == "screen" || st == "height"
-                }
+            opts.fit_mode = match &v.value {
+                RValue::Bool(true) => BgFitMode::Screen,
+                RValue::Bool(false) => BgFitMode::None,
+                RValue::Nil => BgFitMode::Auto,
+                RValue::Symbol(s) => match s.name.trim_start_matches(':') {
+                    "screen" => BgFitMode::Screen,
+                    "cover" => BgFitMode::Cover,
+                    "height" => BgFitMode::Height,
+                    "width" => BgFitMode::Width,
+                    "contain" => BgFitMode::Contain,
+                    "none" | "false" => BgFitMode::None,
+                    "auto" => BgFitMode::Auto,
+                    _ => BgFitMode::Auto,
+                },
                 RValue::String(s, _) => {
                     let binding = s.borrow();
                     let st = String::from_utf8_lossy(&binding);
-                    let st = st.trim_start_matches(':');
-                    st == "screen" || st == "height"
+                    match st.trim_start_matches(':') {
+                        "screen" => BgFitMode::Screen,
+                        "cover" => BgFitMode::Cover,
+                        "height" => BgFitMode::Height,
+                        "width" => BgFitMode::Width,
+                        "contain" => BgFitMode::Contain,
+                        "none" | "false" => BgFitMode::None,
+                        "auto" => BgFitMode::Auto,
+                        _ => BgFitMode::Auto,
+                    }
                 }
-                _ => false,
+                _ => BgFitMode::Auto,
             };
         }
         "dim" => if let Some(n) = parse_robject_f32(v) { opts.dim = n.clamp(0.0, 1.0); },
@@ -2788,7 +2819,8 @@ fn parse_bg_draw_options(vm: &VM, args: &[Rc<RObject>], palette_rgba: &PaletteRg
         x: 0.0,
         y: 0.0,
         scale: 1.0,
-        fit_screen: false,
+        scale_specified: false,
+        fit_mode: BgFitMode::Auto,
         dim: 0.0,
         alpha: 1.0,
         tint: WHITE,
@@ -2847,6 +2879,54 @@ fn resolve_bg_key(arg: &RObject) -> Option<String> {
     }
 }
 
+fn compute_bg_scale(
+    tex_w: u16,
+    tex_h: u16,
+    screen_w: f32,
+    screen_h: f32,
+    opts: &BgDrawOptions,
+) -> f32 {
+    if tex_w == 0 || tex_h == 0 {
+        return opts.scale;
+    }
+    let sx = screen_w / tex_w as f32;
+    let sy = screen_h / tex_h as f32;
+    let repeat_x = opts.loop_x || opts.mirror_x;
+    let repeat_y = opts.loop_y || opts.mirror_y;
+
+    let effective_fit = match opts.fit_mode {
+        BgFitMode::Auto => {
+            if opts.scale_specified {
+                BgFitMode::None
+            } else if (screen_w - 256.0).abs() < f32::EPSILON
+                && (screen_h - 256.0).abs() < f32::EPSILON
+            {
+                BgFitMode::None
+            } else {
+                BgFitMode::Screen
+            }
+        }
+        other => other,
+    };
+
+    match effective_fit {
+        BgFitMode::Auto | BgFitMode::None => opts.scale,
+        BgFitMode::Screen => {
+            if repeat_x && !repeat_y {
+                sy
+            } else if repeat_y && !repeat_x {
+                sx
+            } else {
+                sx.max(sy)
+            }
+        }
+        BgFitMode::Cover => sx.max(sy),
+        BgFitMode::Height => sy,
+        BgFitMode::Width => sx,
+        BgFitMode::Contain => sx.min(sy),
+    }
+}
+
 fn draw_bg_texture(
     texture: &Texture2D,
     tex_w: u16,
@@ -2855,11 +2935,7 @@ fn draw_bg_texture(
     screen_h: f32,
     opts: &BgDrawOptions,
 ) {
-    let scale = if opts.fit_screen && tex_h > 0 {
-        screen_h / tex_h as f32
-    } else {
-        opts.scale
-    };
+    let scale = compute_bg_scale(tex_w, tex_h, screen_w, screen_h, opts);
     let draw_w = tex_w as f32 * scale;
     let draw_h = tex_h as f32 * scale;
     if draw_w <= 0.0 || draw_h <= 0.0 {

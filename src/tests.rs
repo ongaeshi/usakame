@@ -5625,6 +5625,90 @@ end
 }
 
 #[test]
+fn test_bg_auto_fit_and_fit_modes() {
+    let default_opts = BgDrawOptions {
+        x: 0.0,
+        y: 0.0,
+        scale: 1.0,
+        scale_specified: false,
+        fit_mode: BgFitMode::Auto,
+        dim: 0.0,
+        alpha: 1.0,
+        tint: WHITE,
+        filter: FilterMode::Linear,
+        scroll_x: 0.0,
+        scroll_y: 0.0,
+        loop_x: false,
+        mirror_x: false,
+        loop_y: false,
+        mirror_y: false,
+    };
+
+    // 256x256 仮想解像度では自動スケーリングしない（後方互換）
+    assert!((compute_bg_scale(256, 256, 256.0, 256.0, &default_opts) - 1.0).abs() < 1e-5);
+    assert!((compute_bg_scale(448, 256, 256.0, 256.0, &default_opts) - 1.0).abs() < 1e-5);
+    assert!((compute_bg_scale(64, 64, 256.0, 256.0, &default_opts) - 1.0).abs() < 1e-5);
+
+    // 640x480 などの高解像度ではデフォルトで画面全体を覆う（cover）
+    // 448x256 (:city 等): max(640/448, 480/256) = 1.875
+    assert!((compute_bg_scale(448, 256, 640.0, 480.0, &default_opts) - 1.875).abs() < 1e-5);
+    // 256x256 (:space, :cyber 等): max(640/256, 480/256) = 2.5
+    assert!((compute_bg_scale(256, 256, 640.0, 480.0, &default_opts) - 2.5).abs() < 1e-5);
+
+    // 横ループ併用時は高さ基準（480/256 = 1.875）
+    let mut loop_x_opts = BgDrawOptions {
+        loop_x: true,
+        ..default_opts
+    };
+    assert!((compute_bg_scale(256, 256, 640.0, 480.0, &loop_x_opts) - 1.875).abs() < 1e-5);
+    loop_x_opts.loop_x = false;
+    loop_x_opts.mirror_x = true;
+    assert!((compute_bg_scale(256, 256, 640.0, 480.0, &loop_x_opts) - 1.875).abs() < 1e-5);
+
+    // scale 明示指定時は自動フィットを無効化し、指定値を尊重
+    let scale_opts = BgDrawOptions {
+        scale: 1.0,
+        scale_specified: true,
+        ..default_opts
+    };
+    assert!((compute_bg_scale(448, 256, 640.0, 480.0, &scale_opts) - 1.0).abs() < 1e-5);
+
+    // fit: :none 明示指定時は scale の値を使用
+    let none_opts = BgDrawOptions {
+        scale: 1.5,
+        fit_mode: BgFitMode::None,
+        ..default_opts
+    };
+    assert!((compute_bg_scale(448, 256, 640.0, 480.0, &none_opts) - 1.5).abs() < 1e-5);
+
+    // fit: :contain / :width / :height / :cover
+    let contain_opts = BgDrawOptions {
+        fit_mode: BgFitMode::Contain,
+        ..default_opts
+    };
+    assert!((compute_bg_scale(448, 256, 640.0, 480.0, &contain_opts) - (640.0 / 448.0)).abs() < 1e-5);
+
+    let width_opts = BgDrawOptions {
+        fit_mode: BgFitMode::Width,
+        ..default_opts
+    };
+    assert!((compute_bg_scale(448, 256, 640.0, 480.0, &width_opts) - (640.0 / 448.0)).abs() < 1e-5);
+
+    let height_opts = BgDrawOptions {
+        fit_mode: BgFitMode::Height,
+        ..default_opts
+    };
+    assert!((compute_bg_scale(256, 256, 640.0, 480.0, &height_opts) - 1.875).abs() < 1e-5);
+
+    let cover_opts = BgDrawOptions {
+        fit_mode: BgFitMode::Cover,
+        loop_x: true,
+        ..default_opts
+    };
+    assert!((compute_bg_scale(256, 256, 640.0, 480.0, &cover_opts) - 2.5).abs() < 1e-5);
+}
+
+#[test]
 fn test_bg_directive_file_and_bundle_inline() {
     let temp_dir = std::env::temp_dir().join("usakame_test_bg_inline");
     let _ = std::fs::remove_dir_all(&temp_dir);
