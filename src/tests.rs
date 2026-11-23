@@ -5752,6 +5752,59 @@ __END__
     rt.call_draw_result().unwrap();
 }
 
+#[test]
+fn test_blend_mode_state_and_ruby_api() {
+    let mut state = DrawState::default();
+    assert_eq!(state.blend, BlendMode::Normal);
+    state.set_blend(BlendMode::Add);
+    assert_eq!(state.blend, BlendMode::Add);
+    state.set_blend(BlendMode::Mul);
+    assert_eq!(state.blend, BlendMode::Mul);
+    state.reset_blend();
+    assert_eq!(state.blend, BlendMode::Normal);
+
+    let script = r#"
+class SceneA
+  def update
+    blend(:mul)
+    run SceneB.new
+  end
+
+  def draw
+    cls(0)
+    blend(:add)
+    circfill(128, 128, 24, 10, 0.5)
+    blend(:mul)
+    rectfill(0, 0, 256, 256, 1, 0.6)
+    blend(:multiply)
+    rectfill(0, 0, 64, 64, 7, 0.5)
+    blend("add")
+    spr("✨", 100, 100, false, nil, 0.0, 1.0, 0.8)
+    blend()
+  end
+end
+
+class SceneB
+  def draw
+    cls(0)
+  end
+end
+
+run SceneA.new
+"#;
+    let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
+    let mut rt = GameRuntime::new(&tail, &mrb, true).unwrap();
+    rt.apply_pending_scene_transition();
+    rt.call_draw_result().unwrap();
+    assert_eq!(rt.draw_state.borrow().blend, BlendMode::Normal);
+
+    // update 内で blend(:mul) 後に run SceneB.new（reset_state: true）を呼ぶと次フレーム先頭で :normal に戻る
+    rt.call_update_result().unwrap();
+    assert_eq!(rt.draw_state.borrow().blend, BlendMode::Mul);
+    rt.call_update_result().unwrap();
+    assert_eq!(rt.draw_state.borrow().blend, BlendMode::Normal);
+}
+
 
 
 

@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use macroquad::miniquad::{BlendFactor, BlendState, BlendValue, Equation};
 use macroquad::prelude::*;
 use mrubyedge::rite;
 use mrubyedge::yamrb::helpers::{
@@ -3146,7 +3147,16 @@ pub fn intersect_screen_clip_ex(x: i32, y: i32, w: i32, h: i32, sw: i32, sh: i32
     PixelSpan::new(x0, y0, (x1 - x0).max(0), (y1 - y0).max(0))
 }
 
-/// 描画ステート（カメラオフセット、画面クリッピング領域、カラーパレット置換・透過設定）
+/// ブレンドモード
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BlendMode {
+    #[default]
+    Normal,
+    Add,
+    Mul,
+}
+
+/// 描画ステート（カメラオフセット、画面クリッピング領域、カラーパレット置換・透過設定、ブレンドモード）
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DrawState {
     pub cam_x: f32,
@@ -3158,6 +3168,7 @@ pub struct DrawState {
     pub screen_h: i32,
     pub active_pal_bank: i32,
     pub palette_rgba: PaletteRgba,
+    pub blend: BlendMode,
 }
 
 impl Default for DrawState {
@@ -3172,6 +3183,7 @@ impl Default for DrawState {
             screen_h: SCREEN_HEIGHT as i32,
             active_pal_bank: 0,
             palette_rgba: PALETTE_RGBA,
+            blend: BlendMode::Normal,
         }
     }
 }
@@ -3220,6 +3232,14 @@ impl DrawState {
 
     pub fn reset_palt(&mut self) {
         self.palt_mask = 0;
+    }
+
+    pub fn set_blend(&mut self, mode: BlendMode) {
+        self.blend = mode;
+    }
+
+    pub fn reset_blend(&mut self) {
+        self.blend = BlendMode::Normal;
     }
 
     pub fn is_default_palette(&self) -> bool {
@@ -3274,6 +3294,128 @@ fn apply_gl_scissor(clip: Option<PixelSpan>) {
     let gl_clip = clip.map(|c| (c.x, c.y, c.w.max(0), c.h.max(0)));
     unsafe {
         get_internal_gl().quad_gl.scissor(gl_clip);
+    }
+}
+
+struct BlendMaterials {
+    add: Material,
+    mul: Material,
+}
+
+const BLEND_VERTEX_SHADER: &str = r#"#version 100
+attribute vec3 position;
+attribute vec2 texcoord;
+attribute vec4 color0;
+varying lowp vec2 uv;
+varying lowp vec4 color;
+uniform mat4 Model;
+uniform mat4 Projection;
+void main() {
+    gl_Position = Projection * Model * vec4(position, 1.0);
+    color = color0 / 255.0;
+    uv = texcoord;
+}
+"#;
+
+const BLEND_ADD_FRAGMENT_SHADER: &str = r#"#version 100
+varying lowp vec2 uv;
+varying lowp vec4 color;
+uniform sampler2D Texture;
+void main() {
+    gl_FragColor = color * texture2D(Texture, uv);
+}
+"#;
+
+const BLEND_MUL_FRAGMENT_SHADER: &str = r#"#version 100
+varying lowp vec2 uv;
+varying lowp vec4 color;
+uniform sampler2D Texture;
+void main() {
+    lowp vec4 texel = color * texture2D(Texture, uv);
+    gl_FragColor = vec4(mix(vec3(1.0), texel.rgb, texel.a), texel.a);
+}
+"#;
+
+thread_local! {
+    static BLEND_MATERIALS: RefCell<Option<BlendMaterials>> = const { RefCell::new(None) };
+}
+
+fn ensure_blend_materials() {
+    BLEND_MATERIALS.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_some() {
+            return;
+        }
+        let alpha_keep = Some(BlendState::new(
+            Equation::Add,
+            BlendFactor::Zero,
+            BlendFactor::One,
+        ));
+        let add = load_material(
+            ShaderSource::Glsl {
+                vertex: BLEND_VERTEX_SHADER,
+                fragment: BLEND_ADD_FRAGMENT_SHADER,
+            },
+            MaterialParams {
+                pipeline_params: PipelineParams {
+                    color_blend: Some(BlendState::new(
+                        Equation::Add,
+                        BlendFactor::Value(BlendValue::SourceAlpha),
+                        BlendFactor::One,
+                    )),
+                    alpha_blend: alpha_keep,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .expect("failed to load add blend material");
+
+        let mul = load_material(
+            ShaderSource::Glsl {
+                vertex: BLEND_VERTEX_SHADER,
+                fragment: BLEND_MUL_FRAGMENT_SHADER,
+            },
+            MaterialParams {
+                pipeline_params: PipelineParams {
+                    color_blend: Some(BlendState::new(
+                        Equation::Add,
+                        BlendFactor::Value(BlendValue::DestinationColor),
+                        BlendFactor::Zero,
+                    )),
+                    alpha_blend: alpha_keep,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .expect("failed to load mul blend material");
+
+        *slot = Some(BlendMaterials { add, mul });
+    });
+}
+
+fn apply_gl_blend(mode: BlendMode) {
+    match mode {
+        BlendMode::Normal => {
+            gl_use_default_material();
+        }
+        BlendMode::Add => {
+            ensure_blend_materials();
+            BLEND_MATERIALS.with(|cell| {
+                if let Some(ref mats) = *cell.borrow() {
+                    gl_use_material(&mats.add);
+                }
+            });
+        }
+        BlendMode::Mul => {
+            ensure_blend_materials();
+            BLEND_MATERIALS.with(|cell| {
+                if let Some(ref mats) = *cell.borrow() {
+                    gl_use_material(&mats.mul);
+                }
+            });
+        }
     }
 }
 
@@ -5096,6 +5238,46 @@ fn register_engine_api(
             }
             if !headless {
                 apply_gl_scissor(state.clip);
+            }
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
+
+    // blend(mode = :normal): ブレンドモードを設定（:normal / :add / :mul、引数なしまたは nil で :normal にリセット）
+    let state_for_blend = draw_state.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "blend",
+        Box::new(move |_vm, args| {
+            let mode = if args.is_empty() || matches!(args[0].value, RValue::Nil) {
+                BlendMode::Normal
+            } else {
+                match &args[0].value {
+                    RValue::Symbol(sym) => match sym.name.trim_start_matches(':') {
+                        "add" => BlendMode::Add,
+                        "mul" | "multiply" => BlendMode::Mul,
+                        _ => BlendMode::Normal,
+                    },
+                    RValue::String(_, _) => match String::try_from(args[0].as_ref())
+                        .unwrap_or_default()
+                        .trim_start_matches(':')
+                    {
+                        "add" => BlendMode::Add,
+                        "mul" | "multiply" => BlendMode::Mul,
+                        _ => BlendMode::Normal,
+                    },
+                    RValue::Integer(n) => match *n {
+                        1 => BlendMode::Add,
+                        2 => BlendMode::Mul,
+                        _ => BlendMode::Normal,
+                    },
+                    _ => BlendMode::Normal,
+                }
+            };
+            state_for_blend.borrow_mut().set_blend(mode);
+            if !headless {
+                apply_gl_blend(mode);
             }
             Ok(Rc::new(RObject::nil()))
         }),
@@ -9225,6 +9407,7 @@ pub fn wrap_text_lines(text: &str, max_chars: usize) -> Vec<String> {
 }
 
 pub fn render_error_screen(err: &ScriptError) {
+    apply_gl_blend(BlendMode::Normal);
     apply_gl_scissor(None);
     set_default_camera();
     clear_background(Color::new(0.06, 0.06, 0.06, 1.0));
@@ -9319,6 +9502,7 @@ pub fn render_error_screen(err: &ScriptError) {
 pub const ERROR_OVERLAY_DURATION_FRAMES: u32 = 180;
 
 pub fn render_error_overlay(err: &ScriptError) {
+    apply_gl_blend(BlendMode::Normal);
     apply_gl_scissor(None);
     set_default_camera();
 
@@ -9807,6 +9991,7 @@ impl GameRuntime {
         state.reset_clip();
         state.reset_pal();
         state.reset_palt();
+        state.reset_blend();
         let bank_id = state.active_pal_bank;
         if let Some(pal) = self.palettes.borrow().get(&bank_id) {
             state.palette_rgba = *pal;
@@ -9815,6 +10000,7 @@ impl GameRuntime {
         }
         if !self.headless {
             apply_gl_scissor(None);
+            apply_gl_blend(BlendMode::Normal);
         }
     }
 
@@ -9854,7 +10040,9 @@ impl GameRuntime {
 
     pub fn call_draw_result(&mut self) -> Result<(), ScriptError> {
         if !self.headless {
-            apply_gl_scissor(self.draw_state.borrow().clip);
+            let st = *self.draw_state.borrow();
+            apply_gl_scissor(st.clip);
+            apply_gl_blend(st.blend);
         }
         let res = if let Some(ref scene) = self.current_scene {
             if object_has_method(scene, "draw") {
@@ -9871,6 +10059,7 @@ impl GameRuntime {
         };
         if !self.headless {
             apply_gl_scissor(None);
+            apply_gl_blend(BlendMode::Normal);
         }
         res
     }
@@ -10362,6 +10551,7 @@ pub fn present_virtual_screen(
     reload_banner_text: &str,
     show_fps: bool,
 ) {
+    apply_gl_blend(BlendMode::Normal);
     apply_gl_scissor(None);
     set_default_camera();
     clear_background(BLACK);
