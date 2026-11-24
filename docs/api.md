@@ -118,6 +118,21 @@ end
 
 ### 2.2 描画API
 
+> **⚠️ 引数の渡し方（位置引数のみ対応・キーワード引数非対応）**
+>
+> 描画API（`pset`, `line`, `polyline`, `rect`, `rectfill`, `circ`, `circfill`, `oval`, `ovalfill`, `tri`, `trifill`, `quad`, `quadfill`, `poly`, `polyfill`, `spr`, `spr_ext`, `spr_clip`, `blt`, `print_text` 等）は毎フレーム高頻度で呼び出されるため、実行時の Hash 確保・GC オーバーヘッドを避ける目的で**キーワード引数には対応していません**（`bg()` や `run()` など一部 API のみキーワード引数に対応）。
+> `width` や `alpha`、`size` などの省略可能な引数も含め、下表の順序通りに**位置引数**で指定してください。
+>
+> ```ruby
+> # ❌ キーワード引数は無視され、デフォルト値（1px・不透明など）で描画される
+> line(x0, y0, x1, y1, col, width: 6, alpha: 0.42)
+>
+> # ⭕ 位置引数で指定する
+> line(x0, y0, x1, y1, col, 6, 0.42)
+> rect(x, y, w, h, col, 2, 0.8)
+> print_text("HP", 4, 4, 7, 8, 0.8)
+> ```
+
 | メソッド | 引数とデフォルト値 | 戻り値 | 説明 |
 | :--- | :--- | :--- | :--- |
 | **`cls`** | `(col = 0)` | `nil` | 仮想画面全体（`clip` 指定中はクリッピング領域内）を指定したパレット色 `col` で塗りつぶしてクリアします。 |
