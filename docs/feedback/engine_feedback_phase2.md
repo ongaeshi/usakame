@@ -38,15 +38,17 @@ Phase 1（`docs/engine_feedback.md`）で対応された新API（`alpha` 半透�
 - **現象**: `[[y0, col0], [y1, col1]].each do |ty, c|` と書くと、mrubyedge では `ty` に配列 `[y0, col0]` がそのまま入り、`c` が `nil` になった。
 - **回避策**: `each do |pair| ty = pair[0]; c = pair[1]` のようにインデックスアクセスする。
 
-### ③ 高解像度時の `print_text` デフォルトサイズ
+### ③ 高解像度時の `print_text` デフォルトサイズ 【対応済み】
 - **遭遇ゲーム**: `32_star_trench.rb`
 - **現象**: `320x240` や `480x270` で `print_text(str, x, y, col)` をサイズ省略で呼ぶと、大きなフォント（16px相当）で描画され HUD が重なりやすかった。
 - **回避策**: HUD や小ラベルには第5引数で明示的に `print_text(str, x, y, col, 8)`（8px美咲/6x8フォント）を指定する。
+- **対応内容**: `AppConfig::resolved_text_size()` の解像度による自動 16px 切替を廃止し、仮想解像度によらずデフォルト `8`px に統一した（`16`px にしたい場合は `config(text_size: 16)` または第5引数 `16` を明示指定）。あわせて `docs/api.md` の `print_text` 仕様を更新した。
 
-### ④ マウス入力API名（`btnp(:mouse_l)`）
+### ④ マウス入力API名（`btnp(:mouse_l)`） 【対応済み】
 - **遭遇ゲーム**: `31_prism_laser.rb`
 - **現象**: `mouse_btn(0)` は未定義で `NoMethodError` となった。
 - **回避策**: `btn(:mouse_l)` / `btnp(:mouse_l)` / `btnp(:mouse_r)` と `mouse_x` / `mouse_y` を使用する。
+- **対応内容**: `docs/api.md` の「2.3 入力API」に `mouse_x`, `mouse_y`, `show_mouse` および `btn` / `btnp` のマウスボタン対応（`6`〜`8` / `:mouse_l`, `:mouse_r`, `:mouse_m`）を追記し、第6章の古い未実装候補（`mouse_btn`）の記述を削除した。
 
 ### ⑤ `Array#index` 未実装
 - **遭遇ゲーム**: `40_fireworks_symphony.rb`

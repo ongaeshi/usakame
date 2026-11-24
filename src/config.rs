@@ -16,7 +16,7 @@ pub struct AppConfig {
     pub screen_height: u32,
     pub window_scale: f32,
     pub sprite_scale: f32,
-    pub text_size: u32, // 0 = 自動判定 (screen_width <= 256 ? 8 : 16)
+    pub text_size: u32, // 0 = デフォルト (8)
     pub title: String,
     pub show_fps: bool,
     pub default_palette: i32,
@@ -39,12 +39,10 @@ impl Default for AppConfig {
 
 impl AppConfig {
     pub fn resolved_text_size(&self) -> u32 {
-        if self.text_size == 8 || self.text_size == 16 {
-            self.text_size
-        } else if self.screen_width <= 256 {
-            8
-        } else {
+        if self.text_size == 16 {
             16
+        } else {
+            8
         }
     }
 

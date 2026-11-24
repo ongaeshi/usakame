@@ -60,7 +60,7 @@ x = 10
     assert_eq!(cfg.window_width(), 960);
     assert_eq!(cfg.window_height(), 720);
 
-    // デフォルト判定
+    // デフォルト判定（解像度によらずデフォルトは 8px）
     let default_cfg = AppConfig::default();
     assert_eq!(default_cfg.resolved_text_size(), 8); // 256x256 -> 8
     let vga_cfg = AppConfig {
@@ -68,7 +68,7 @@ x = 10
         screen_height: 480,
         ..Default::default()
     };
-    assert_eq!(vga_cfg.resolved_text_size(), 16); // 640x480 -> 16
+    assert_eq!(vga_cfg.resolved_text_size(), 8); // 640x480 でもデフォルトは 8
 }
 
 #[test]
