@@ -6330,3 +6330,133 @@ run SurfaceTestGame.new
     assert_eq!(to_pair(rt.vm.globals.get("$sz2").unwrap()), Some((64, 48)));
     assert!(matches!(rt.vm.globals.get("$sz_invalid").unwrap().value, RValue::Nil));
 }
+
+#[test]
+fn test_pixel_surface_queries_and_dirty_rect() {
+    let mut pix = surface::PixelSurface::new(64, 64);
+    assert_eq!(pix.get_pixel(10, 10), None);
+    assert_eq!(pix.get_pixel(-1, 0), None);
+    assert_eq!(pix.get_pixel(64, 0), None);
+
+    pix.is_dirty = false;
+    pix.set_pixel(10, 10, Some(0)); // 黒色(0)も非透明として区別される
+    assert_eq!(pix.get_pixel(10, 10), Some(0));
+    assert!(pix.is_dirty);
+    assert_eq!((pix.dirty_min_x, pix.dirty_min_y, pix.dirty_max_x, pix.dirty_max_y), (10, 10, 11, 11));
+
+    pix.set_pixel(15, 20, Some(6));
+    pix.swap_pixels(10, 10, 10, 11);
+    assert_eq!(pix.get_pixel(10, 10), None);
+    assert_eq!(pix.get_pixel(10, 11), Some(0));
+
+    assert!(pix.is_rect_solid(9, 10, 3, 3));
+    assert!(!pix.is_rect_solid(0, 0, 5, 5));
+    assert!(pix.is_circle_solid(15, 20, 2));
+    assert!(!pix.is_circle_solid(0, 0, 3));
+
+    assert_eq!(pix.raycast(0, 20, 30, 20), Some((15, 20, 6)));
+    assert_eq!(pix.raycast(0, 0, 30, 0), None);
+
+    assert_eq!(pix.count_pixels(None, 0, 0, None, None), 2);
+    assert_eq!(pix.count_pixels(Some(0), 0, 0, None, None), 1);
+    assert_eq!(pix.count_pixels(Some(6), 14, 19, Some(3), Some(3)), 1);
+}
+
+#[test]
+fn test_pixel_surface_destructible_terrain_ruby_headless() {
+    let script = r##"
+class TerrainTestGame
+  def initialize
+    @terrain = create_surface(128, 64, :pixel)
+    @gpu = create_surface(64, 64, :gpu)
+
+    render_to(@terrain) do
+      cls(nil)
+      rectfill(0, 40, 128, 24, 4)   # 茶色の地面 (色 4)
+      rectfill(50, 30, 16, 10, 0)   # 黒いブロック (色 0)
+      spr(:crate, 10, 24)           # スプライトも :pixel へ焼き付け可能
+      print_text("HI", 2, 2, 7, 8)
+      $pget_inside = pget(55, 35)
+    end
+
+    $cnt_before = surface_count(@terrain)
+    $cnt_black = surface_count(@terrain, 0)
+    $solid_ground = surface_solid?(@terrain, 20, 40, 8, 8)
+    $solid_sky = surface_solid?(@terrain, 20, 10, 8, 8)
+    $circle_hit = surface_circle_solid?(@terrain, 55, 28, 3)
+    $ray_hit = surface_raycast(@terrain, 55, 0, 55, 63)
+
+    # 爆破くり抜き（:erase）
+    render_to(@terrain) do
+      blend(:erase)
+      circfill(55, 35, 8, 7, 1.0)
+    end
+    $pget_after_erase = surface_pget(@terrain, 55, 35)
+    $cnt_after = surface_count(@terrain)
+
+    # 落下砂の swap テスト
+    surface_pset(@terrain, 90, 10, 10)
+    surface_swap(@terrain, 90, 10, 90, 11)
+    $sand_old = surface_pget(@terrain, 90, 10)
+    $sand_new = pget(90, 11, @terrain)
+
+    # 画面・:gpu サーフェスへの pget は RuntimeError
+    begin
+      pget(0, 0)
+      $pget_screen_err = false
+    rescue
+      $pget_screen_err = true
+    end
+    begin
+      pget(0, 0, @gpu)
+      $pget_gpu_err = false
+    rescue
+      $pget_gpu_err = true
+    end
+  end
+
+  def draw
+    cls(0)
+    draw_surface(@terrain, 0, 0)
+  end
+end
+
+run TerrainTestGame.new
+
+__END__
+@SPRITE :crate 16x16
+................
+..666666666666..
+..6..........6..
+..666666666666..
+"##;
+    let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
+    let mut rt = GameRuntime::new(&tail, &mrb, true).unwrap();
+    rt.apply_pending_scene_transition();
+    rt.call_draw_result().unwrap();
+
+    assert_eq!(robject_to_i32(rt.vm.globals.get("$pget_inside").unwrap()), Some(0));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$solid_ground").unwrap()), Some(true));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$solid_sky").unwrap()), Some(false));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$circle_hit").unwrap()), Some(true));
+
+    if let RValue::Array(ref arr) = rt.vm.globals.get("$ray_hit").unwrap().value {
+        let a = arr.borrow();
+        assert_eq!(robject_to_i32(&a[0]), Some(55));
+        assert_eq!(robject_to_i32(&a[1]), Some(30));
+        assert_eq!(robject_to_i32(&a[2]), Some(0));
+    } else {
+        panic!("expected $ray_hit array");
+    }
+
+    assert!(matches!(rt.vm.globals.get("$pget_after_erase").unwrap().value, RValue::Nil));
+    let before = robject_to_i32(rt.vm.globals.get("$cnt_before").unwrap()).unwrap();
+    let after = robject_to_i32(rt.vm.globals.get("$cnt_after").unwrap()).unwrap();
+    assert!(after < before);
+    assert!(robject_to_i32(rt.vm.globals.get("$cnt_black").unwrap()).unwrap() >= 160);
+
+    assert!(matches!(rt.vm.globals.get("$sand_old").unwrap().value, RValue::Nil));
+    assert_eq!(robject_to_i32(rt.vm.globals.get("$sand_new").unwrap()), Some(10));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$pget_screen_err").unwrap()), Some(true));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$pget_gpu_err").unwrap()), Some(true));
+}

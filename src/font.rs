@@ -476,4 +476,97 @@ impl BitmapFont {
             }
         }
     }
+
+    pub fn rasterize_text_spans(&self, text: &str, x: f32, y: f32, font_size: u32) -> Vec<crate::PixelSpan> {
+        let mut spans = Vec::new();
+        let start_x = x.floor() as i32;
+        let mut cur_x = start_x;
+        let mut cur_y = y.floor() as i32;
+
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\n' {
+                cur_x = start_x;
+                cur_y += if font_size == 16 { 16 } else { FONT_CHAR_H as i32 };
+                continue;
+            }
+            let code = ch as u32;
+            if code == 0xFE0E
+                || code == 0xFE0F
+                || code == 0x200D
+                || (0x1F3FB..=0x1F3FF).contains(&code)
+            {
+                continue;
+            }
+            if matches!(chars.peek(), Some('\u{FE0F}') | Some('\u{FE0E}')) {
+                chars.next();
+            }
+
+            if font_size == 16 {
+                if code <= 0xFFFF {
+                    let cp = code as u16;
+                    if cp == 0x3000 {
+                        cur_x += 16;
+                        continue;
+                    }
+                    if cp == 0x20 {
+                        cur_x += 8;
+                        continue;
+                    }
+                    if let Some(glyph) = lookup_shinonome_glyph(cp) {
+                        let w = glyph.width as usize;
+                        for gy in 0..16 {
+                            let row_bits = if w == 16 {
+                                ((glyph.bitmap[gy * 2] as u16) << 8) | (glyph.bitmap[gy * 2 + 1] as u16)
+                            } else {
+                                (glyph.bitmap[gy] as u16) << 8
+                            };
+                            for gx in 0..w {
+                                if ((row_bits >> (15 - gx)) & 1) != 0 {
+                                    spans.push(crate::PixelSpan::new(cur_x + gx as i32, cur_y + gy as i32, 1, 1));
+                                }
+                            }
+                        }
+                        cur_x += glyph.width as i32;
+                    } else {
+                        cur_x += 16;
+                    }
+                } else {
+                    cur_x += 16;
+                }
+            } else if (0x20..=0x7E).contains(&code) {
+                let idx = (code - 0x20) as usize;
+                let glyph = &FONT_5X7[idx];
+                for (gy, &bits) in glyph.iter().enumerate() {
+                    for gx in 0..5 {
+                        if ((bits >> (4 - gx)) & 1) != 0 {
+                            spans.push(crate::PixelSpan::new(cur_x + gx, cur_y + gy as i32, 1, 1));
+                        }
+                    }
+                }
+                cur_x += FONT_CHAR_W as i32;
+            } else if code <= 0xFFFF {
+                let cp = code as u16;
+                if cp != 0x3000 {
+                    if let Some(glyph) = lookup_misaki_glyph(cp) {
+                        for (gy, &bits) in glyph.iter().enumerate() {
+                            for gx in 0..8 {
+                                if ((bits >> (7 - gx)) & 1) != 0 {
+                                    spans.push(crate::PixelSpan::new(cur_x + gx, cur_y + gy as i32, 1, 1));
+                                }
+                            }
+                        }
+                    }
+                }
+                if (0xFF61..=0xFF9F).contains(&cp) {
+                    cur_x += 4;
+                } else {
+                    cur_x += 8;
+                }
+            } else {
+                cur_x += FONT_CHAR_W as i32;
+            }
+        }
+        spans
+    }
 }
