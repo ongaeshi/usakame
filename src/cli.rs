@@ -116,6 +116,13 @@ pub enum CliAction {
     },
     /// `uk unpack [script.rb]` (`__END__` から外部リソース .spr, .map, .sfx を抽出)
     Unpack { script_path: PathBuf },
+    /// `uk save-init [script.rb] [--id <id>] [--rotate] [--print]` (セーブデータ設定の初期化・更新)
+    SaveInit {
+        script_path: Option<PathBuf>,
+        save_id: Option<String>,
+        rotate: bool,
+        print_only: bool,
+    },
     /// `uk check [script.rb] [--frames <N>] [--gacha]` (ヘッドレス構文・実行検証)
     Check {
         script_path: PathBuf,
@@ -164,6 +171,10 @@ USAGE:
     uk browser [script.rb] [-p <port>]  Run script in the browser with live hot-reload
     uk pack [script.rb] [-o <output>]   Pack external resources into single standalone script
     uk unpack [script.rb]               Unpack resources from script into .spr, .map, .sfx files
+    uk save-init [script.rb] [options]  Initialize or rotate save_id / save_salt in config(...)
+        --id <save_id>                  Specify custom save_id
+        --rotate, --reset-salt          Generate a new random save_salt even if already set
+        --print                         Print config(save_id:, save_salt:) snippet without modifying files
     uk encode <file> [--id <id>]        Encode PNG image/sheet or WAV/OGG audio into Base64 for script
     uk --help, -h                       Show this help message
     uk --version, -V                    Show version information"
@@ -253,6 +264,7 @@ where
                 .unwrap_or_else(|| PathBuf::from("."));
             Ok(CliAction::UpdateDocs { dir })
         }
+        "save-init" | "save_init" => parse_save_init_args(&rest[1..]),
         "edit" => parse_edit_args(&rest[1..], EditorKind::Sprite),
         "viewer" | "view" => parse_viewer_args(&rest[1..]),
         "spr" => parse_edit_args(&rest[1..], EditorKind::Sprite),
@@ -2353,4 +2365,309 @@ pub fn spawn_editor_processes(kind: EditorKind, target_path: &Path) -> Vec<std::
         }
     }
     children
+}
+
+
+fn parse_save_init_args(args: &[String]) -> Result<CliAction, String> {
+    let mut script_path: Option<PathBuf> = None;
+    let mut save_id: Option<String> = None;
+    let mut rotate = false;
+    let mut print_only = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--id" | "--save-id" => {
+                i += 1;
+                let val = args
+                    .get(i)
+                    .ok_or_else(|| "Missing value after `--id`".to_string())?;
+                save_id = Some(val.clone());
+            }
+            "--rotate" | "--reset-salt" => {
+                rotate = true;
+            }
+            "--print" | "-p" => {
+                print_only = true;
+            }
+            arg if arg.starts_with('-') => {
+                return Err(format!("Unknown option for `uk save-init`: {}", arg));
+            }
+            arg => {
+                if script_path.is_none() {
+                    script_path = Some(PathBuf::from(arg));
+                } else {
+                    return Err(format!("Unexpected extra argument for `uk save-init`: {}", arg));
+                }
+            }
+        }
+        i += 1;
+    }
+    Ok(CliAction::SaveInit {
+        script_path,
+        save_id,
+        rotate,
+        print_only,
+    })
+}
+
+fn replace_config_key_value(segment: &str, key: &str, new_val: &str) -> Option<String> {
+    let bytes = segment.as_bytes();
+    let key_bytes = key.as_bytes();
+    let mut i = 0;
+    while i + key_bytes.len() < bytes.len() {
+        if &bytes[i..i + key_bytes.len()] == key_bytes {
+            let prev_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_';
+            if prev_ok {
+                let mut j = i + key_bytes.len();
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b':' {
+                    j += 1;
+                    while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                        j += 1;
+                    }
+                    if j < bytes.len() && (bytes[j] == b'"' || bytes[j] == b'\'') {
+                        let quote = bytes[j];
+                        let val_start = j + 1;
+                        let mut val_end = val_start;
+                        while val_end < bytes.len() && bytes[val_end] != quote {
+                            val_end += 1;
+                        }
+                        if val_end < bytes.len() {
+                            let mut out = String::with_capacity(segment.len() + new_val.len());
+                            out.push_str(&segment[..val_start]);
+                            out.push_str(new_val);
+                            out.push_str(&segment[val_end..]);
+                            return Some(out);
+                        }
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn has_config_key(segment: &str, key: &str) -> bool {
+    replace_config_key_value(segment, key, "").is_some()
+}
+
+/// Ruby スクリプト内の `config(...)` に `save_id` と `save_salt` を追加・更新する
+pub fn apply_save_init_to_source(
+    source: &str,
+    default_save_id: &str,
+    explicit_save_id: Option<&str>,
+    new_salt: &str,
+    rotate: bool,
+) -> (String, String, String) {
+    let (code_part, tail_part) = match source.find("__END__") {
+        Some(idx) => (&source[..idx], Some(&source[idx..])),
+        None => (source, None),
+    };
+
+    let sanitized_default_id = crate::save::sanitize_id_part(default_save_id);
+    let target_id = explicit_save_id
+        .map(crate::save::sanitize_id_part)
+        .unwrap_or(sanitized_default_id);
+
+    // 既存の `config(...)` 呼び出しを探す（行頭の `config` に限定）
+    let mut line_offset = 0;
+    let mut found_config_start: Option<usize> = None;
+    for line in code_part.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("config(") || trimmed.starts_with("config ") {
+            let leading = line.len() - trimmed.len();
+            found_config_start = Some(line_offset + leading);
+            break;
+        }
+        line_offset += line.len();
+    }
+
+    let mut final_id = target_id.clone();
+    let mut final_salt = new_salt.to_string();
+
+    let new_code = if let Some(cfg_start) = found_config_start {
+        let after_kw = &code_part[cfg_start + 6..];
+        let trimmed_after = after_kw.trim_start();
+        if trimmed_after.starts_with('(') {
+            let paren_rel = after_kw.find('(').unwrap();
+            let paren_abs = cfg_start + 6 + paren_rel;
+            // 対応する閉じ括弧を探す
+            let mut depth = 0usize;
+            let mut close_abs = None;
+            for (idx, ch) in code_part[paren_abs..].char_indices() {
+                match ch {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close_abs = Some(paren_abs + idx);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(close_idx) = close_abs {
+                let mut inner = code_part[paren_abs + 1..close_idx].to_string();
+                if has_config_key(&inner, "save_id") {
+                    if let Some(exp) = explicit_save_id {
+                        let s = crate::save::sanitize_id_part(exp);
+                        if let Some(rep) = replace_config_key_value(&inner, "save_id", &s) {
+                            inner = rep;
+                            final_id = s;
+                        }
+                    } else {
+                        let parsed = crate::config::parse_config_from_source(source);
+                        if let Some(existing) = parsed.save_id {
+                            final_id = existing;
+                        }
+                    }
+                } else {
+                    let sep = if inner.trim().is_empty() { "" } else { ", " };
+                    inner.push_str(&format!("{}save_id: \"{}\"", sep, final_id));
+                }
+
+                if has_config_key(&inner, "save_salt") {
+                    if rotate {
+                        if let Some(rep) = replace_config_key_value(&inner, "save_salt", new_salt) {
+                            inner = rep;
+                        }
+                    } else {
+                        let parsed = crate::config::parse_config_from_source(source);
+                        if let Some(existing) = parsed.save_salt {
+                            final_salt = existing;
+                        }
+                    }
+                } else {
+                    let sep = if inner.trim().is_empty() { "" } else { ", " };
+                    inner.push_str(&format!("{}save_salt: \"{}\"", sep, final_salt));
+                }
+
+                format!(
+                    "{}{}{}",
+                    &code_part[..paren_abs + 1],
+                    inner,
+                    &code_part[close_idx..]
+                )
+            } else {
+                code_part.to_string()
+            }
+        } else {
+            // 括弧なし `config ...` 行
+            let line_end = code_part[cfg_start..]
+                .find('\n')
+                .map(|o| cfg_start + o)
+                .unwrap_or(code_part.len());
+            let mut line_str = code_part[cfg_start..line_end].trim_end_matches('\r').to_string();
+            let cr = if code_part[cfg_start..line_end].ends_with('\r') { "\r" } else { "" };
+            if !has_config_key(&line_str, "save_id") {
+                line_str.push_str(&format!(", save_id: \"{}\"", final_id));
+            } else if let Some(exp) = explicit_save_id {
+                let s = crate::save::sanitize_id_part(exp);
+                if let Some(rep) = replace_config_key_value(&line_str, "save_id", &s) {
+                    line_str = rep;
+                    final_id = s;
+                }
+            }
+            if !has_config_key(&line_str, "save_salt") {
+                line_str.push_str(&format!(", save_salt: \"{}\"", final_salt));
+            } else if rotate {
+                if let Some(rep) = replace_config_key_value(&line_str, "save_salt", new_salt) {
+                    line_str = rep;
+                }
+            } else {
+                let parsed = crate::config::parse_config_from_source(source);
+                if let Some(existing) = parsed.save_salt {
+                    final_salt = existing;
+                }
+            }
+            format!(
+                "{}{}{}{}",
+                &code_part[..cfg_start],
+                line_str,
+                cr,
+                &code_part[line_end..]
+            )
+        }
+    } else {
+        // 先頭コメント直後に挿入
+        let mut insert_pos = 0;
+        for line in code_part.split_inclusive('\n') {
+            let t = line.trim();
+            if t.is_empty() || t.starts_with('#') {
+                insert_pos += line.len();
+            } else {
+                break;
+            }
+        }
+        let snippet = format!("config(save_id: \"{}\", save_salt: \"{}\")\n", final_id, final_salt);
+        format!(
+            "{}{}{}",
+            &code_part[..insert_pos],
+            snippet,
+            &code_part[insert_pos..]
+        )
+    };
+
+    let full = match tail_part {
+        Some(t) => format!("{}{}", new_code, t),
+        None => new_code,
+    };
+    (full, final_id, final_salt)
+}
+
+/// `uk save-init [script.rb]` の実装
+pub fn cmd_save_init(
+    script_path: Option<&Path>,
+    save_id: Option<&str>,
+    rotate: bool,
+    print_only: bool,
+) -> Result<(), String> {
+    let salt = crate::save::generate_random_salt();
+    if print_only {
+        let id = save_id
+            .map(crate::save::sanitize_id_part)
+            .unwrap_or_else(|| "my_game".to_string());
+        println!("config(save_id: \"{}\", save_salt: \"{}\")", id, salt);
+        return Ok(());
+    }
+
+    let path = script_path.unwrap_or_else(|| Path::new("game.rb"));
+    if !path.exists() {
+        return Err(format!(
+            "Script file `{}` not found. Pass a script path or use `--print` to generate a snippet.",
+            path.display()
+        ));
+    }
+    let source = fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read `{}`: {}", path.display(), e))?;
+
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("my_game");
+    let default_id = if stem == "game" {
+        std::fs::canonicalize(path)
+            .ok()
+            .and_then(|p| p.parent().and_then(|d| d.file_name()).map(|s| s.to_string_lossy().to_string()))
+            .unwrap_or_else(|| "my_game".to_string())
+    } else {
+        stem.to_string()
+    };
+
+    let (updated, final_id, final_salt) =
+        apply_save_init_to_source(&source, &default_id, save_id, &salt, rotate);
+
+    fs::write(path, updated)
+        .map_err(|e| format!("Failed to write `{}`: {}", path.display(), e))?;
+    println!(
+        "Updated `{}`: save_id=\"{}\", save_salt=\"{}\"",
+        path.display(),
+        final_id,
+        final_salt
+    );
+    Ok(())
 }

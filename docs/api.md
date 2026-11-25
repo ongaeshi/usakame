@@ -273,6 +273,45 @@ end
 
 ---
 
+### 2.8 永続セーブデータ API（`save_set` / `save_get`）
+
+ハイスコア、クリア状況、設定値、ゴースト座標列などをデスクトップ（OS標準データディレクトリ内の JSON ファイル）および Web（ブラウザの `localStorage`）へ永続保存するための API です。
+
+#### 事前設定（必須）
+セーブ API を利用するには、`config(...)` で **`save_id`** と **`save_salt`** の両方を指定する必要があります。未設定のまま `save_set` / `save_get` 等を呼び出すと実行時エラーになります。
+
+* `save_id`: ゲームを識別する文字列（例：`"my_game"`）
+* `save_salt`: 他ゲームとの衝突防止・セーブ互換バージョン管理用のソルト文字列（例：`"a3f8c21d"`）
+
+補助コマンド `uk save-init [script.rb]` を使うと、`config(...)` への `save_id` / ランダム `save_salt` の追記や、`--rotate` によるソルト更新を自動で行えます。
+
+```ruby
+config(
+  title: "My Game",
+  save_id: "my_game",
+  save_salt: "a3f8c21d"
+)
+```
+
+#### API 一覧
+* **`save_set(key, val)`**: `key`（`String` または `Symbol`）に `val` を保存します。
+  * 対応型：`Integer`, `Float`, `String`, `Symbol`, `true` / `false`, `nil`, `Array`, `Hash`（ネスト可）。
+  * 値が変化した場合のみフレーム末に自動で永続化されます。
+* **`save_get(key, default = nil)`**: `key` の値を取得します。未登録時は `default`（省略時は `nil`）を返します（`Hash` のキーは `String` として復元されます）。
+* **`save_del(key)`**: 指定キーを削除し、削除された場合は `true` を返します。
+* **`save_has?(key)`**: 指定キーが存在すれば `true` を返します。
+* **`save_keys()`**: 保存されているキー一覧（`Array<String>`）を返します。
+* **`save_clear()`**: この `save_id` + `save_salt` のセーブデータをすべて消去します。
+
+> **保存先の目安**
+> * **Windows**: `%APPDATA%\usakame\saves\<save_id>_<save_salt>.json`
+> * **macOS**: `~/Library/Application Support/usakame/saves/<save_id>_<save_salt>.json`
+> * **Linux**: `~/.local/share/usakame/saves/<save_id>_<save_salt>.json`
+> * **WASM（ブラウザ）**: `localStorage` のキー `usakame_save:<save_id>:<save_salt>`
+> * **ヘッドレス検証（`uk check`）**: インメモリのみで動作し、実環境のセーブデータは書き換えません。
+
+---
+
 ## 3. グラフィックス仕様
 
 ### 3.1 仮想スクリーンとレンダリングパイプライン

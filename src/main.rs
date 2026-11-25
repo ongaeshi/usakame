@@ -6,6 +6,7 @@ pub mod cli;
 pub mod llm;
 pub mod emoji;
 pub mod sound;
+pub mod save;
 pub mod config;
 pub mod font;
 
@@ -4146,6 +4147,214 @@ fn arg_sfx(args: &[Rc<RObject>], index: usize) -> Option<SfxArg> {
     }
 }
 
+fn robject_to_key_string(obj: &RObject) -> Result<String, mrubyedge::Error> {
+    match &obj.value {
+        RValue::String(s, _) => Ok(String::from_utf8_lossy(&s.borrow()).to_string()),
+        RValue::Symbol(sym) => Ok(sym.name.clone()),
+        RValue::Integer(n) => Ok(n.to_string()),
+        _ => Err(mrubyedge::Error::ArgumentError(
+            "save key must be a String or Symbol".to_string(),
+        )),
+    }
+}
+
+fn robject_to_save_value(obj: &RObject, depth: usize) -> Result<save::SaveValue, mrubyedge::Error> {
+    if depth > 64 {
+        return Err(mrubyedge::Error::ArgumentError(
+            "save data nesting too deep (max 64)".to_string(),
+        ));
+    }
+    match &obj.value {
+        RValue::Nil => Ok(save::SaveValue::Null),
+        RValue::Bool(b) => Ok(save::SaveValue::Bool(*b)),
+        RValue::Integer(n) => Ok(save::SaveValue::Int(*n)),
+        RValue::Float(f) => {
+            if f.is_finite() {
+                Ok(save::SaveValue::Float(*f))
+            } else {
+                Err(mrubyedge::Error::ArgumentError(
+                    "cannot save NaN or Infinity float".to_string(),
+                ))
+            }
+        }
+        RValue::String(s, _) => Ok(save::SaveValue::String(
+            String::from_utf8_lossy(&s.borrow()).to_string(),
+        )),
+        RValue::Symbol(sym) => Ok(save::SaveValue::String(sym.name.clone())),
+        RValue::Array(arr_cell) => {
+            let arr = arr_cell.borrow();
+            let mut out = Vec::with_capacity(arr.len());
+            for item in arr.iter() {
+                out.push(robject_to_save_value(item.as_ref(), depth + 1)?);
+            }
+            Ok(save::SaveValue::Array(out))
+        }
+        RValue::Hash(hash_cell) => {
+            let hash = hash_cell.borrow();
+            let mut map = std::collections::BTreeMap::new();
+            for (_hkey, (k, v)) in hash.iter() {
+                let key_str = match &k.value {
+                    RValue::String(s, _) => String::from_utf8_lossy(&s.borrow()).to_string(),
+                    RValue::Symbol(sym) => sym.name.clone(),
+                    RValue::Integer(n) => n.to_string(),
+                    RValue::Float(f) => f.to_string(),
+                    RValue::Bool(b) => b.to_string(),
+                    _ => {
+                        return Err(mrubyedge::Error::ArgumentError(
+                            "hash key in save data must be String, Symbol, or primitive".to_string(),
+                        ))
+                    }
+                };
+                map.insert(key_str, robject_to_save_value(v.as_ref(), depth + 1)?);
+            }
+            Ok(save::SaveValue::Object(map))
+        }
+        _ => Err(mrubyedge::Error::ArgumentError(
+            "unsupported type for save_set (supported: nil, Bool, Integer, Float, String, Symbol, Array, Hash)"
+                .to_string(),
+        )),
+    }
+}
+
+fn save_value_to_robject(val: &save::SaveValue) -> Rc<RObject> {
+    match val {
+        save::SaveValue::Null => Rc::new(RObject::nil()),
+        save::SaveValue::Bool(b) => Rc::new(RObject::boolean(*b)),
+        save::SaveValue::Int(n) => Rc::new(RObject::integer(*n)),
+        save::SaveValue::Float(f) => Rc::new(RObject::float(*f)),
+        save::SaveValue::String(s) => Rc::new(RObject::string(s.clone())),
+        save::SaveValue::Array(arr) => {
+            let items = arr.iter().map(save_value_to_robject).collect();
+            Rc::new(RObject::array(items))
+        }
+        save::SaveValue::Object(map) => {
+            let mut hash = mrubyedge::yamrb::value::RHash::default();
+            for (k, v) in map {
+                let key_obj = Rc::new(RObject::string(k.clone()));
+                let val_obj = save_value_to_robject(v);
+                if let Ok(hkey) = key_obj.as_hash_key() {
+                    hash.insert(hkey, (key_obj, val_obj));
+                }
+            }
+            Rc::new(RObject::hash(hash))
+        }
+    }
+}
+
+/// 永続セーブデータ API (`save_set`, `save_get`, `save_del`, `save_has?`, `save_keys`, `save_clear`) を登録する
+fn register_save_api(vm: &mut VM, save_store: Rc<RefCell<save::SaveStore>>) {
+    let obj_class = vm.object_class.clone();
+
+    let store_set = save_store.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "save_set",
+        Box::new(move |_vm, args| {
+            let key_obj = args.first().ok_or_else(|| {
+                mrubyedge::Error::ArgumentError("save_set requires (key, val)".to_string())
+            })?;
+            let val_obj = args.get(1).ok_or_else(|| {
+                mrubyedge::Error::ArgumentError("save_set requires (key, val)".to_string())
+            })?;
+            let key = robject_to_key_string(key_obj.as_ref())?;
+            let val = robject_to_save_value(val_obj.as_ref(), 0)?;
+            store_set
+                .borrow_mut()
+                .set(&key, val)
+                .map_err(mrubyedge::Error::RuntimeError)?;
+            Ok(val_obj.clone())
+        }),
+    );
+
+    let store_get = save_store.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "save_get",
+        Box::new(move |_vm, args| {
+            let key_obj = args.first().ok_or_else(|| {
+                mrubyedge::Error::ArgumentError("save_get requires (key, default = nil)".to_string())
+            })?;
+            let key = robject_to_key_string(key_obj.as_ref())?;
+            let default_obj = args.get(1).cloned().unwrap_or_else(|| Rc::new(RObject::nil()));
+            match store_get
+                .borrow_mut()
+                .get(&key)
+                .map_err(mrubyedge::Error::RuntimeError)?
+            {
+                Some(v) => Ok(save_value_to_robject(&v)),
+                None => Ok(default_obj),
+            }
+        }),
+    );
+
+    let store_del = save_store.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "save_del",
+        Box::new(move |_vm, args| {
+            let key_obj = args.first().ok_or_else(|| {
+                mrubyedge::Error::ArgumentError("save_del requires (key)".to_string())
+            })?;
+            let key = robject_to_key_string(key_obj.as_ref())?;
+            let removed = store_del
+                .borrow_mut()
+                .delete(&key)
+                .map_err(mrubyedge::Error::RuntimeError)?;
+            Ok(Rc::new(RObject::boolean(removed)))
+        }),
+    );
+
+    let store_has = save_store.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "save_has?",
+        Box::new(move |_vm, args| {
+            let key_obj = args.first().ok_or_else(|| {
+                mrubyedge::Error::ArgumentError("save_has? requires (key)".to_string())
+            })?;
+            let key = robject_to_key_string(key_obj.as_ref())?;
+            let exists = store_has
+                .borrow_mut()
+                .has_key(&key)
+                .map_err(mrubyedge::Error::RuntimeError)?;
+            Ok(Rc::new(RObject::boolean(exists)))
+        }),
+    );
+
+    let store_keys = save_store.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "save_keys",
+        Box::new(move |_vm, _args| {
+            let keys = store_keys
+                .borrow_mut()
+                .keys()
+                .map_err(mrubyedge::Error::RuntimeError)?;
+            let arr = keys.into_iter().map(|k| Rc::new(RObject::string(k))).collect();
+            Ok(Rc::new(RObject::array(arr)))
+        }),
+    );
+
+    let store_clear = save_store;
+    mrb_define_cmethod(
+        vm,
+        obj_class,
+        "save_clear",
+        Box::new(move |_vm, _args| {
+            store_clear
+                .borrow_mut()
+                .clear()
+                .map_err(mrubyedge::Error::RuntimeError)?;
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
+}
+
 /// サウンド API (`sfx`, `stop_sfx`, `music`, `stop_music`) を登録する
 fn register_sound_api(vm: &mut VM, sound_bank: Rc<RefCell<sound::SoundBank>>) {
     let obj_class = vm.object_class.clone();
@@ -5326,6 +5535,7 @@ fn register_engine_api(
     map_aliases: Rc<RefCell<HashMap<char, i32>>>,
     next_scene: Rc<RefCell<Option<NextSceneRequest>>>,
     is_hot_reloading: Rc<RefCell<bool>>,
+    save_store: Rc<RefCell<save::SaveStore>>,
     headless: bool,
 ) {
     register_numeric_extensions(vm);
@@ -5462,6 +5672,7 @@ fn register_engine_api(
     let state_for_config = draw_state.clone();
     let active_pal_bank_for_config = active_pal_bank.clone();
     let palettes_for_config = palettes.clone();
+    let save_store_for_config = save_store.clone();
     mrb_define_cmethod(
         vm,
         obj_class.clone(),
@@ -5528,9 +5739,30 @@ fn register_engine_api(
                                     }
                                 }
                             }
+                            "save_id" => {
+                                let s_opt = match &v.value {
+                                    RValue::Symbol(sym) => Some(sym.name.clone()),
+                                    RValue::String(_, _) => String::try_from(v.as_ref()).ok(),
+                                    RValue::Nil => None,
+                                    _ => None,
+                                };
+                                cfg.save_id = s_opt.filter(|s| !s.trim().is_empty());
+                            }
+                            "save_salt" => {
+                                let s_opt = match &v.value {
+                                    RValue::Symbol(sym) => Some(sym.name.clone()),
+                                    RValue::String(_, _) => String::try_from(v.as_ref()).ok(),
+                                    RValue::Nil => None,
+                                    _ => None,
+                                };
+                                cfg.save_salt = s_opt.filter(|s| !s.trim().is_empty());
+                            }
                             _ => {}
                         }
                     }
+                    save_store_for_config
+                        .borrow_mut()
+                        .configure(cfg.save_id.clone(), cfg.save_salt.clone());
                     state_for_config.borrow_mut().screen_w = cfg.screen_width as i32;
                     state_for_config.borrow_mut().screen_h = cfg.screen_height as i32;
                 }
@@ -10251,6 +10483,7 @@ pub struct GameRuntime {
     pub bitmap_font: Rc<BitmapFont>,
     pub draw_state: Rc<RefCell<DrawState>>,
     pub sound_bank: Rc<RefCell<sound::SoundBank>>,
+    pub save_store: Rc<RefCell<save::SaveStore>>,
     pub config: Rc<RefCell<AppConfig>>,
     pub restart_requested: Rc<RefCell<bool>>,
     pub input_state: Rc<RefCell<InputState>>,
@@ -10261,6 +10494,12 @@ pub struct GameRuntime {
     initial_tail_map: Tilemap,
     headless: bool,
     base_dir: Option<std::path::PathBuf>,
+}
+
+impl Drop for GameRuntime {
+    fn drop(&mut self) {
+        self.save_store.borrow_mut().flush_if_dirty();
+    }
 }
 
 impl GameRuntime {
@@ -10334,6 +10573,7 @@ impl GameRuntime {
             HashMap::new(),
             HashMap::new(),
         )));
+        let save_store = Rc::new(RefCell::new(save::SaveStore::new(headless)));
         let config = Rc::new(RefCell::new(AppConfig::default()));
         let restart_requested = Rc::new(RefCell::new(false));
         let input_state = Rc::new(RefCell::new(InputState::new()));
@@ -10363,9 +10603,11 @@ impl GameRuntime {
             map_aliases.clone(),
             next_scene.clone(),
             is_hot_reloading.clone(),
+            save_store.clone(),
             headless,
         );
         register_sound_api(&mut vm, sound_bank.clone());
+        register_save_api(&mut vm, save_store.clone());
 
         if let Err(_) = vm.run() {
             return Err(ScriptError::from_vm(&mut vm, "top-level"));
@@ -10413,6 +10655,7 @@ impl GameRuntime {
             bitmap_font,
             draw_state,
             sound_bank,
+            save_store,
             config,
             restart_requested,
             input_state,
@@ -10526,9 +10769,11 @@ impl GameRuntime {
             self.map_aliases.clone(),
             self.next_scene.clone(),
             self.is_hot_reloading.clone(),
+            self.save_store.clone(),
             self.headless,
         );
         register_sound_api(&mut new_vm, self.sound_bank.clone());
+        register_save_api(&mut new_vm, self.save_store.clone());
 
         let run_res = new_vm.run();
         *self.is_hot_reloading.borrow_mut() = false;
@@ -10602,8 +10847,10 @@ impl GameRuntime {
             self.map_aliases.clone(),
             self.next_scene.clone(),
             self.is_hot_reloading.clone(),
+            self.save_store.clone(),
             self.headless,
         );
+        register_save_api(&mut new_vm, self.save_store.clone());
 
         let new_initial_globals = snapshot_globals(&new_vm);
 
@@ -10673,7 +10920,7 @@ impl GameRuntime {
 
     pub fn call_update_result(&mut self) -> Result<(), ScriptError> {
         self.apply_pending_scene_transition();
-        if let Some(ref scene) = self.current_scene {
+        let res = if let Some(ref scene) = self.current_scene {
             if object_has_method(scene, "update") {
                 mrb_funcall(&mut self.vm, Some(scene.clone()), "update", &[])
                     .map(|_| ())
@@ -10685,7 +10932,9 @@ impl GameRuntime {
             mrb_funcall(&mut self.vm, None, "update", &[])
                 .map(|_| ())
                 .map_err(|_| ScriptError::from_vm(&mut self.vm, "update"))
-        }
+        };
+        self.save_store.borrow_mut().flush_if_dirty();
+        res
     }
 
     pub fn call_update(&mut self) {
@@ -12573,6 +12822,22 @@ fn main() {
         }
         cli::CliAction::UpdateDocs { dir } => {
             if let Err(err) = cli::cmd_update_docs(&dir) {
+                eprintln!("Error: {}", err);
+                std::process::exit(1);
+            }
+        }
+        cli::CliAction::SaveInit {
+            script_path,
+            save_id,
+            rotate,
+            print_only,
+        } => {
+            if let Err(err) = cli::cmd_save_init(
+                script_path.as_deref(),
+                save_id.as_deref(),
+                rotate,
+                print_only,
+            ) {
                 eprintln!("Error: {}", err);
                 std::process::exit(1);
             }

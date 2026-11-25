@@ -6041,3 +6041,164 @@ def draw; end
 
 
 
+
+#[test]
+fn test_save_json_roundtrip() {
+    use crate::save::SaveValue;
+    use std::collections::BTreeMap;
+
+    let mut nested = BTreeMap::new();
+    nested.insert("stars".to_string(), SaveValue::Int(3));
+    nested.insert("cleared".to_string(), SaveValue::Bool(true));
+    nested.insert("ratio".to_string(), SaveValue::Float(1.5));
+    nested.insert("note".to_string(), SaveValue::String("日本語\"OK\"\n次の行".to_string()));
+    nested.insert("empty".to_string(), SaveValue::Null);
+    nested.insert(
+        "ghost".to_string(),
+        SaveValue::Array(vec![
+            SaveValue::Array(vec![SaveValue::Int(10), SaveValue::Int(20)]),
+            SaveValue::Array(vec![SaveValue::Int(15), SaveValue::Int(22)]),
+        ]),
+    );
+    let root = SaveValue::Object(nested);
+    let json = root.to_json_string();
+    let parsed = SaveValue::from_json_str(&json).expect("JSON parse should succeed");
+    assert_eq!(root, parsed);
+}
+
+#[test]
+fn test_save_api_requires_config() {
+    let script = r#"
+config(title: "No Save Config")
+def update
+  save_set(:score, 100)
+end
+def draw; end
+"#;
+    let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
+    let mut rt = GameRuntime::new(&tail, &mrb, true).unwrap();
+    let err = rt.call_update_result().expect_err("Should error without save_id/save_salt");
+    assert!(
+        err.full_message.contains("save_id") && err.full_message.contains("save_salt"),
+        "Error message should mention save_id and save_salt: {}",
+        err.full_message
+    );
+}
+
+#[test]
+fn test_save_api_persistence_roundtrip() {
+    let temp_dir = std::env::temp_dir().join(format!("usakame_test_save_api_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let script_write = r#"
+config(title: "Save Test", save_id: "test_game", save_salt: "deadbeef")
+def update
+  if !$done
+    save_set(:high_score, 12345)
+    save_set("player_name", "Usakame")
+    save_set(:unlocked, true)
+    save_set(:best_time, 42.5)
+    save_set(:stars, [3, 2, 1])
+    save_set(:meta, { "stage" => 4, "rank" => "S" })
+    $done = true
+  end
+end
+def draw; end
+"#;
+    let (tail_w, mrb_w) = cli::compile_ruby_script_str(script_write).unwrap();
+    {
+        let mut rt = GameRuntime::new(&tail_w, &mrb_w, true).unwrap();
+        rt.save_store.borrow_mut().custom_dir = Some(temp_dir.clone());
+        rt.call_update_result().unwrap();
+    }
+
+    let expected_file = temp_dir.join("test_game_deadbeef.json");
+    assert!(expected_file.exists(), "Save JSON file should be created on disk");
+
+    let script_read = r#"
+config(title: "Save Test", save_id: "test_game", save_salt: "deadbeef")
+$loaded = false
+def update
+  if !$loaded
+    $hs = save_get(:high_score, 0)
+    $pn = save_get("player_name")
+    $ul = save_get(:unlocked, false)
+    $bt = save_get(:best_time, 0.0)
+    $st = save_get(:stars, [])
+    $mt = save_get(:meta, {})
+    $missing = save_get(:not_exist, 99)
+    $has_hs = save_has?(:high_score)
+    $keys_before = save_keys()
+    $del_ok = save_del("player_name")
+    $has_pn_after = save_has?("player_name")
+    $loaded = true
+  end
+end
+def draw; end
+"#;
+    let (tail_r, mrb_r) = cli::compile_ruby_script_str(script_read).unwrap();
+    {
+        let mut rt2 = GameRuntime::new(&tail_r, &mrb_r, true).unwrap();
+        rt2.save_store.borrow_mut().custom_dir = Some(temp_dir.clone());
+        rt2.call_update_result().unwrap();
+
+        assert_eq!(robject_to_i32(rt2.vm.globals.get("$hs").unwrap()), Some(12345));
+        assert_eq!(
+            String::try_from(rt2.vm.globals.get("$pn").unwrap().as_ref()).ok().as_deref(),
+            Some("Usakame")
+        );
+        assert_eq!(robject_to_bool(rt2.vm.globals.get("$ul").unwrap()), Some(true));
+        assert!((robject_to_f32(rt2.vm.globals.get("$bt").unwrap()).unwrap() - 42.5).abs() < 0.01);
+        assert_eq!(robject_to_i32(rt2.vm.globals.get("$missing").unwrap()), Some(99));
+        assert_eq!(robject_to_bool(rt2.vm.globals.get("$has_hs").unwrap()), Some(true));
+        assert_eq!(robject_to_bool(rt2.vm.globals.get("$del_ok").unwrap()), Some(true));
+        assert_eq!(robject_to_bool(rt2.vm.globals.get("$has_pn_after").unwrap()), Some(false));
+    }
+
+    // 削除が永続化されていることと save_clear の確認
+    let script_clear = r#"
+config(title: "Save Test", save_id: "test_game", save_salt: "deadbeef")
+def update
+  $has_pn = save_has?("player_name")
+  save_clear()
+end
+def draw; end
+"#;
+    let (tail_c, mrb_c) = cli::compile_ruby_script_str(script_clear).unwrap();
+    {
+        let mut rt3 = GameRuntime::new(&tail_c, &mrb_c, true).unwrap();
+        rt3.save_store.borrow_mut().custom_dir = Some(temp_dir.clone());
+        rt3.call_update_result().unwrap();
+        assert_eq!(robject_to_bool(rt3.vm.globals.get("$has_pn").unwrap()), Some(false));
+    }
+    assert!(!expected_file.exists(), "Save JSON file should be removed after save_clear");
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_cli_save_init() {
+    let src_with_paren = "config(title: \"Demo\", width: 320)\ndef update; end\n";
+    let (out1, id1, salt1) = cli::apply_save_init_to_source(src_with_paren, "demo", None, "11223344", false);
+    assert_eq!(id1, "demo");
+    assert_eq!(salt1, "11223344");
+    assert!(out1.contains("save_id: \"demo\""));
+    assert!(out1.contains("save_salt: \"11223344\""));
+
+    // 冪等性チェック（rotate=false なら既存の save_salt を維持）
+    let (out2, id2, salt2) = cli::apply_save_init_to_source(&out1, "demo", None, "99887766", false);
+    assert_eq!(id2, "demo");
+    assert_eq!(salt2, "11223344");
+    assert_eq!(out1, out2);
+
+    // rotate=true なら新しい save_salt に更新
+    let (out3, _, salt3) = cli::apply_save_init_to_source(&out1, "demo", Some("custom_id"), "99887766", true);
+    assert_eq!(salt3, "99887766");
+    assert!(out3.contains("save_id: \"custom_id\""));
+    assert!(out3.contains("save_salt: \"99887766\""));
+
+    // config 無しスクリプトへの挿入
+    let src_no_cfg = "# header comment\ndef update; end\n";
+    let (out4, _, _) = cli::apply_save_init_to_source(src_no_cfg, "my_app", None, "abcdef01", false);
+    assert!(out4.starts_with("# header comment\nconfig(save_id: \"my_app\", save_salt: \"abcdef01\")\n"));
+}
