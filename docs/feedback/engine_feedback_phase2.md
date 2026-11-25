@@ -67,9 +67,10 @@ Phase 2 でビジュアル表現（光・影・多角形・高解像度）が大
 - **理由**: 現在は無音環境のためヒットストップ・シェイク・フラッシュで手触りを補っているが、居合斬り（`35`）・魚雷命中（`36`）・砲弾着弾（`37`）・花火の打ち上げと炸裂（`40`）・カード発動（`38`）に効果音とBGMが加わるだけで、ゲームの快感と没入感が段違いに跳ね上がる。
 - **要望**: `docs/api.md` 第4章にある通り、外部ファイル不要で `__END__` 内に `@SFX` / `@MUSIC` を記述できる波形合成シンセ、または `tone(freq, dur, wave, vol)` の実装。
 
-### ② 永続セーブデータ API（`dset` / `dget`、WASM `localStorage` 対応）【最優先】
+### ② 永続セーブデータ API（`dset` / `dget`、WASM `localStorage` 対応）【最優先】 【対応済み (`9f8e9fc`)】
 - **理由**: 現状は `$dx_best_times` や `$abyss2_best` などのハイスコア・ベストゴースト・パズルのクリア状況が、ウィンドウを閉じる／ブラウザをリロードするとすべて消えてしまう。
 - **要望**: PICO-8 の `dset(slot, val)` / `dget(slot)` やキーバリュー形式（`save_set(key, val)` / `save_get(key)`）で、デスクトップ版はローカルファイル、Web版は `localStorage` に永続保存できる仕組み。これにより「全12面スターコンプ」「ゴースト記録保持」「ローグライトのアンロック要素」など**長期的なやり込み動機**が作れる。
+- **対応内容**: キーバリュー形式に一本化した永続セーブ API（`save_set`, `save_get`, `save_del`, `save_has?`, `save_keys`, `save_clear`）と `src/save.rs`（依存ゼロ JSON シリアライズ対応で `Array` / `Hash` もそのまま保存可能）を実装した。別ゲームとのデータ衝突・世代管理のため `config(save_id: "...", save_salt: "...")` の両指定を必須とし、補助コマンド `uk save-init` を追加した。デスクトップ版は OS 標準データディレクトリ配下の JSON ファイル、WASM 版は `web/mq_js_bundle.js` の `usakame_storage` プラグイン経由で `localStorage` に保存する（`uk check` 等のヘッドレス時はインメモリ動作）。また、`docs/api.md` の更新とサンプル `examples/save_data.rb` を追加した。
 
 ### ③ オフスクリーン描画サーフェス / ライトマップ（`surface` / `set_target`）
 - **理由**:
