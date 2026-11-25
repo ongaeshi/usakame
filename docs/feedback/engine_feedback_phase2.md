@@ -33,10 +33,11 @@ Phase 1（`docs/engine_feedback.md`）で対応された新API（`alpha` 半透�
 - **改善要望**: `docs/api.md` 上の引数表と同じ感覚で `width:` / `alpha:` キーワード引数も全図形APIで受け取れるようにするか、位置引数推奨を明記すると親切。
 - **対応内容**: 毎フレーム呼ばれる描画APIでのキーワード引数（Hash確保・GC Alloc）による実行時オーバーヘッドを避けるため、仕様として位置引数のみ対応とし、`docs/api.md` の「2.2 描画API」冒頭にキーワード引数非対応・位置引数指定のルールと具体例を明記した。
 
-### ② `Array#each` ブロック引数の配列展開（Destructuring）
+### ② `Array#each` ブロック引数の配列展開（Destructuring） 【対応済み】
 - **遭遇ゲーム**: `31_prism_laser.rb`（タイトル画面）
 - **現象**: `[[y0, col0], [y1, col1]].each do |ty, c|` と書くと、mrubyedge では `ty` に配列 `[y0, col0]` がそのまま入り、`c` が `nil` になった。
 - **回避策**: `each do |pair| ty = pair[0]; c = pair[1]` のようにインデックスアクセスする。
+- **対応内容**: mrubyedge VM 側のブロック引数バインディング仕様のため、仕様として明文化する方針とし、`docs/mrubyedge_api.md`・`AGENTS.md`・`src/cli.rs`（`uk new` テンプレート）にブロック引数の配列展開非対応と代替パターンを追記した。
 
 ### ③ 高解像度時の `print_text` デフォルトサイズ 【対応済み (`720361a`)】
 - **遭遇ゲーム**: `32_star_trench.rb`

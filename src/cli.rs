@@ -1840,6 +1840,7 @@ Usakame のスクリプト実行環境は軽量 Ruby VM **mrubyedge** です。�
 * ❌ `n.even?` / `odd?` → ⭕ **`n % 2 == 0`** / **`n % 2 != 0`**
 * ❌ `sleep(sec)` / `Time.now` → ⭕ ゲームループ（毎フレーム呼ばれる `update`）内のフレームカウンタ変数で制御
 * ❌ `require` / `load` / `eval` → ⭕ 単一スクリプト構成で記述する
+* ❌ `[[a, b]].each do |x, y|`（ブロック引数の配列展開非対応）→ ⭕ `each do |pair| x = pair[0]; y = pair[1]` で添字アクセスする
 
 ### タイルマップ API（`mget` / `mset` / `mdel`）のルール
 * **空マスの取得**: `mget(x, y)` は空マス・未設定セルに対して **`nil`** を返します（`-1` ではありません）。
