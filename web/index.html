@@ -42,6 +42,92 @@
     <div id="status">Usakame Retro Engine (256x256) - Click canvas to focus</div>
     <script src="mq_js_bundle.js"></script>
     <script>
+        (function () {
+            const te = typeof TextEncoder !== "undefined" ? new TextEncoder() : null;
+            let cacheKey = null;
+            let cacheBytes = null;
+            function encodeUtf8(s) {
+                if (te) return te.encode(s);
+                const arr = [];
+                for (let i = 0; i < s.length; i++) {
+                    let c = s.charCodeAt(i);
+                    if (c < 128) arr.push(c);
+                    else if (c < 2048) arr.push(192 | (c >> 6), 128 | (c & 63));
+                    else if (c < 55296 || c >= 57344) arr.push(224 | (c >> 12), 128 | ((c >> 6) & 63), 128 | (c & 63));
+                    else {
+                        i++;
+                        c = 65536 + (((c & 1023) << 10) | (s.charCodeAt(i) & 1023));
+                        arr.push(240 | (c >> 18), 128 | ((c >> 12) & 63), 128 | ((c >> 6) & 63), 128 | (c & 63));
+                    }
+                }
+                return new Uint8Array(arr);
+            }
+            if (typeof miniquad_add_plugin === "function") {
+                miniquad_add_plugin({
+                    register_plugin: function (importObj) {
+                        importObj.env.uk_storage_get_len = function (kp, kl) {
+                            try {
+                                const k = UTF8ToString(kp, kl);
+                                const v = window.localStorage.getItem(k);
+                                if (v === null) return -1;
+                                cacheKey = k;
+                                cacheBytes = encodeUtf8(v);
+                                return cacheBytes.length;
+                            } catch (_) {
+                                return -1;
+                            }
+                        };
+                        importObj.env.uk_storage_get_copy = function (kp, kl, op, ol) {
+                            try {
+                                const k = UTF8ToString(kp, kl);
+                                if (cacheKey !== k || !cacheBytes) {
+                                    const v = window.localStorage.getItem(k);
+                                    if (v === null) return -1;
+                                    cacheKey = k;
+                                    cacheBytes = encodeUtf8(v);
+                                }
+                                const n = Math.min(cacheBytes.length, ol);
+                                new Uint8Array(wasm_memory.buffer, op, n).set(cacheBytes.subarray(0, n));
+                                return n;
+                            } catch (_) {
+                                return -1;
+                            }
+                        };
+                        importObj.env.uk_storage_set = function (kp, kl, vp, vl) {
+                            try {
+                                const k = UTF8ToString(kp, kl);
+                                const v = UTF8ToString(vp, vl);
+                                window.localStorage.setItem(k, v);
+                                if (cacheKey === k) {
+                                    cacheKey = null;
+                                    cacheBytes = null;
+                                }
+                                return 0;
+                            } catch (_) {
+                                return -1;
+                            }
+                        };
+                        importObj.env.uk_storage_remove = function (kp, kl) {
+                            try {
+                                const k = UTF8ToString(kp, kl);
+                                window.localStorage.removeItem(k);
+                                if (cacheKey === k) {
+                                    cacheKey = null;
+                                    cacheBytes = null;
+                                }
+                                return 0;
+                            } catch (_) {
+                                return -1;
+                            }
+                        };
+                    },
+                    version: 1,
+                    name: "usakame_storage"
+                });
+            }
+        })();
+    </script>
+    <script>
         const canvasEl = document.getElementById("glcanvas");
         const statusEl = document.getElementById("status");
         canvasEl.focus();
