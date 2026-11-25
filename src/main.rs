@@ -4993,6 +4993,39 @@ fn register_rand_extension(vm: &mut VM) {
     }
 }
 
+fn mrb_array_index(vm: &mut VM, args: &[Rc<RObject>]) -> Result<Rc<RObject>, mrubyedge::Error> {
+    let self_obj = vm.getself()?;
+    let items: Vec<Rc<RObject>> = match &self_obj.value {
+        RValue::Array(ary_cell) => ary_cell.borrow().clone(),
+        _ => return Err(mrubyedge::Error::TypeMismatch),
+    };
+
+    if let Some(target) = args.first() {
+        for (idx, elem) in items.iter().enumerate() {
+            let eq = mrb_funcall(vm, Some(elem.clone()), "==", &[target.clone()])?;
+            if !matches!(eq.value, RValue::Nil | RValue::Bool(false)) {
+                return Ok(Rc::new(RObject::integer(idx as i64)));
+            }
+        }
+        return Ok(Rc::new(RObject::nil()));
+    }
+
+    Ok(Rc::new(RObject::nil()))
+}
+
+fn register_array_extensions(vm: &mut VM) {
+    if let Some(array_class) = vm.builtin_class_table.get("Array").cloned() {
+        for name in ["index", "find_index"] {
+            mrb_define_cmethod(
+                vm,
+                array_class.clone(),
+                name,
+                Box::new(mrb_array_index),
+            );
+        }
+    }
+}
+
 fn extract_var_name_arg(args: &[Rc<RObject>]) -> Result<String, mrubyedge::Error> {
     let arg = args.first().ok_or_else(|| {
         mrubyedge::Error::ArgumentError("variable name required".to_string())
@@ -5298,6 +5331,7 @@ fn register_engine_api(
     register_numeric_extensions(vm);
     register_math_api(vm);
     register_string_format_extensions(vm);
+    register_array_extensions(vm);
     register_rand_extension(vm);
     register_reflection_extensions(vm);
     register_sub_game_api(vm, headless);

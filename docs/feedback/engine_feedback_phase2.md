@@ -50,10 +50,11 @@ Phase 1（`docs/engine_feedback.md`）で対応された新API（`alpha` 半透�
 - **回避策**: `btn(:mouse_l)` / `btnp(:mouse_l)` / `btnp(:mouse_r)` と `mouse_x` / `mouse_y` を使用する。
 - **対応内容**: `docs/api.md` の「2.3 入力API」に `mouse_x`, `mouse_y`, `show_mouse` および `btn` / `btnp` のマウスボタン対応（`6`〜`8` / `:mouse_l`, `:mouse_r`, `:mouse_m`）を追記し、第6章の古い未実装候補（`mouse_btn`）の記述を削除した。
 
-### ⑤ `Array#index` 未実装
+### ⑤ `Array#index` 未実装 【対応済み】
 - **遭遇ゲーム**: `40_fireworks_symphony.rb`
 - **現象**: Phase 1 の `docs/engine_feedback.md` にも記載がある通り `Array#index` は未実装。
 - **回避策**: インデックス検索が必要な場合は手動ループまたはランダム選択で代替する。
+- **対応内容**: `src/main.rs` に `register_array_extensions` を追加し、`Array#index(item)` および `Array#find_index(item)` を実装した（`docs/mrubyedge_api.md` にも追記）。
 
 ---
 

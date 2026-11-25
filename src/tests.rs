@@ -6006,6 +6006,35 @@ fn test_rasterize_rect_with_width() {
     assert_eq!(rasterize_rect_with_width(0, 0, 10, 6, 3), rasterize_rectfill(0, 0, 10, 6));
 }
 
+#[test]
+fn test_array_index_and_find_index_in_ruby() {
+    let script = r#"
+$res = [
+  [10, 20, 30, 20].index(20),
+  [:a, :b, :c].index(:c),
+  ["x", "y"].index("z"),
+  [1, nil, 3].index(nil),
+  [10, 20, 30].find_index(30),
+  [].index(1)
+]
+def update; end
+def draw; end
+"#;
+    let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
+    let rt = GameRuntime::new(&tail, &mrb, true).unwrap();
+    let res = rt.vm.globals.get("$res").expect("$res should be set");
+    let RValue::Array(arr) = &res.value else {
+        panic!("expected array");
+    };
+    let items = arr.borrow();
+    assert_eq!(robject_to_i32(&items[0]), Some(1));
+    assert_eq!(robject_to_i32(&items[1]), Some(2));
+    assert!(items[2].is_nil());
+    assert_eq!(robject_to_i32(&items[3]), Some(1));
+    assert_eq!(robject_to_i32(&items[4]), Some(2));
+    assert!(items[5].is_nil());
+}
+
 
 
 

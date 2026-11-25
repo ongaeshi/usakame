@@ -96,6 +96,7 @@ mrubyedge は WASM や組み込み向けの軽量 Ruby 実行環境です。CRub
   * `arr.empty?` : 空配列か判定
   * `arr.size`, `arr.length` : 配列の要素数
   * `arr.include?(item)` : 要素が含まれるか判定
+  * `arr.index(item)`, `arr.find_index(item)` : 最初に一致する要素のインデックスを返す（見つからない場合は `nil`。値指定のみ対応）
 * **集合演算・変換**
   * `arr & other` : 積集合
   * `arr | other` : 和集合
