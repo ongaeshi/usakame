@@ -72,11 +72,12 @@ Phase 2 でビジュアル表現（光・影・多角形・高解像度）が大
 - **要望**: PICO-8 の `dset(slot, val)` / `dget(slot)` やキーバリュー形式（`save_set(key, val)` / `save_get(key)`）で、デスクトップ版はローカルファイル、Web版は `localStorage` に永続保存できる仕組み。これにより「全12面スターコンプ」「ゴースト記録保持」「ローグライトのアンロック要素」など**長期的なやり込み動機**が作れる。
 - **対応内容**: キーバリュー形式に一本化した永続セーブ API（`save_set`, `save_get`, `save_del`, `save_has?`, `save_keys`, `save_clear`）と `src/save.rs`（依存ゼロ JSON シリアライズ対応で `Array` / `Hash` もそのまま保存可能）を実装した。別ゲームとのデータ衝突・世代管理のため `config(save_id: "...", save_salt: "...")` の両指定を必須とし、補助コマンド `uk save-init` を追加した。デスクトップ版は OS 標準データディレクトリ配下の JSON ファイル、WASM 版は `web/mq_js_bundle.js` の `usakame_storage` プラグイン経由で `localStorage` に保存する（`uk check` 等のヘッドレス時はインメモリ動作）。また、`docs/api.md` の更新とサンプル `examples/save_data.rb` を追加した。
 
-### ③ オフスクリーン描画サーフェス / ライトマップ（`surface` / `set_target`）
+### ③ オフスクリーン描画サーフェス / ライトマップ（`surface` / `set_target`） 【対応済み (`6df233e`, `149c485`)】
 - **理由**:
   - `34_drift_circuit_dx.rb` のタイヤ痕や `40_fireworks_symphony.rb` の花火の残光、`39_vitrail_craft.rb` のペイントなど、「消えずに残る軌跡・デカール」は現在すべて配列に溜めて毎フレーム再描画しているため、表現量に上限がある。
   - `33_shadow_thief.rb` や `36_submarine_sonar_2.rb` の闇と光の表現も、`blend(:mul)` の暗闇に「穴を開ける（くり抜く）」専用ライトマップが作れると、複数の光源が重なっても白飛びしない自然な2Dライティングが可能になる。
 - **要望**: `create_surface(w, h)`、`render_to(surf) { ... }`、`draw_surface(surf, x, y, alpha:, blend:)` のようなシンプルなオフスクリーンバッファAPI。
+- **対応内容**: `src/surface.rs` を新設し、`:gpu`（`RenderTarget` ベース）と `:pixel`（CPU バッファ＋Dirty Rect 部分転送）の 2 バックエンドを統一 API で扱うサーフェス機能（`create_surface`, `free_surface`, `clear_surface`, `surface_size`, `render_to`, `set_target`, `draw_surface`）を実装した。あわせて `blend(:erase)`（くり抜き合成）と `cls(nil)` / `cls(col, alpha)` の透明・半透明クリアを追加し、`docs/api.md` の更新とサンプル `examples/lightmap_decal.rb` を追加した。
 
 ### ④ テキスト計測＆装飾オプション（`text_width` / `align:` / `outline:`）
 - **理由**: 全作品を通じて「タイトルやポップアップの中央揃え」を手計算（`str.length * 3` 等）で行っており、特に `38_arcana_deck.rb` のような日本語（全角16px）と英数字（半角8px）が混在するUIでは正確なセンタリングや枠収めが難しい。また、明るい背景やエフェクト上での視認性を上げるための黒フチ文字（現在5回ずらし描きが必要）も頻繁に欲しくなる。
@@ -88,9 +89,10 @@ Phase 2 でビジュアル表現（光・影・多角形・高解像度）が大
   - `32_star_trench.rb` や `37_slingshot_fortress.rb` のような照準系ゲームでは、OS標準カーソルを隠してゲーム内レティクルを表示する `show_cursor(false)` があると没入感が増す。
   - `btn(id, player = 0)` の2P対応・ゲームパッド対応が入ると、対戦・協力アクションの幅が一気に広がる。
 
-### ⑥ ピクセル取得・破壊可能地形向け API（`pget` / サーフェス直接書き換え）
+### ⑥ ピクセル取得・破壊可能地形向け API（`pget` / サーフェス直接書き換え） 【対応済み (`149c485`)】
 - **理由**: `pget(x, y)` やサーフェス単位のピクセル操作があると、Worms風の「地形を爆破して穴を開ける」ゲームや、落下砂・流体シミュレーションの高速化が可能になり、物理アクションの遊びの幅が大きく広がる。
 - メモ: ③ オフスクリーン描画サーフェス とセットで考えた方がいいかもしれない。
+- **対応内容**: `create_surface(w, h, :pixel)` に対する図形スパン・`spr`・`blt`・`map`・`print_text`・`blend(:erase)` の CPU ブリッターと Dirty Rect GPU 部分転送を実装し、さらに `pget`, `surface_pget`, `surface_pset`, `surface_swap`, `surface_solid?`, `surface_circle_solid?`, `surface_raycast`, `surface_count` を追加した（透明ピクセルは `mget` と同じく `nil`、黒 `0` も真として判定可能）。`uk check` のヘッドレス環境でも同一の CPU 判定が動作し、サンプル `examples/destructible_terrain.rb` を追加した。
 
 ### ⑦ タイルマップの強化と描画パフォーマンス改善（`fget`・複数マップ・バッチング/チャンクキャッシュ）
 - **理由**: 現状すでに `@MAP` / `map` / `mget` / `mset` が実装されているが、`usakame-games` の制約を外して探索型アクション・メトロイドヴァニア・見下ろしRPGなどの「長時間遊べるゲーム」を作る場合、タイルマップの活用が不可欠になる。
