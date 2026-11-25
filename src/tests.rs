@@ -6202,3 +6202,131 @@ fn test_cli_save_init() {
     let (out4, _, _) = cli::apply_save_init_to_source(src_no_cfg, "my_app", None, "abcdef01", false);
     assert!(out4.starts_with("# header comment\nconfig(save_id: \"my_app\", save_salt: \"abcdef01\")\n"));
 }
+
+#[test]
+fn test_surface_store_and_stack_lifecycle() {
+    let mut store = surface::SurfaceStore::new(true);
+    let mut ds = DrawState::default();
+    ds.set_camera(12.0, 34.0);
+    ds.set_clip(4, 5, 100, 80);
+    ds.set_blend(BlendMode::Add);
+    ds.set_pal(1, 9);
+
+    let s1 = store.create_surface(128, 64, surface::SurfaceMode::Gpu).unwrap();
+    let s2 = store.create_surface(32, 32, surface::SurfaceMode::Pixel).unwrap();
+    assert_eq!(store.surface_size(s1), Some((128, 64)));
+    assert_eq!(store.surface_size(s2), Some((32, 32)));
+    assert_eq!(store.surface_size(999), None);
+
+    // 範囲外サイズ・上限チェック
+    assert!(store.create_surface(0, 10, surface::SurfaceMode::Gpu).is_err());
+    assert!(store.create_surface(surface::MAX_SURFACE_DIM + 1, 10, surface::SurfaceMode::Gpu).is_err());
+
+    // ネストされた push_target / pop_target でカメラ・クリップ・ブレンド・画面サイズが退避＆復元され、pal は引き継がれる
+    store.push_target(s1, &mut ds).unwrap();
+    assert_eq!(store.active_target(), surface::DrawTarget::Surface(s1));
+    assert_eq!(ds.cam_x, 0.0);
+    assert_eq!(ds.cam_y, 0.0);
+    assert_eq!(ds.clip, None);
+    assert_eq!(ds.blend, BlendMode::Normal);
+    assert_eq!(ds.screen_w, 128);
+    assert_eq!(ds.screen_h, 64);
+    assert_eq!(ds.map_color_index(1), 9);
+
+    ds.set_camera(5.0, 6.0);
+    ds.set_blend(BlendMode::Erase);
+    store.push_target(s2, &mut ds).unwrap();
+    assert_eq!(store.active_target(), surface::DrawTarget::Surface(s2));
+    assert_eq!(ds.screen_w, 32);
+    assert_eq!(ds.screen_h, 32);
+    assert_eq!(ds.blend, BlendMode::Normal);
+
+    assert!(store.pop_target(&mut ds));
+    assert_eq!(store.active_target(), surface::DrawTarget::Surface(s1));
+    assert_eq!(ds.cam_x, 5.0);
+    assert_eq!(ds.blend, BlendMode::Erase);
+
+    assert!(store.pop_target(&mut ds));
+    assert_eq!(store.active_target(), surface::DrawTarget::Screen);
+    assert_eq!(ds.cam_x, 12.0);
+    assert_eq!(ds.cam_y, 34.0);
+    assert_eq!(ds.blend, BlendMode::Add);
+    assert!(ds.clip.is_some());
+
+    assert!(store.free_surface(s1, &mut ds, 256, 256));
+    assert!(!store.free_surface(s1, &mut ds, 256, 256));
+    assert!(store.free_surface(s2, &mut ds, 256, 256));
+}
+
+#[test]
+fn test_gpu_surface_and_erase_ruby_api_headless() {
+    let script = r#"
+class SurfaceTestGame
+  def initialize
+    @light = create_surface
+    @sub = create_surface(64, 48, :gpu)
+    $sz1 = surface_size(@light)
+    $sz2 = surface_size(@sub)
+    $sz_invalid = surface_size(9999)
+  end
+
+  def draw
+    cls(0)
+    camera(10, 20)
+    clip(5, 5, 100, 100)
+    blend(:add)
+    pal(2, 8)
+
+    render_to(@light) do
+      cls(1, 0.85)
+      blend(:erase)
+      circfill(50, 50, 20, 7, 0.5)
+      # 自己参照 draw_surface は安全にスキップされる
+      draw_surface(@light, 0, 0)
+
+      render_to(@sub) do
+        cls(nil)
+        rectfill(0, 0, 16, 16, 2)
+      end
+      draw_surface(@sub, 10, 10, alpha: 0.75, blend: :mul, u: 0, v: 0, w: 16, h: 16, scale: 1.5, rot: 45.0, flip_x: true)
+    end
+
+    # render_to 後は元の camera / blend が復元されている
+    draw_surface(@light, 0, 0, 1.0, :mul)
+
+    # break で抜けてもターゲットが復元される
+    render_to(@sub) do
+      cls(0)
+      break
+    end
+
+    # set_target のみ残してもフレーム終端で自動リセットされる
+    set_target(@sub)
+    cls(nil)
+    $draw_ok = true
+  end
+end
+
+run SurfaceTestGame.new
+"#;
+    let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
+    let mut rt = GameRuntime::new(&tail, &mrb, true).unwrap();
+    rt.apply_pending_scene_transition();
+    rt.call_draw_result().unwrap();
+
+    assert_eq!(rt.surfaces.borrow().active_target(), surface::DrawTarget::Screen);
+    assert!(rt.surfaces.borrow().stack.is_empty());
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$draw_ok").unwrap()), Some(true));
+    let to_pair = |obj: &Rc<RObject>| -> Option<(i32, i32)> {
+        if let RValue::Array(ref arr) = obj.value {
+            let a = arr.borrow();
+            if a.len() == 2 {
+                return Some((robject_to_i32(&a[0])?, robject_to_i32(&a[1])?));
+            }
+        }
+        None
+    };
+    assert_eq!(to_pair(rt.vm.globals.get("$sz1").unwrap()), Some((256, 256)));
+    assert_eq!(to_pair(rt.vm.globals.get("$sz2").unwrap()), Some((64, 48)));
+    assert!(matches!(rt.vm.globals.get("$sz_invalid").unwrap().value, RValue::Nil));
+}

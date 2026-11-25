@@ -7,6 +7,7 @@ pub mod llm;
 pub mod emoji;
 pub mod sound;
 pub mod save;
+pub mod surface;
 pub mod config;
 pub mod font;
 
@@ -22,7 +23,8 @@ use macroquad::miniquad::{BlendFactor, BlendState, BlendValue, Equation};
 use macroquad::prelude::*;
 use mrubyedge::rite;
 use mrubyedge::yamrb::helpers::{
-    mrb_define_cmethod, mrb_define_module_cmethod, mrb_define_singleton_cmethod, mrb_funcall,
+    mrb_call_block_breakable, mrb_define_cmethod, mrb_define_module_cmethod,
+    mrb_define_singleton_cmethod, mrb_funcall,
 };
 use mrubyedge::yamrb::value::{RObject, RValue};
 use mrubyedge::yamrb::vm::VM;
@@ -3277,6 +3279,7 @@ pub enum BlendMode {
     Normal,
     Add,
     Mul,
+    Erase,
 }
 
 /// 描画ステート（カメラオフセット、画面クリッピング領域、カラーパレット置換・透過設定、ブレンドモード）
@@ -3413,7 +3416,7 @@ impl DrawState {
     }
 }
 
-fn apply_gl_scissor(clip: Option<PixelSpan>) {
+pub(crate) fn apply_gl_scissor(clip: Option<PixelSpan>) {
     let gl_clip = clip.map(|c| (c.x, c.y, c.w.max(0), c.h.max(0)));
     unsafe {
         get_internal_gl().quad_gl.scissor(gl_clip);
@@ -3423,6 +3426,7 @@ fn apply_gl_scissor(clip: Option<PixelSpan>) {
 struct BlendMaterials {
     add: Material,
     mul: Material,
+    erase: Material,
 }
 
 const BLEND_VERTEX_SHADER: &str = r#"#version 100
@@ -3514,11 +3518,35 @@ fn ensure_blend_materials() {
         )
         .expect("failed to load mul blend material");
 
-        *slot = Some(BlendMaterials { add, mul });
+        let erase = load_material(
+            ShaderSource::Glsl {
+                vertex: BLEND_VERTEX_SHADER,
+                fragment: BLEND_ADD_FRAGMENT_SHADER,
+            },
+            MaterialParams {
+                pipeline_params: PipelineParams {
+                    color_blend: Some(BlendState::new(
+                        Equation::Add,
+                        BlendFactor::Zero,
+                        BlendFactor::OneMinusValue(BlendValue::SourceAlpha),
+                    )),
+                    alpha_blend: Some(BlendState::new(
+                        Equation::Add,
+                        BlendFactor::Zero,
+                        BlendFactor::OneMinusValue(BlendValue::SourceAlpha),
+                    )),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .expect("failed to load erase blend material");
+
+        *slot = Some(BlendMaterials { add, mul, erase });
     });
 }
 
-fn apply_gl_blend(mode: BlendMode) {
+pub(crate) fn apply_gl_blend(mode: BlendMode) {
     match mode {
         BlendMode::Normal => {
             gl_use_default_material();
@@ -3539,6 +3567,41 @@ fn apply_gl_blend(mode: BlendMode) {
                 }
             });
         }
+        BlendMode::Erase => {
+            ensure_blend_materials();
+            BLEND_MATERIALS.with(|cell| {
+                if let Some(ref mats) = *cell.borrow() {
+                    gl_use_material(&mats.erase);
+                }
+            });
+        }
+    }
+}
+
+fn parse_blend_mode(obj: &Rc<RObject>) -> BlendMode {
+    match &obj.value {
+        RValue::Symbol(sym) => match sym.name.trim_start_matches(':') {
+            "add" => BlendMode::Add,
+            "mul" | "multiply" => BlendMode::Mul,
+            "erase" => BlendMode::Erase,
+            _ => BlendMode::Normal,
+        },
+        RValue::String(_, _) => match String::try_from(obj.as_ref())
+            .unwrap_or_default()
+            .trim_start_matches(':')
+        {
+            "add" => BlendMode::Add,
+            "mul" | "multiply" => BlendMode::Mul,
+            "erase" => BlendMode::Erase,
+            _ => BlendMode::Normal,
+        },
+        RValue::Integer(n) => match *n {
+            1 => BlendMode::Add,
+            2 => BlendMode::Mul,
+            3 => BlendMode::Erase,
+            _ => BlendMode::Normal,
+        },
+        _ => BlendMode::Normal,
     }
 }
 
@@ -5528,6 +5591,369 @@ fn compile_tail_from_rb_file(p: &Path) -> String {
     }
 }
 
+fn register_surface_api(
+    vm: &mut VM,
+    surfaces: Rc<RefCell<surface::SurfaceStore>>,
+    draw_state: Rc<RefCell<DrawState>>,
+    config: Rc<RefCell<AppConfig>>,
+    headless: bool,
+) {
+    let obj_class = vm.object_class.clone();
+
+    // create_surface(w = nil, h = nil, mode = :gpu) -> Integer
+    let surfs_create = surfaces.clone();
+    let cfg_create = config.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "create_surface",
+        Box::new(move |_vm, args| {
+            let cfg = cfg_create.borrow();
+            let w_i32 = if args.is_empty() || matches!(args[0].value, RValue::Nil) {
+                cfg.screen_width as i32
+            } else {
+                arg_i32(args, 0, cfg.screen_width as i32)
+            };
+            let h_i32 = if args.len() < 2 || matches!(args[1].value, RValue::Nil) {
+                cfg.screen_height as i32
+            } else {
+                arg_i32(args, 1, cfg.screen_height as i32)
+            };
+            drop(cfg);
+            if w_i32 <= 0 || h_i32 <= 0 {
+                return Err(mrubyedge::Error::ArgumentError(format!(
+                    "create_surface: width and height must be positive (got {}x{})",
+                    w_i32, h_i32
+                )));
+            }
+            let mode = match args.get(2).map(|v| &v.value) {
+                Some(RValue::Symbol(s)) if s.name.trim_start_matches(':') == "pixel" => {
+                    surface::SurfaceMode::Pixel
+                }
+                Some(RValue::String(_, _)) => {
+                    let s = String::try_from(args[2].as_ref()).unwrap_or_default();
+                    if s.trim_start_matches(':') == "pixel" {
+                        surface::SurfaceMode::Pixel
+                    } else {
+                        surface::SurfaceMode::Gpu
+                    }
+                }
+                _ => surface::SurfaceMode::Gpu,
+            };
+            let id = surfs_create
+                .borrow_mut()
+                .create_surface(w_i32 as u32, h_i32 as u32, mode)
+                .map_err(mrubyedge::Error::RuntimeError)?;
+            Ok(RObject::integer_rc(id as i64))
+        }),
+    );
+
+    // free_surface(surf) -> Boolean
+    let surfs_free = surfaces.clone();
+    let state_free = draw_state.clone();
+    let cfg_free = config.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "free_surface",
+        Box::new(move |_vm, args| {
+            let id = arg_i32(args, 0, 0);
+            let (sw, sh) = {
+                let cfg = cfg_free.borrow();
+                (cfg.screen_width as i32, cfg.screen_height as i32)
+            };
+            let removed = surfs_free
+                .borrow_mut()
+                .free_surface(id, &mut state_free.borrow_mut(), sw, sh);
+            Ok(RObject::boolean_rc(removed))
+        }),
+    );
+
+    // clear_surface(surf, col = nil, alpha = 1.0) -> nil
+    let surfs_clear = surfaces.clone();
+    let state_clear = draw_state.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "clear_surface",
+        Box::new(move |_vm, args| {
+            let id = arg_i32(args, 0, 0);
+            let col = if args.len() < 2 || matches!(args[1].value, RValue::Nil) {
+                None
+            } else {
+                Some(arg_i32(args, 1, 0))
+            };
+            let alpha = arg_alpha(args, 2);
+            let state = *state_clear.borrow();
+            surfs_clear
+                .borrow_mut()
+                .clear_surface(id, col, alpha, &state)
+                .map_err(mrubyedge::Error::RuntimeError)?;
+            Ok(RObject::nil_rc())
+        }),
+    );
+
+    // surface_size(surf) -> [w, h] / nil
+    let surfs_size = surfaces.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "surface_size",
+        Box::new(move |_vm, args| {
+            let id = arg_i32(args, 0, 0);
+            match surfs_size.borrow().surface_size(id) {
+                Some((w, h)) => Ok(Rc::new(RObject::array(vec![
+                    RObject::integer_rc(w as i64),
+                    RObject::integer_rc(h as i64),
+                ]))),
+                None => Ok(RObject::nil_rc()),
+            }
+        }),
+    );
+
+    // render_to(surf) { ... } -> nil
+    let surfs_render = surfaces.clone();
+    let state_render = draw_state.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "render_to",
+        Box::new(move |vm, args| {
+            let block = args
+                .last()
+                .filter(|a| matches!(a.value, RValue::Proc(_)))
+                .cloned()
+                .ok_or_else(|| {
+                    mrubyedge::Error::ArgumentError("render_to requires a block".to_string())
+                })?;
+            let positional = &args[..args.len() - 1];
+            let id = arg_i32(positional, 0, 0);
+            surfs_render
+                .borrow_mut()
+                .push_target(id, &mut state_render.borrow_mut())
+                .map_err(mrubyedge::Error::RuntimeError)?;
+            let res = mrb_call_block_breakable(vm, block, None, &[]);
+            surfs_render
+                .borrow_mut()
+                .pop_target(&mut state_render.borrow_mut());
+            res?;
+            Ok(RObject::nil_rc())
+        }),
+    );
+
+    // set_target(surf = nil) -> nil
+    let surfs_target = surfaces.clone();
+    let state_target = draw_state.clone();
+    let cfg_target = config.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "set_target",
+        Box::new(move |_vm, args| {
+            let id = if args.is_empty() || matches!(args[0].value, RValue::Nil) {
+                None
+            } else {
+                Some(arg_i32(args, 0, 0))
+            };
+            let (sw, sh) = {
+                let cfg = cfg_target.borrow();
+                (cfg.screen_width as i32, cfg.screen_height as i32)
+            };
+            surfs_target
+                .borrow_mut()
+                .set_target(id, &mut state_target.borrow_mut(), sw, sh)
+                .map_err(mrubyedge::Error::RuntimeError)?;
+            Ok(RObject::nil_rc())
+        }),
+    );
+
+    // draw_surface(surf, x = 0, y = 0, alpha = 1.0, blend_mode = nil, **opts) -> nil
+    let surfs_draw = surfaces.clone();
+    let state_draw = draw_state.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class,
+        "draw_surface",
+        Box::new(move |_vm, args| {
+            if args.is_empty() {
+                return Ok(RObject::nil_rc());
+            }
+            let (pos, opts_hash) = if let Some(last) = args.last()
+                && matches!(last.value, RValue::Hash(_))
+            {
+                (&args[..args.len() - 1], Some(last))
+            } else {
+                (args, None)
+            };
+            let id = arg_i32(pos, 0, 0);
+            let mut x = arg_f32(pos, 1, 0.0);
+            let mut y = arg_f32(pos, 2, 0.0);
+            let mut alpha = arg_alpha(pos, 3);
+            let mut blend_override: Option<BlendMode> = pos
+                .get(4)
+                .filter(|v| !matches!(v.value, RValue::Nil))
+                .map(parse_blend_mode);
+            let mut u_opt: Option<i32> = None;
+            let mut v_opt: Option<i32> = None;
+            let mut w_opt: Option<i32> = None;
+            let mut h_opt: Option<i32> = None;
+            let mut scale_x: f32 = 1.0;
+            let mut scale_y: f32 = 1.0;
+            let mut rot: f32 = 0.0;
+            let mut flip_x = false;
+            let mut flip_y = false;
+
+            if let Some(hash_obj) = opts_hash
+                && let RValue::Hash(ref hash_cell) = hash_obj.value
+            {
+                let hash = hash_cell.borrow();
+                for (_k_obj, (k, v)) in hash.iter() {
+                    let key_str = match &k.value {
+                        RValue::Symbol(s) => s.name.trim_start_matches(':').to_string(),
+                        RValue::String(s, _) => String::from_utf8_lossy(&s.borrow()).to_string(),
+                        _ => continue,
+                    };
+                    match key_str.as_str() {
+                        "x" => {
+                            if let Some(val) = robject_to_f32(v) {
+                                x = val;
+                            }
+                        }
+                        "y" => {
+                            if let Some(val) = robject_to_f32(v) {
+                                y = val;
+                            }
+                        }
+                        "alpha" => {
+                            if let Some(val) = robject_to_f32(v) {
+                                alpha = val.clamp(0.0, 1.0);
+                            }
+                        }
+                        "blend" => {
+                            if !matches!(v.value, RValue::Nil) {
+                                blend_override = Some(parse_blend_mode(v));
+                            }
+                        }
+                        "u" => u_opt = robject_to_i32(v),
+                        "v" => v_opt = robject_to_i32(v),
+                        "w" => w_opt = robject_to_i32(v),
+                        "h" => h_opt = robject_to_i32(v),
+                        "scale" => {
+                            if let Some(val) = robject_to_f32(v) {
+                                scale_x = val;
+                                scale_y = val;
+                            }
+                        }
+                        "scale_x" => {
+                            if let Some(val) = robject_to_f32(v) {
+                                scale_x = val;
+                            }
+                        }
+                        "scale_y" => {
+                            if let Some(val) = robject_to_f32(v) {
+                                scale_y = val;
+                            }
+                        }
+                        "rot" => {
+                            if let Some(val) = robject_to_f32(v) {
+                                rot = val;
+                            }
+                        }
+                        "flip_x" => {
+                            flip_x = bool::try_from(v.as_ref()).unwrap_or(false);
+                        }
+                        "flip_y" => {
+                            flip_y = bool::try_from(v.as_ref()).unwrap_or(false);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            if alpha <= 0.0 {
+                return Ok(RObject::nil_rc());
+            }
+
+            let surfs_ref = surfs_draw.borrow();
+            if surfs_ref.active_target() == surface::DrawTarget::Surface(id) {
+                eprintln!(
+                    "Warning: draw_surface({}) skipped while rendering to the same surface",
+                    id
+                );
+                return Ok(RObject::nil_rc());
+            }
+            let Some(entry) = surfs_ref.entries.get(&id) else {
+                return Ok(RObject::nil_rc());
+            };
+            if headless {
+                return Ok(RObject::nil_rc());
+            }
+
+            let state = *state_draw.borrow();
+            if let Some(bm) = blend_override {
+                apply_gl_blend(bm);
+            }
+            match entry {
+                surface::SurfaceEntry::Gpu(gpu) => {
+                    if let Some(ref rt) = gpu.render_target {
+                        let surf_w = gpu.width as i32;
+                        let surf_h = gpu.height as i32;
+                        let u = u_opt.unwrap_or(0).clamp(0, surf_w);
+                        let v = v_opt.unwrap_or(0).clamp(0, surf_h);
+                        let src_w = w_opt.unwrap_or(surf_w - u).clamp(0, surf_w - u);
+                        let src_h = h_opt.unwrap_or(surf_h - v).clamp(0, surf_h - v);
+                        if src_w > 0 && src_h > 0 {
+                            let has_subrect = u_opt.is_some()
+                                || v_opt.is_some()
+                                || w_opt.is_some()
+                                || h_opt.is_some();
+                            let src_rect = if has_subrect {
+                                Some(Rect::new(
+                                    u as f32,
+                                    (surf_h - v - src_h) as f32,
+                                    src_w as f32,
+                                    src_h as f32,
+                                ))
+                            } else {
+                                None
+                            };
+                            if let Some((draw_x, draw_y, mut params)) =
+                                compute_sprite_draw_params_ext(
+                                    src_w as f32,
+                                    src_h as f32,
+                                    x - state.cam_x,
+                                    y - state.cam_y,
+                                    flip_x,
+                                    !flip_y,
+                                    rot,
+                                    scale_x,
+                                    scale_y,
+                                )
+                            {
+                                params.source = src_rect;
+                                draw_texture_ex(
+                                    &rt.texture,
+                                    draw_x,
+                                    draw_y,
+                                    Color::new(1.0, 1.0, 1.0, alpha),
+                                    params,
+                                );
+                            }
+                        }
+                    }
+                }
+                surface::SurfaceEntry::Pixel(_) => {
+                    // Phase 2 で Dirty Rect 部分転送＆描画を接続
+                }
+            }
+            if blend_override.is_some() {
+                apply_gl_blend(state.blend);
+            }
+            Ok(RObject::nil_rc())
+        }),
+    );
+}
+
 fn register_engine_api(
     vm: &mut VM,
     sprites: Rc<RefCell<HashMap<i32, SpriteData>>>,
@@ -5550,6 +5976,7 @@ fn register_engine_api(
     next_scene: Rc<RefCell<Option<NextSceneRequest>>>,
     is_hot_reloading: Rc<RefCell<bool>>,
     save_store: Rc<RefCell<save::SaveStore>>,
+    surfaces: Rc<RefCell<surface::SurfaceStore>>,
     headless: bool,
 ) {
     register_numeric_extensions(vm);
@@ -5559,6 +5986,13 @@ fn register_engine_api(
     register_rand_extension(vm);
     register_reflection_extensions(vm);
     register_sub_game_api(vm, headless);
+    register_surface_api(
+        vm,
+        surfaces.clone(),
+        draw_state.clone(),
+        config.clone(),
+        headless,
+    );
     let obj_class = vm.object_class.clone();
 
     // run / scene: オブジェクト指向のシーン管理（遅延切り替え）
@@ -5887,27 +6321,7 @@ fn register_engine_api(
             let mode = if args.is_empty() || matches!(args[0].value, RValue::Nil) {
                 BlendMode::Normal
             } else {
-                match &args[0].value {
-                    RValue::Symbol(sym) => match sym.name.trim_start_matches(':') {
-                        "add" => BlendMode::Add,
-                        "mul" | "multiply" => BlendMode::Mul,
-                        _ => BlendMode::Normal,
-                    },
-                    RValue::String(_, _) => match String::try_from(args[0].as_ref())
-                        .unwrap_or_default()
-                        .trim_start_matches(':')
-                    {
-                        "add" => BlendMode::Add,
-                        "mul" | "multiply" => BlendMode::Mul,
-                        _ => BlendMode::Normal,
-                    },
-                    RValue::Integer(n) => match *n {
-                        1 => BlendMode::Add,
-                        2 => BlendMode::Mul,
-                        _ => BlendMode::Normal,
-                    },
-                    _ => BlendMode::Normal,
-                }
+                parse_blend_mode(&args[0])
             };
             state_for_blend.borrow_mut().set_blend(mode);
             if !headless {
@@ -7635,8 +8049,17 @@ fn register_engine_api(
             obj_class.clone(),
             "cls",
             Box::new(move |_vm, args| {
-                let col = arg_i32(args, 0, 0);
-                let _ = state_for_cls.borrow().map_color(col);
+                let col_opt = if args.is_empty() {
+                    Some(0)
+                } else if matches!(args[0].value, RValue::Nil) {
+                    None
+                } else {
+                    Some(arg_i32(args, 0, 0))
+                };
+                let alpha = if col_opt.is_some() { arg_alpha(args, 1) } else { 0.0 };
+                if let Some(c) = col_opt {
+                    let _ = state_for_cls.borrow().map_color_with_alpha(c, alpha);
+                }
                 Ok(Rc::new(RObject::nil()))
             }),
         );
@@ -8755,25 +9178,47 @@ fn register_engine_api(
         return;
     }
 
-    // cls(col = 0): 画面（または現在のクリッピング領域）を指定したパレット色でクリア
+    // cls(col = 0, alpha = 1.0): 画面（または現在のクリッピング領域）を指定したパレット色でクリア（col = nil で完全透明）
     let state_for_cls = draw_state.clone();
     mrb_define_cmethod(
         vm,
         obj_class.clone(),
         "cls",
         Box::new(move |_vm, args| {
-            let col = arg_i32(args, 0, 0);
+            let col_opt = if args.is_empty() {
+                Some(0)
+            } else if matches!(args[0].value, RValue::Nil) {
+                None
+            } else {
+                Some(arg_i32(args, 0, 0))
+            };
+            let alpha = if col_opt.is_some() { arg_alpha(args, 1) } else { 0.0 };
             let state = *state_for_cls.borrow();
-            let color = state.map_color(col);
+            let color = match col_opt {
+                Some(c) if alpha > 0.0 => state.map_color_with_alpha(c, alpha),
+                _ => Color::from_rgba(0, 0, 0, 0),
+            };
             if let Some(clip_rect) = state.clip {
                 if clip_rect.w > 0 && clip_rect.h > 0 {
-                    draw_rectangle(
-                        clip_rect.x as f32,
-                        clip_rect.y as f32,
-                        clip_rect.w as f32,
-                        clip_rect.h as f32,
-                        color,
-                    );
+                    if color.a == 0.0 {
+                        apply_gl_blend(BlendMode::Erase);
+                        draw_rectangle(
+                            clip_rect.x as f32,
+                            clip_rect.y as f32,
+                            clip_rect.w as f32,
+                            clip_rect.h as f32,
+                            Color::new(0.0, 0.0, 0.0, 1.0),
+                        );
+                        apply_gl_blend(state.blend);
+                    } else {
+                        draw_rectangle(
+                            clip_rect.x as f32,
+                            clip_rect.y as f32,
+                            clip_rect.w as f32,
+                            clip_rect.h as f32,
+                            color,
+                        );
+                    }
                 }
             } else {
                 clear_background(color);
@@ -10480,6 +10925,7 @@ pub struct GameRuntime {
     pub emoji_atlas: Rc<RefCell<emoji::EmojiAtlas>>,
     pub bitmap_font: Rc<BitmapFont>,
     pub draw_state: Rc<RefCell<DrawState>>,
+    pub surfaces: Rc<RefCell<surface::SurfaceStore>>,
     pub sound_bank: Rc<RefCell<sound::SoundBank>>,
     pub save_store: Rc<RefCell<save::SaveStore>>,
     pub config: Rc<RefCell<AppConfig>>,
@@ -10567,6 +11013,7 @@ impl GameRuntime {
         let bitmap_font = Rc::new(BitmapFont::new(!headless));
         let initial_draw_state = DrawState::default();
         let draw_state = Rc::new(RefCell::new(initial_draw_state));
+        let surfaces = Rc::new(RefCell::new(surface::SurfaceStore::new(headless)));
         let sound_bank = Rc::new(RefCell::new(sound::SoundBank::new(
             HashMap::new(),
             HashMap::new(),
@@ -10602,6 +11049,7 @@ impl GameRuntime {
             next_scene.clone(),
             is_hot_reloading.clone(),
             save_store.clone(),
+            surfaces.clone(),
             headless,
         );
         register_sound_api(&mut vm, sound_bank.clone());
@@ -10652,6 +11100,7 @@ impl GameRuntime {
             emoji_atlas,
             bitmap_font,
             draw_state,
+            surfaces,
             sound_bank,
             save_store,
             config,
@@ -10768,6 +11217,7 @@ impl GameRuntime {
             self.next_scene.clone(),
             self.is_hot_reloading.clone(),
             self.save_store.clone(),
+            self.surfaces.clone(),
             self.headless,
         );
         register_sound_api(&mut new_vm, self.sound_bank.clone());
@@ -10846,6 +11296,7 @@ impl GameRuntime {
             self.next_scene.clone(),
             self.is_hot_reloading.clone(),
             self.save_store.clone(),
+            self.surfaces.clone(),
             self.headless,
         );
         register_save_api(&mut new_vm, self.save_store.clone());
@@ -10916,6 +11367,10 @@ impl GameRuntime {
         }
     }
 
+    pub fn set_screen_camera(&self, cam: Option<Camera2D>) {
+        self.surfaces.borrow_mut().set_screen_camera(cam);
+    }
+
     pub fn call_update_result(&mut self) -> Result<(), ScriptError> {
         self.apply_pending_scene_transition();
         let res = if let Some(ref scene) = self.current_scene {
@@ -10931,6 +11386,14 @@ impl GameRuntime {
                 .map(|_| ())
                 .map_err(|_| ScriptError::from_vm(&mut self.vm, "update"))
         };
+        {
+            let cfg = self.config.borrow();
+            self.surfaces.borrow_mut().reset_to_screen_if_needed(
+                &mut self.draw_state.borrow_mut(),
+                cfg.screen_width as i32,
+                cfg.screen_height as i32,
+            );
+        }
         self.save_store.borrow_mut().flush_if_dirty();
         res
     }
@@ -10960,6 +11423,14 @@ impl GameRuntime {
                 .map(|_| ())
                 .map_err(|_| ScriptError::from_vm(&mut self.vm, "draw"))
         };
+        {
+            let cfg = self.config.borrow();
+            self.surfaces.borrow_mut().reset_to_screen_if_needed(
+                &mut self.draw_state.borrow_mut(),
+                cfg.screen_width as i32,
+                cfg.screen_height as i32,
+            );
+        }
         if !self.headless {
             apply_gl_scissor(None);
             apply_gl_blend(BlendMode::Normal);
@@ -11284,6 +11755,7 @@ fn mrb_sub_game_draw(_vm: &mut VM, args: &[Rc<RObject>]) -> Result<Rc<RObject>, 
             }
             if let Some((ref rt, ref cam)) = sub.screen {
                 set_camera(cam);
+                sub.runtime.set_screen_camera(Some(copy_camera(cam)));
                 if let Err(err) = sub.runtime.call_draw_result() {
                     mgr.last_error = Some(err.full_message);
                     if let Some(parent_cam) = CURRENT_VIRTUAL_CAMERA.with(|c| c.borrow().as_ref().map(copy_camera)) {
@@ -12388,6 +12860,7 @@ async fn run_native_with_hot_reload(
 
             CURRENT_VIRTUAL_CAMERA.with(|c| *c.borrow_mut() = Some(copy_camera(&virtual_camera)));
             set_camera(&virtual_camera);
+            rt.set_screen_camera(Some(copy_camera(&virtual_camera)));
             if let Err(err) = rt.call_draw_result() {
                 if current_error.as_ref() != Some(&err) {
                     eprintln!("{}", err.full_message);
@@ -12594,6 +13067,7 @@ async fn run_embedded_game_with_args(
 
         CURRENT_VIRTUAL_CAMERA.with(|c| *c.borrow_mut() = Some(copy_camera(&virtual_camera)));
         set_camera(&virtual_camera);
+        runtime.set_screen_camera(Some(copy_camera(&virtual_camera)));
         runtime.call_draw();
 
         let show_fps = runtime.config.borrow().show_fps;
@@ -13276,6 +13750,7 @@ async fn main() {
 
             CURRENT_VIRTUAL_CAMERA.with(|c| *c.borrow_mut() = Some(copy_camera(&virtual_camera)));
             set_camera(&virtual_camera);
+            rt.set_screen_camera(Some(copy_camera(&virtual_camera)));
             if let Err(err) = rt.call_draw_result() {
                 if current_error.as_ref() != Some(&err) {
                     eprintln!("{}", err.full_message);
