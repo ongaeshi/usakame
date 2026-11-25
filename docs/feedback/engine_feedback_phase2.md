@@ -79,9 +79,10 @@ Phase 2 でビジュアル表現（光・影・多角形・高解像度）が大
 - **要望**: `create_surface(w, h)`、`render_to(surf) { ... }`、`draw_surface(surf, x, y, alpha:, blend:)` のようなシンプルなオフスクリーンバッファAPI。
 - **対応内容**: `src/surface.rs` を新設し、`:gpu`（`RenderTarget` ベース）と `:pixel`（CPU バッファ＋Dirty Rect 部分転送）の 2 バックエンドを統一 API で扱うサーフェス機能（`create_surface`, `free_surface`, `clear_surface`, `surface_size`, `render_to`, `set_target`, `draw_surface`）を実装した。あわせて `blend(:erase)`（くり抜き合成）と `cls(nil)` / `cls(col, alpha)` の透明・半透明クリアを追加し、`docs/api.md` の更新とサンプル `examples/lightmap_decal.rb` を追加した。
 
-### ④ テキスト計測＆装飾オプション（`text_width` / `align:` / `outline:`）
+### ④ テキスト計測＆装飾オプション（`text_width` / `align:` / `outline:`） 【対応済み】
 - **理由**: 全作品を通じて「タイトルやポップアップの中央揃え」を手計算（`str.length * 3` 等）で行っており、特に `38_arcana_deck.rb` のような日本語（全角16px）と英数字（半角8px）が混在するUIでは正確なセンタリングや枠収めが難しい。また、明るい背景やエフェクト上での視認性を上げるための黒フチ文字（現在5回ずらし描きが必要）も頻繁に欲しくなる。
 - **要望**: `text_width(str, size)`、`print_text(..., align: :center / :right, outline: 0)`（または `shadow: 0`）。
+- **対応内容**: `BitmapFont`（`src/font.rs`）に描画と同一ロジックの計測関数を追加し、`text_width(text = "", size = nil)` および `text_height(text = "", size = nil)` を実装した（ASCII・全角・半角カナ・絵文字混在・`\n` 複数行・`config(text_size: ...)` 連動対応）。また、`print_text` については Hash 確保による GC Alloc オーバーヘッドを避けるためキーワード引数ではなく位置引数で拡張し、`print_text(text, x, y, col, size, alpha, align, outline, shadow)` として `:left` / `:center` / `:right`（複数行時は行単位整列）、4近傍フチ取り（`outline`）、右下ドロップシャドウ（`shadow`）を `:pixel` サーフェスを含めて実装した。あわせて `docs/api.md` の更新とサンプル `examples/text_style.rb` を追加した。
 
 ### ⑤ 入力の拡充（`mouse_wheel`・2P/ゲームパッド入力・`cursor` 表示制御）
 - **理由**:

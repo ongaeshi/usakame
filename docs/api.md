@@ -166,7 +166,9 @@ end
 | **`mget`** | `(cel_x = 0, cel_y = 0)` | `Integer` / `nil` | タイルマップ上のセル `(cel_x, cel_y)` に配置されているタイル番号（スプライトID）を返します。未設定セルまたは消去済みマスは **`nil`** を返します。`if mget(x, y) == spr_id(:wall)` のように判定可能です。 |
 | **`mset`** | `(cel_x = 0, cel_y = 0, val = nil)` | `nil` | タイルマップ上のセル `(cel_x, cel_y)` のタイル番号を設定します。`val` には整数IDのほか、スプライト名（`Symbol`、例: `:wall`）や1文字エイリアス（例: `"#"`）も指定可能です。`val` に `nil` を渡す（または第3引数を省略する）と該当セルを消去（空マス化）します。 |
 | **`mdel`** / **`mclear`** | `(cel_x = 0, cel_y = 0)` | `nil` | タイルマップ上のセル `(cel_x, cel_y)` に配置されているタイルを消去します（`mset(cel_x, cel_y, nil)` と同等）。 |
-| **`print_text`** | `(text = "", x = 0, y = 0, col = 7, size = nil, alpha = 1.0)` | `nil` | 文字列 `text` を左上座標 `(x, y)` 基準、色 `col` の 1-bit ドット絵フォント（ASCII: `6×8`px、日本語全角・漢字: 美咲フォント `8×8`px、半角カナ: `4×8`px）でくっきり描画します。`size` 省略時は解像度によらずデフォルト `8`px で描画されます（`config(text_size: 16)` で全体のデフォルトを `16`px に変更可）。`size` で個別に `8` または `16`、`alpha`（`0.0`〜`1.0`）で不透明度を指定できます。 |
+| **`print_text`** | `(text = "", x = 0, y = 0, col = 7, size = nil, alpha = 1.0, align = :left, outline = nil, shadow = nil)` | `nil` | 文字列 `text` を座標 `(x, y)` 基準、色 `col` の 1-bit ドット絵フォント（ASCII: `6×8`px、日本語全角・漢字: 美咲フォント `8×8`px、半角カナ: `4×8`px）でくっきり描画します。`size` 省略時（`nil`）は解像度によらずデフォルト `8`px で描画されます（`config(text_size: 16)` で全体のデフォルトを `16`px に変更可）。`size` で個別に `8` または `16`、`alpha`（`0.0`〜`1.0`、`nil` で `1.0`）、`align`（`:left` / `:center` / `:right`、複数行時は行ごとに整列）、`outline`（4近傍フチ取り色番号、`nil` で無効）、`shadow`（右下 `(+1, +1)` 影色番号、`nil` で無効）を位置引数で指定できます。 |
+| **`text_width`** | `(text = "", size = nil)` | `Integer` | 文字列 `text` の描画幅（ピクセル単位の整数）を返します。ASCII・全角・半角カナ・絵文字の混在や `\n` を含む複数行（最大行幅）に対応し、`size` 省略時は `config(text_size: ...)` のデフォルトサイズに従います。 |
+| **`text_height`** | `(text = "", size = nil)` | `Integer` | 文字列 `text` の描画高さ（ピクセル単位の整数：`行数 × 8` または `行数 × 16`、空文字列は `0`）を返します。 |
 
 
 

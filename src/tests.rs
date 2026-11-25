@@ -6460,3 +6460,80 @@ __END__
     assert_eq!(robject_to_bool(rt.vm.globals.get("$pget_screen_err").unwrap()), Some(true));
     assert_eq!(robject_to_bool(rt.vm.globals.get("$pget_gpu_err").unwrap()), Some(true));
 }
+
+#[test]
+fn test_text_measure_and_styled_print_text() {
+    let script = r#"
+$w_empty = text_width("")
+$h_empty = text_height("")
+$w_ascii = text_width("ABC")
+$h_ascii = text_height("ABC")
+$w_ja = text_width("あいう")
+$w_hankaku = text_width("ｱｲ")
+$w_mixed = text_width("Aあ🐰")
+$w_multi = text_width("HI\nWORLD!")
+$h_multi = text_height("HI\nWORLD!")
+$w_16_ascii = text_width("ABC", 16)
+$h_16_ascii = text_height("ABC", 16)
+$w_16_ja = text_width("あいう", 16)
+$w_16_multi = text_width("Aあ\n1234", 16)
+$h_16_multi = text_height("Aあ\n1234", 16)
+
+surf = create_surface(64, 64, :pixel)
+render_to(surf) do
+  cls(nil)
+  # "I" の幅は 6px。'I' の 1行目 (0x0E) は gx=1,2,3 が点灯。
+  # center at x=20 => line_x = 17 => 点灯ピクセルは x=18,19,20, y=10
+  # outline=0 => (18, 9) や (17, 10) が 0 になる
+  print_text("I", 20, 10, 7, 8, 1.0, :center, 0)
+
+  # shadow=1 のみ (outline=nil) at x=20, y=30, align=:right => line_x = 14 => (15, 30) が 7, (18, 31) が 1
+  print_text("I", 20, 30, 7, 8, 1.0, :right, nil, 1)
+end
+
+$c_main = surface_pget(surf, 18, 10)
+$c_out_top = surface_pget(surf, 18, 9)
+$c_out_left = surface_pget(surf, 17, 10)
+
+$r_main = surface_pget(surf, 15, 30)
+$r_shadow = surface_pget(surf, 18, 31)
+"#;
+    let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
+    let rt = GameRuntime::new(&tail, &mrb, true).unwrap();
+
+    assert_eq!(robject_to_i32(rt.vm.globals.get("$w_empty").unwrap()), Some(0));
+    assert_eq!(robject_to_i32(rt.vm.globals.get("$h_empty").unwrap()), Some(0));
+    assert_eq!(robject_to_i32(rt.vm.globals.get("$w_ascii").unwrap()), Some(18));
+    assert_eq!(robject_to_i32(rt.vm.globals.get("$h_ascii").unwrap()), Some(8));
+    assert_eq!(robject_to_i32(rt.vm.globals.get("$w_ja").unwrap()), Some(24));
+    assert_eq!(robject_to_i32(rt.vm.globals.get("$w_hankaku").unwrap()), Some(8));
+    assert_eq!(robject_to_i32(rt.vm.globals.get("$w_mixed").unwrap()), Some(22));
+    assert_eq!(robject_to_i32(rt.vm.globals.get("$w_multi").unwrap()), Some(36));
+    assert_eq!(robject_to_i32(rt.vm.globals.get("$h_multi").unwrap()), Some(16));
+    assert_eq!(robject_to_i32(rt.vm.globals.get("$w_16_ascii").unwrap()), Some(24));
+    assert_eq!(robject_to_i32(rt.vm.globals.get("$h_16_ascii").unwrap()), Some(16));
+    assert_eq!(robject_to_i32(rt.vm.globals.get("$w_16_ja").unwrap()), Some(48));
+    assert_eq!(robject_to_i32(rt.vm.globals.get("$w_16_multi").unwrap()), Some(32));
+    assert_eq!(robject_to_i32(rt.vm.globals.get("$h_16_multi").unwrap()), Some(32));
+
+    assert_eq!(robject_to_i32(rt.vm.globals.get("$c_main").unwrap()), Some(7));
+    assert_eq!(robject_to_i32(rt.vm.globals.get("$c_out_top").unwrap()), Some(0));
+    assert_eq!(robject_to_i32(rt.vm.globals.get("$c_out_left").unwrap()), Some(0));
+
+    assert_eq!(robject_to_i32(rt.vm.globals.get("$r_main").unwrap()), Some(7));
+    assert_eq!(robject_to_i32(rt.vm.globals.get("$r_shadow").unwrap()), Some(1));
+}
+
+#[test]
+fn test_text_measure_respects_config_text_size() {
+    let script = r#"
+config(text_size: 16)
+$w = text_width("AB")
+$h = text_height("AB")
+"#;
+    let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
+    let rt = GameRuntime::new(&tail, &mrb, true).unwrap();
+
+    assert_eq!(robject_to_i32(rt.vm.globals.get("$w").unwrap()), Some(16));
+    assert_eq!(robject_to_i32(rt.vm.globals.get("$h").unwrap()), Some(16));
+}

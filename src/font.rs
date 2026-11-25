@@ -163,6 +163,13 @@ pub fn lookup_misaki_glyph(cp: u16) -> Option<[u8; 8]> {
     None
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextAlign {
+    Left,
+    Center,
+    Right,
+}
+
 pub struct BitmapFont {
     texture: Option<Texture2D>,
     ja_cache: RefCell<HashMap<u16, Texture2D>>,
@@ -232,6 +239,105 @@ impl BitmapFont {
         self.draw_text_crisp_ex(text, x, y, color, emoji_atlas, 8);
     }
 
+    fn is_zero_width_modifier(code: u32) -> bool {
+        code == 0xFE0E
+            || code == 0xFE0F
+            || code == 0x200D
+            || (0x1F3FB..=0x1F3FF).contains(&code)
+    }
+
+    fn aligned_line_x(x: f32, line_w: i32, align: TextAlign) -> f32 {
+        match align {
+            TextAlign::Left => x.floor(),
+            TextAlign::Center => (x - (line_w as f32) * 0.5).floor(),
+            TextAlign::Right => (x - (line_w as f32)).floor(),
+        }
+    }
+
+    pub fn measure_line_width(&self, line: &str, font_size: u32) -> i32 {
+        let mut w = 0i32;
+        let mut chars = line.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\n' {
+                break;
+            }
+            let code = ch as u32;
+            if Self::is_zero_width_modifier(code) {
+                continue;
+            }
+            let next_vs = match chars.peek().copied() {
+                Some('\u{FE0F}') | Some('\u{FE0E}') => chars.next(),
+                _ => None,
+            };
+
+            if font_size == 16 {
+                let prefer_emoji = next_vs != Some('\u{FE0E}')
+                    && emoji::is_emoji_codepoint(code)
+                    && (code > 0xFFFF
+                        || next_vs == Some('\u{FE0F}')
+                        || code >= 0x2300
+                        || (code <= 0xFFFF && lookup_shinonome_glyph(code as u16).is_none()));
+                if prefer_emoji {
+                    w += 16;
+                } else if code <= 0xFFFF {
+                    let cp = code as u16;
+                    if cp == 0x3000 {
+                        w += 16;
+                    } else if cp == 0x20 {
+                        w += 8;
+                    } else if let Some(glyph) = lookup_shinonome_glyph(cp) {
+                        w += glyph.width as i32;
+                    } else {
+                        w += 16;
+                    }
+                } else {
+                    w += 16;
+                }
+            } else if (0x20..=0x7E).contains(&code) {
+                w += FONT_CHAR_W as i32;
+            } else {
+                let prefer_emoji = next_vs != Some('\u{FE0E}')
+                    && emoji::is_emoji_codepoint(code)
+                    && (code > 0xFFFF
+                        || next_vs == Some('\u{FE0F}')
+                        || code >= 0x2300
+                        || lookup_misaki_glyph(code as u16).is_none());
+                if prefer_emoji {
+                    w += 8;
+                } else if code <= 0xFFFF {
+                    let cp = code as u16;
+                    if (0xFF61..=0xFF9F).contains(&cp) {
+                        w += 4;
+                    } else {
+                        w += 8;
+                    }
+                } else {
+                    w += FONT_CHAR_W as i32;
+                }
+            }
+        }
+        w
+    }
+
+    pub fn measure_text_width(&self, text: &str, font_size: u32) -> i32 {
+        if text.is_empty() {
+            return 0;
+        }
+        text.split('\n')
+            .map(|line| self.measure_line_width(line, font_size))
+            .max()
+            .unwrap_or(0)
+    }
+
+    pub fn measure_text_height(&self, text: &str, font_size: u32) -> i32 {
+        if text.is_empty() {
+            return 0;
+        }
+        let line_h = if font_size == 16 { 16 } else { FONT_CHAR_H as i32 };
+        let lines = text.split('\n').count() as i32;
+        lines * line_h
+    }
+
     pub fn draw_text_crisp_ex(
         &self,
         text: &str,
@@ -241,9 +347,112 @@ impl BitmapFont {
         emoji_atlas: &RefCell<emoji::EmojiAtlas>,
         font_size: u32,
     ) {
+        self.draw_text_crisp_aligned(
+            text,
+            x,
+            y,
+            color,
+            emoji_atlas,
+            font_size,
+            TextAlign::Left,
+            true,
+        );
+    }
+
+    pub fn draw_text_crisp_styled(
+        &self,
+        text: &str,
+        x: f32,
+        y: f32,
+        color: Color,
+        emoji_atlas: &RefCell<emoji::EmojiAtlas>,
+        font_size: u32,
+        align: TextAlign,
+        outline_color: Option<Color>,
+        shadow_color: Option<Color>,
+    ) {
+        if let Some(sc) = shadow_color {
+            self.draw_text_crisp_aligned(
+                text,
+                x + 1.0,
+                y + 1.0,
+                sc,
+                emoji_atlas,
+                font_size,
+                align,
+                false,
+            );
+        }
+        if let Some(oc) = outline_color {
+            for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+                self.draw_text_crisp_aligned(
+                    text,
+                    x + dx,
+                    y + dy,
+                    oc,
+                    emoji_atlas,
+                    font_size,
+                    align,
+                    false,
+                );
+            }
+        }
+        self.draw_text_crisp_aligned(text, x, y, color, emoji_atlas, font_size, align, true);
+    }
+
+    pub fn draw_text_crisp_aligned(
+        &self,
+        text: &str,
+        x: f32,
+        y: f32,
+        color: Color,
+        emoji_atlas: &RefCell<emoji::EmojiAtlas>,
+        font_size: u32,
+        align: TextAlign,
+        draw_emoji: bool,
+    ) {
         let Some(ref texture) = self.texture else {
             return;
         };
+        let line_h = if font_size == 16 {
+            16.0
+        } else {
+            FONT_CHAR_H as f32
+        };
+        let mut cur_y = y.floor();
+        for line in text.split('\n') {
+            let line_x = if align == TextAlign::Left {
+                x.floor()
+            } else {
+                let line_w = self.measure_line_width(line, font_size);
+                Self::aligned_line_x(x, line_w, align)
+            };
+            self.draw_text_line_crisp(
+                texture,
+                line,
+                line_x,
+                cur_y,
+                color,
+                emoji_atlas,
+                font_size,
+                draw_emoji,
+            );
+            cur_y += line_h;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_text_line_crisp(
+        &self,
+        texture: &Texture2D,
+        text: &str,
+        x: f32,
+        y: f32,
+        color: Color,
+        emoji_atlas: &RefCell<emoji::EmojiAtlas>,
+        font_size: u32,
+        draw_emoji: bool,
+    ) {
 
         if font_size == 16 {
             let mut cur_x = x.floor();
@@ -278,17 +487,19 @@ impl BitmapFont {
                         || (code <= 0xFFFF && lookup_shinonome_glyph(code as u16).is_none()));
 
                 if prefer_emoji {
-                    let mut atlas_ref = emoji_atlas.borrow_mut();
-                    if let Some(sprite) = atlas_ref.get_or_insert_16x16_by_cp(code, true)
-                        && let Some(ref emoji_tex) = sprite.texture
-                    {
-                        draw_texture_ex(
-                            emoji_tex,
-                            cur_x,
-                            cur_y,
-                            Color::new(1.0, 1.0, 1.0, color.a),
-                            DrawTextureParams::default(),
-                        );
+                    if draw_emoji {
+                        let mut atlas_ref = emoji_atlas.borrow_mut();
+                        if let Some(sprite) = atlas_ref.get_or_insert_16x16_by_cp(code, true)
+                            && let Some(ref emoji_tex) = sprite.texture
+                        {
+                            draw_texture_ex(
+                                emoji_tex,
+                                cur_x,
+                                cur_y,
+                                Color::new(1.0, 1.0, 1.0, color.a),
+                                DrawTextureParams::default(),
+                            );
+                        }
                     }
                     cur_x += 16.0;
                     continue;
@@ -417,17 +628,19 @@ impl BitmapFont {
                     || lookup_misaki_glyph(code as u16).is_none());
 
             if prefer_emoji {
-                let mut atlas_ref = emoji_atlas.borrow_mut();
-                if let Some(sprite) = atlas_ref.get_or_insert_8x8_by_cp(code, true)
-                    && let Some(ref emoji_tex) = sprite.texture
-                {
-                    draw_texture_ex(
-                        emoji_tex,
-                        cur_x,
-                        cur_y,
-                        Color::new(1.0, 1.0, 1.0, color.a),
-                        DrawTextureParams::default(),
-                    );
+                if draw_emoji {
+                    let mut atlas_ref = emoji_atlas.borrow_mut();
+                    if let Some(sprite) = atlas_ref.get_or_insert_8x8_by_cp(code, true)
+                        && let Some(ref emoji_tex) = sprite.texture
+                    {
+                        draw_texture_ex(
+                            emoji_tex,
+                            cur_x,
+                            cur_y,
+                            Color::new(1.0, 1.0, 1.0, color.a),
+                            DrawTextureParams::default(),
+                        );
+                    }
                 }
                 cur_x += 8.0;
                 continue;
@@ -478,26 +691,35 @@ impl BitmapFont {
     }
 
     pub fn rasterize_text_spans(&self, text: &str, x: f32, y: f32, font_size: u32) -> Vec<crate::PixelSpan> {
+        self.rasterize_text_spans_aligned(text, x, y, font_size, TextAlign::Left)
+    }
+
+    pub fn rasterize_text_spans_aligned(
+        &self,
+        text: &str,
+        x: f32,
+        y: f32,
+        font_size: u32,
+        align: TextAlign,
+    ) -> Vec<crate::PixelSpan> {
         let mut spans = Vec::new();
-        let start_x = x.floor() as i32;
-        let mut cur_x = start_x;
+        let line_h = if font_size == 16 { 16 } else { FONT_CHAR_H as i32 };
         let mut cur_y = y.floor() as i32;
 
-        let mut chars = text.chars().peekable();
-        while let Some(ch) = chars.next() {
-            if ch == '\n' {
-                cur_x = start_x;
-                cur_y += if font_size == 16 { 16 } else { FONT_CHAR_H as i32 };
-                continue;
-            }
-            let code = ch as u32;
-            if code == 0xFE0E
-                || code == 0xFE0F
-                || code == 0x200D
-                || (0x1F3FB..=0x1F3FF).contains(&code)
-            {
-                continue;
-            }
+        for line in text.split('\n') {
+            let mut cur_x = if align == TextAlign::Left {
+                x.floor() as i32
+            } else {
+                let line_w = self.measure_line_width(line, font_size);
+                Self::aligned_line_x(x, line_w, align) as i32
+            };
+
+            let mut chars = line.chars().peekable();
+            while let Some(ch) = chars.next() {
+                let code = ch as u32;
+                if Self::is_zero_width_modifier(code) {
+                    continue;
+                }
             if matches!(chars.peek(), Some('\u{FE0F}') | Some('\u{FE0E}')) {
                 chars.next();
             }
@@ -566,6 +788,8 @@ impl BitmapFont {
             } else {
                 cur_x += FONT_CHAR_W as i32;
             }
+            }
+            cur_y += line_h;
         }
         spans
     }

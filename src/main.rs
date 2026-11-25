@@ -2135,6 +2135,36 @@ fn parse_text_size_arg(args: &[Rc<RObject>], default_size: u32) -> u32 {
     default_size
 }
 
+fn parse_measure_text_size_arg(args: &[Rc<RObject>], index: usize, default_size: u32) -> u32 {
+    if let Some(arg) = args.get(index) {
+        if let Some(n) = robject_to_u32(arg) {
+            return if n == 16 { 16 } else { 8 };
+        }
+    }
+    default_size
+}
+
+fn arg_text_align(args: &[Rc<RObject>], index: usize) -> TextAlign {
+    let Some(arg) = args.get(index) else {
+        return TextAlign::Left;
+    };
+    match &arg.value {
+        RValue::Symbol(s) => match s.name.as_str() {
+            "center" => TextAlign::Center,
+            "right" => TextAlign::Right,
+            _ => TextAlign::Left,
+        },
+        RValue::String(s, _) => match String::from_utf8_lossy(&s.borrow()).as_ref() {
+            "center" => TextAlign::Center,
+            "right" => TextAlign::Right,
+            _ => TextAlign::Left,
+        },
+        RValue::Integer(1) => TextAlign::Center,
+        RValue::Integer(2) => TextAlign::Right,
+        _ => TextAlign::Left,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ButtonId {
     Left,
@@ -6185,6 +6215,42 @@ fn emit_bank_rect_to_pixel_if_active(
     true
 }
 
+fn blit_shifted_clipped_spans(
+    pix: &mut surface::PixelSurface,
+    raw_spans: &[PixelSpan],
+    dx: i32,
+    dy: i32,
+    state: &DrawState,
+    col: i32,
+    alpha: f32,
+) {
+    let clipped: Vec<PixelSpan> = raw_spans
+        .iter()
+        .filter_map(|s| {
+            let sx = s.x + dx;
+            let sy = s.y + dy;
+            if let Some(c) = state.clip {
+                if sx >= c.x && sx < c.x + c.w && sy >= c.y && sy < c.y + c.h {
+                    Some(PixelSpan::new(sx, sy, s.w, s.h))
+                } else {
+                    None
+                }
+            } else {
+                Some(PixelSpan::new(sx, sy, s.w, s.h))
+            }
+        })
+        .collect();
+    if state.blend == BlendMode::Erase {
+        if alpha >= 0.5 {
+            pix.blit_spans(&clipped, None);
+        }
+    } else {
+        let col_idx = state.map_color_index(col) as u8;
+        pix.blit_spans(&clipped, Some(col_idx));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn emit_text_to_pixel_if_active(
     surfaces: &Rc<RefCell<surface::SurfaceStore>>,
     font: &BitmapFont,
@@ -6195,6 +6261,9 @@ fn emit_text_to_pixel_if_active(
     col: i32,
     size: u32,
     alpha: f32,
+    align: TextAlign,
+    outline: Option<i32>,
+    shadow: Option<i32>,
 ) -> bool {
     let mut store = surfaces.borrow_mut();
     let Some(pid) = store.active_pixel_surface_id() else {
@@ -6203,27 +6272,17 @@ fn emit_text_to_pixel_if_active(
     if alpha <= 0.0 {
         return true;
     }
-    let raw_spans = font.rasterize_text_spans(text, x, y, size);
-    // x, y はすでに cam_x/cam_y 減算済みなので clip のみ適用
-    let clipped: Vec<PixelSpan> = raw_spans
-        .into_iter()
-        .filter(|s| {
-            if let Some(c) = state.clip {
-                s.x >= c.x && s.x < c.x + c.w && s.y >= c.y && s.y < c.y + c.h
-            } else {
-                true
-            }
-        })
-        .collect();
+    let raw_spans = font.rasterize_text_spans_aligned(text, x, y, size, align);
     if let Some(surface::SurfaceEntry::Pixel(pix)) = store.entries.get_mut(&pid) {
-        if state.blend == BlendMode::Erase {
-            if alpha >= 0.5 {
-                pix.blit_spans(&clipped, None);
-            }
-        } else {
-            let col_idx = state.map_color_index(col) as u8;
-            pix.blit_spans(&clipped, Some(col_idx));
+        if let Some(sc) = shadow {
+            blit_shifted_clipped_spans(pix, &raw_spans, 1, 1, state, sc, alpha);
         }
+        if let Some(oc) = outline {
+            for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                blit_shifted_clipped_spans(pix, &raw_spans, dx, dy, state, oc, alpha);
+            }
+        }
+        blit_shifted_clipped_spans(pix, &raw_spans, 0, 0, state, col, alpha);
     }
     true
 }
@@ -8937,6 +8996,46 @@ fn register_engine_api(
 
     if headless {
         let emoji_for_headless_print = emoji_atlas.clone();
+        let font_for_headless_tw = bitmap_font.clone();
+        let cfg_for_headless_tw = config.clone();
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            "text_width",
+            Box::new(move |_vm, args| {
+                let text = args
+                    .first()
+                    .and_then(|v| String::try_from(v.as_ref()).ok())
+                    .unwrap_or_default();
+                let size = parse_measure_text_size_arg(
+                    args,
+                    1,
+                    cfg_for_headless_tw.borrow().resolved_text_size(),
+                );
+                let w = font_for_headless_tw.measure_text_width(&text, size);
+                Ok(Rc::new(RObject::integer(w as i64)))
+            }),
+        );
+        let font_for_headless_th = bitmap_font.clone();
+        let cfg_for_headless_th = config.clone();
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            "text_height",
+            Box::new(move |_vm, args| {
+                let text = args
+                    .first()
+                    .and_then(|v| String::try_from(v.as_ref()).ok())
+                    .unwrap_or_default();
+                let size = parse_measure_text_size_arg(
+                    args,
+                    1,
+                    cfg_for_headless_th.borrow().resolved_text_size(),
+                );
+                let h = font_for_headless_th.measure_text_height(&text, size);
+                Ok(Rc::new(RObject::integer(h as i64)))
+            }),
+        );
         let state_for_headless_print = draw_state.clone();
         let surfs_for_headless_print = surfaces.clone();
         let font_for_headless_print = bitmap_font.clone();
@@ -8955,6 +9054,9 @@ fn register_engine_api(
                 let col = arg_i32(args, 3, 7);
                 let size = parse_text_size_arg(args, cfg_for_headless_print.borrow().resolved_text_size());
                 let alpha = arg_alpha(args, 5);
+                let align = arg_text_align(args, 6);
+                let outline = arg_opt_i32(args, 7);
+                let shadow = arg_opt_i32(args, 8);
                 let _ = state.map_color(col);
                 if let Some(first) = args.first()
                     && let Ok(text) = String::try_from(first.as_ref())
@@ -8977,6 +9079,9 @@ fn register_engine_api(
                         col,
                         size,
                         alpha,
+                        align,
+                        outline,
+                        shadow,
                     );
                 }
                 Ok(Rc::new(RObject::nil()))
@@ -10800,7 +10905,45 @@ fn register_engine_api(
         }),
     );
 
-    // print_text(text, x = 0, y = 0, col = 7, size = nil): 1-bit ピクセルフォント + 絵文字でくっきりテキスト描画
+    // text_width(text = "", size = nil): テキスト描画幅を計測
+    let font_for_tw = bitmap_font.clone();
+    let cfg_for_tw = config.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "text_width",
+        Box::new(move |_vm, args| {
+            let text = args
+                .first()
+                .and_then(|v| String::try_from(v.as_ref()).ok())
+                .unwrap_or_default();
+            let size =
+                parse_measure_text_size_arg(args, 1, cfg_for_tw.borrow().resolved_text_size());
+            let w = font_for_tw.measure_text_width(&text, size);
+            Ok(Rc::new(RObject::integer(w as i64)))
+        }),
+    );
+
+    // text_height(text = "", size = nil): テキスト描画高さを計測
+    let font_for_th = bitmap_font.clone();
+    let cfg_for_th = config.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "text_height",
+        Box::new(move |_vm, args| {
+            let text = args
+                .first()
+                .and_then(|v| String::try_from(v.as_ref()).ok())
+                .unwrap_or_default();
+            let size =
+                parse_measure_text_size_arg(args, 1, cfg_for_th.borrow().resolved_text_size());
+            let h = font_for_th.measure_text_height(&text, size);
+            Ok(Rc::new(RObject::integer(h as i64)))
+        }),
+    );
+
+    // print_text(text, x = 0, y = 0, col = 7, size = nil, alpha = 1.0, align = :left, outline = nil, shadow = nil): 1-bit ピクセルフォント + 絵文字でくっきりテキスト描画
     let font_for_print = bitmap_font.clone();
     let emoji_for_print = emoji_atlas.clone();
     let state_for_print = draw_state;
@@ -10824,6 +10967,9 @@ fn register_engine_api(
             let col = arg_i32(args, 3, 7);
             let size = parse_text_size_arg(args, cfg_for_print.borrow().resolved_text_size());
             let alpha = arg_alpha(args, 5);
+            let align = arg_text_align(args, 6);
+            let outline = arg_opt_i32(args, 7);
+            let shadow = arg_opt_i32(args, 8);
             if alpha > 0.0
                 && !emit_text_to_pixel_if_active(
                     &surfs_for_print,
@@ -10835,15 +10981,23 @@ fn register_engine_api(
                     col,
                     size,
                     alpha,
+                    align,
+                    outline,
+                    shadow,
                 )
             {
-                font_for_print.draw_text_crisp_ex(
+                let outline_color = outline.map(|c| state.map_color_with_alpha(c, alpha));
+                let shadow_color = shadow.map(|c| state.map_color_with_alpha(c, alpha));
+                font_for_print.draw_text_crisp_styled(
                     &text,
                     x,
                     y,
                     state.map_color_with_alpha(col, alpha),
                     &emoji_for_print,
                     size,
+                    align,
+                    outline_color,
+                    shadow_color,
                 );
             }
             Ok(Rc::new(RObject::nil()))
