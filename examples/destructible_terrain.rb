@@ -19,9 +19,22 @@ class DestructibleTerrainDemo
       polyline([[0, 160], [80, 130], [160, 170], [240, 120], [320, 150]], 11, 3)
       # 鉄骨足場 (色 6: 硬い素材)
       rectfill(120, 128, 72, 10, 6)
-      # 落下砂の塊 (色 10: 黄色)
-      rectfill(200, 30, 28, 20, 10)
     end
+
+    # 落下砂の塊 (色 10: 黄色) — アクティブ粒子のみ追跡して高速化
+    @sand = []
+    y = 48
+    while y >= 32
+      x = 200
+      while x < 224
+        surface_pset(@terrain, x, y, 10)
+        @sand << [x, y]
+        x += 1
+      end
+      y -= 1
+    end
+    @sand_settled = false
+    @terrain_px = surface_count(@terrain)
   end
 
   def explode(bx, by, radius)
@@ -29,27 +42,37 @@ class DestructibleTerrainDemo
       blend(:erase)
       circfill(bx, by, radius, 0, 1.0)
     end
+    # 爆破で消えた砂を除外し、残りの砂を再活性化
+    @sand.reject! { |g| surface_pget(@terrain, g[0], g[1]) != 10 }
+    @sand_settled = false
+    @terrain_px = surface_count(@terrain)
   end
 
   def step_falling_sand
-    # 砂領域 (x: 180..250) を下から上へ走査して色 10 (砂) を落下させる
-    y = 238
-    while y >= 25
-      x = 180
-      while x <= 250
-        if surface_pget(@terrain, x, y) == 10
-          if !surface_pget(@terrain, x, y + 1)
-            surface_swap(@terrain, x, y, x, y + 1)
-          elsif !surface_pget(@terrain, x - 1, y + 1)
-            surface_swap(@terrain, x, y, x - 1, y + 1)
-          elsif !surface_pget(@terrain, x + 1, y + 1)
-            surface_swap(@terrain, x, y, x + 1, y + 1)
-          end
-        end
-        x += 1
+    return if @sand_settled || @sand.empty?
+
+    moved = false
+    @sand.each do |g|
+      x = g[0]
+      y = g[1]
+      next if y >= 238
+      if !surface_pget(@terrain, x, y + 1)
+        surface_swap(@terrain, x, y, x, y + 1)
+        g[1] = y + 1
+        moved = true
+      elsif x > 1 && !surface_pget(@terrain, x - 1, y + 1)
+        surface_swap(@terrain, x, y, x - 1, y + 1)
+        g[0] = x - 1
+        g[1] = y + 1
+        moved = true
+      elsif x < 318 && !surface_pget(@terrain, x + 1, y + 1)
+        surface_swap(@terrain, x, y, x + 1, y + 1)
+        g[0] = x + 1
+        g[1] = y + 1
+        moved = true
       end
-      y -= 1
     end
+    @sand_settled = !moved
   end
 
   def update
@@ -145,7 +168,7 @@ class DestructibleTerrainDemo
     # 照準レティクル
     circ(mouse_x, mouse_y, 4, 8)
     print_text("ARROWS:MOVE  CLICK/Z:FIRE  X:RESET", 6, 6, 7, 8)
-    print_text("TERRAIN PX: #{surface_count(@terrain)}", 6, 16, 10, 8)
+    print_text("TERRAIN PX: #{@terrain_px}", 6, 16, 10, 8)
   end
 end
 
