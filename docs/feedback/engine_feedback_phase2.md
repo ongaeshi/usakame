@@ -84,11 +84,12 @@ Phase 2 でビジュアル表現（光・影・多角形・高解像度）が大
 - **要望**: `text_width(str, size)`、`print_text(..., align: :center / :right, outline: 0)`（または `shadow: 0`）。
 - **対応内容**: `BitmapFont`（`src/font.rs`）に描画と同一ロジックの計測関数を追加し、`text_width(text = "", size = nil)` および `text_height(text = "", size = nil)` を実装した（ASCII・全角・半角カナ・絵文字混在・`\n` 複数行・`config(text_size: ...)` 連動対応）。また、`print_text` については Hash 確保による GC Alloc オーバーヘッドを避けるためキーワード引数ではなく位置引数で拡張し、`print_text(text, x, y, col, size, alpha, align, outline, shadow)` として `:left` / `:center` / `:right`（複数行時は行単位整列）、4近傍フチ取り（`outline`）、右下ドロップシャドウ（`shadow`）を `:pixel` サーフェスを含めて実装した。あわせて `docs/api.md` の更新とサンプル `examples/text_style.rb` を追加した。
 
-### ⑤ 入力の拡充（`mouse_wheel`・2P/ゲームパッド入力・`cursor` 表示制御）
+### ⑤ 入力の拡充（`mouse_wheel`・2P/ゲームパッド入力・`cursor` 表示制御） 【対応済み】
 - **理由**:
   - `mouse_wheel` が取れると、パズルやショップ画面でのスクロール、花火や色ガラスの素早い切替が直感的になる。
   - `32_star_trench.rb` や `37_slingshot_fortress.rb` のような照準系ゲームでは、OS標準カーソルを隠してゲーム内レティクルを表示する `show_cursor(false)` があると没入感が増す。
   - `btn(id, player = 0)` の2P対応・ゲームパッド対応が入ると、対戦・協力アクションの幅が一気に広がる。
+- **対応内容**: `mouse_wheel` と `show_mouse` は既存実装を確認し、`show_cursor` エイリアスを追加して `docs/api.md` に `mouse_wheel` / `show_cursor` を明記した。さらに `src/gamepad.rs`（Desktop 版 `gilrs` 0.11 / WASM 版 `web/index.html` の `usakame_gamepad` プラグインによる `navigator.getGamepads()` 連携）を新設し、`btn(id = 0, player = 0)` / `btnp(id = 0, player = 0)` および `gamepad_count()` を実装した（`player = 0` は 1P キーボード＋マウス＋ゲームパッド 1、`player = 1` は 2P キーボード `IJKL + U/O`＋ゲームパッド 2、`player = 2..3` はゲームパッド 3〜4 に対応）。あわせてサンプル `examples/input_2p_gamepad.rb` を追加した。
 
 ### ⑥ ピクセル取得・破壊可能地形向け API（`pget` / サーフェス直接書き換え） 【対応済み (`149c485`)】
 - **理由**: `pget(x, y)` やサーフェス単位のピクセル操作があると、Worms風の「地形を爆破して穴を開ける」ゲームや、落下砂・流体シミュレーションの高速化が可能になり、物理アクションの遊びの幅が大きく広がる。

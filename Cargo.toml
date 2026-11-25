@@ -19,6 +19,7 @@ image = { version = "0.24", default-features = false, features = ["jpeg"] }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 mruby-compiler2-sys = "0.5"
 flate2 = "1.1"
+gilrs = "0.11"
 
 # ビルド時に game.rb を .mrb バイトコードへ事前コンパイルして埋め込むため（WASM / 1バイナリ配布両対応）
 [build-dependencies]

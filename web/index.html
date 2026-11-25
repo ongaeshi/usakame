@@ -124,6 +124,40 @@
                     version: 1,
                     name: "usakame_storage"
                 });
+
+                let gpMasks = [0, 0, 0, 0];
+                miniquad_add_plugin({
+                    register_plugin: function (importObj) {
+                        importObj.env.usakame_gamepad_poll = function () {
+                            gpMasks = [0, 0, 0, 0];
+                            let count = 0;
+                            try {
+                                const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+                                for (let i = 0; i < pads.length && count < 4; i++) {
+                                    const p = pads[i];
+                                    if (!p || !p.connected) continue;
+                                    let mask = 0;
+                                    const b = p.buttons || [];
+                                    const ax = p.axes || [];
+                                    if ((b[14] && b[14].pressed) || (ax[0] !== undefined && ax[0] < -0.35)) mask |= 1;
+                                    if ((b[15] && b[15].pressed) || (ax[0] !== undefined && ax[0] > 0.35)) mask |= 2;
+                                    if ((b[12] && b[12].pressed) || (ax[1] !== undefined && ax[1] < -0.35)) mask |= 4;
+                                    if ((b[13] && b[13].pressed) || (ax[1] !== undefined && ax[1] > 0.35)) mask |= 8;
+                                    if (b[0] && b[0].pressed) mask |= 16;
+                                    if (b[1] && b[1].pressed) mask |= 32;
+                                    gpMasks[count] = mask;
+                                    count++;
+                                }
+                            } catch (_) {}
+                            return count;
+                        };
+                        importObj.env.usakame_gamepad_mask = function (slot) {
+                            return (slot >= 0 && slot < 4) ? gpMasks[slot] : 0;
+                        };
+                    },
+                    version: 1,
+                    name: "usakame_gamepad"
+                });
             }
         })();
     </script>

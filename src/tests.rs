@@ -6537,3 +6537,67 @@ $h = text_height("AB")
     assert_eq!(robject_to_i32(rt.vm.globals.get("$w").unwrap()), Some(16));
     assert_eq!(robject_to_i32(rt.vm.globals.get("$h").unwrap()), Some(16));
 }
+
+#[test]
+fn test_2p_keyboard_and_gamepad_btn_btnp() {
+    let script = r#"
+show_cursor(false)
+show_cursor(true)
+$mw = mouse_wheel
+$gp_init = gamepad_count
+
+def update
+end
+
+def draw
+  $p1_left = btn(:left, 0)
+  $p2_right = btn(:right, 1)
+  $p2_a = btn(:z, 1)
+  $p2_ap = btnp(:z, 1)
+  $p2_left = btn(:left, 1)
+  $p3_up = btn(:up, 2)
+  $p3_upp = btnp(:up, 2)
+  $gp_cnt = gamepad_count
+end
+"#;
+    let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
+    let mut rt = GameRuntime::new(&tail, &mrb, true).unwrap();
+
+    assert_eq!(robject_to_i32(rt.vm.globals.get("$gp_init").unwrap()), Some(0));
+
+    // Frame 1: 1P Left, 2P IJKL+U/O (L=Right, U=A), Gamepad 2 Up
+    {
+        let mut st = rt.input_state.borrow_mut();
+        st.set_frame_buttons_for_player(0, vec![ButtonId::Left]);
+        st.set_frame_buttons_for_player(1, vec![ButtonId::Key(KeyCode::L), ButtonId::Key(KeyCode::U)]);
+        st.gamepad
+            .borrow_mut()
+            .set_frame_masks([0, 0, PAD_UP, 0], 3);
+    }
+    rt.call_draw_result().unwrap();
+
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$p1_left").unwrap()), Some(true));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$p2_right").unwrap()), Some(true));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$p2_a").unwrap()), Some(true));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$p2_ap").unwrap()), Some(true));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$p2_left").unwrap()), Some(false));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$p3_up").unwrap()), Some(true));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$p3_upp").unwrap()), Some(true));
+    assert_eq!(robject_to_i32(rt.vm.globals.get("$gp_cnt").unwrap()), Some(3));
+
+    // Frame 2: same inputs held -> btn still true, btnp becomes false
+    {
+        let mut st = rt.input_state.borrow_mut();
+        st.set_frame_buttons_for_player(0, vec![ButtonId::Left]);
+        st.set_frame_buttons_for_player(1, vec![ButtonId::Key(KeyCode::L), ButtonId::Key(KeyCode::U)]);
+        st.gamepad
+            .borrow_mut()
+            .set_frame_masks([0, 0, PAD_UP, 0], 3);
+    }
+    rt.call_draw_result().unwrap();
+
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$p2_a").unwrap()), Some(true));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$p2_ap").unwrap()), Some(false));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$p3_up").unwrap()), Some(true));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$p3_upp").unwrap()), Some(false));
+}

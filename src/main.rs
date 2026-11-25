@@ -10,9 +10,11 @@ pub mod save;
 pub mod surface;
 pub mod config;
 pub mod font;
+pub mod gamepad;
 
 pub use config::*;
 pub use font::*;
+pub use gamepad::*;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -2196,16 +2198,30 @@ impl ButtonId {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct InputState {
     pub override_enabled: bool,
     pub current_down: Vec<ButtonId>,
     pub prev_down: Vec<ButtonId>,
+    pub player_down: [Vec<ButtonId>; MAX_GAMEPADS],
+    pub player_prev_down: [Vec<ButtonId>; MAX_GAMEPADS],
+    pub gamepad: Rc<RefCell<GamepadState>>,
 }
 
 impl InputState {
     pub fn new() -> Self {
-        Self::default()
+        Self::new_with_headless(true)
+    }
+
+    pub fn new_with_headless(headless: bool) -> Self {
+        Self {
+            override_enabled: false,
+            current_down: Vec::new(),
+            prev_down: Vec::new(),
+            player_down: Default::default(),
+            player_prev_down: Default::default(),
+            gamepad: Rc::new(RefCell::new(GamepadState::new(headless))),
+        }
     }
 
     pub fn set_frame_buttons(&mut self, buttons: Vec<ButtonId>) {
@@ -2213,104 +2229,130 @@ impl InputState {
         self.prev_down = std::mem::replace(&mut self.current_down, buttons);
     }
 
-    pub fn is_down(&self, btn: ButtonId) -> bool {
-        self.current_down.contains(&btn)
+    pub fn set_frame_buttons_for_player(&mut self, player: usize, buttons: Vec<ButtonId>) {
+        if player >= MAX_GAMEPADS {
+            return;
+        }
+        self.override_enabled = true;
+        if player == 0 {
+            self.prev_down = std::mem::replace(&mut self.current_down, buttons.clone());
+        }
+        self.player_prev_down[player] = std::mem::replace(&mut self.player_down[player], buttons);
+    }
+
+    fn contains_button_alias(list: &[ButtonId], btn: ButtonId) -> bool {
+        list.contains(&btn)
             || match btn {
                 ButtonId::Left => {
-                    self.current_down.contains(&ButtonId::Key(KeyCode::Left))
-                        || self.current_down.contains(&ButtonId::Key(KeyCode::A))
+                    list.contains(&ButtonId::Key(KeyCode::Left))
+                        || list.contains(&ButtonId::Key(KeyCode::A))
                 }
                 ButtonId::Right => {
-                    self.current_down.contains(&ButtonId::Key(KeyCode::Right))
-                        || self.current_down.contains(&ButtonId::Key(KeyCode::D))
+                    list.contains(&ButtonId::Key(KeyCode::Right))
+                        || list.contains(&ButtonId::Key(KeyCode::D))
                 }
                 ButtonId::Up => {
-                    self.current_down.contains(&ButtonId::Key(KeyCode::Up))
-                        || self.current_down.contains(&ButtonId::Key(KeyCode::W))
+                    list.contains(&ButtonId::Key(KeyCode::Up))
+                        || list.contains(&ButtonId::Key(KeyCode::W))
                 }
                 ButtonId::Down => {
-                    self.current_down.contains(&ButtonId::Key(KeyCode::Down))
-                        || self.current_down.contains(&ButtonId::Key(KeyCode::S))
+                    list.contains(&ButtonId::Key(KeyCode::Down))
+                        || list.contains(&ButtonId::Key(KeyCode::S))
                 }
                 ButtonId::A => {
-                    self.current_down.contains(&ButtonId::Key(KeyCode::Z))
-                        || self.current_down.contains(&ButtonId::Key(KeyCode::Space))
+                    list.contains(&ButtonId::Key(KeyCode::Z))
+                        || list.contains(&ButtonId::Key(KeyCode::Space))
                 }
                 ButtonId::B => {
-                    self.current_down.contains(&ButtonId::Key(KeyCode::X))
-                        || self.current_down.contains(&ButtonId::Key(KeyCode::Enter))
+                    list.contains(&ButtonId::Key(KeyCode::X))
+                        || list.contains(&ButtonId::Key(KeyCode::Enter))
                 }
                 ButtonId::Key(KeyCode::Left) | ButtonId::Key(KeyCode::A) => {
-                    self.current_down.contains(&ButtonId::Left)
+                    list.contains(&ButtonId::Left)
                 }
                 ButtonId::Key(KeyCode::Right) | ButtonId::Key(KeyCode::D) => {
-                    self.current_down.contains(&ButtonId::Right)
+                    list.contains(&ButtonId::Right)
                 }
                 ButtonId::Key(KeyCode::Up) | ButtonId::Key(KeyCode::W) => {
-                    self.current_down.contains(&ButtonId::Up)
+                    list.contains(&ButtonId::Up)
                 }
                 ButtonId::Key(KeyCode::Down) | ButtonId::Key(KeyCode::S) => {
-                    self.current_down.contains(&ButtonId::Down)
+                    list.contains(&ButtonId::Down)
                 }
                 ButtonId::Key(KeyCode::Z) | ButtonId::Key(KeyCode::Space) => {
-                    self.current_down.contains(&ButtonId::A)
+                    list.contains(&ButtonId::A)
                 }
                 ButtonId::Key(KeyCode::X) | ButtonId::Key(KeyCode::Enter) => {
-                    self.current_down.contains(&ButtonId::B)
+                    list.contains(&ButtonId::B)
                 }
                 _ => false,
             }
     }
 
-    pub fn is_pressed(&self, btn: ButtonId) -> bool {
-        let is_now = self.is_down(btn);
-        let was_before = self.prev_down.contains(&btn)
+    fn contains_2p_button_alias(list: &[ButtonId], btn: ButtonId) -> bool {
+        list.contains(&btn)
             || match btn {
-                ButtonId::Left => {
-                    self.prev_down.contains(&ButtonId::Key(KeyCode::Left))
-                        || self.prev_down.contains(&ButtonId::Key(KeyCode::A))
-                }
-                ButtonId::Right => {
-                    self.prev_down.contains(&ButtonId::Key(KeyCode::Right))
-                        || self.prev_down.contains(&ButtonId::Key(KeyCode::D))
-                }
-                ButtonId::Up => {
-                    self.prev_down.contains(&ButtonId::Key(KeyCode::Up))
-                        || self.prev_down.contains(&ButtonId::Key(KeyCode::W))
-                }
-                ButtonId::Down => {
-                    self.prev_down.contains(&ButtonId::Key(KeyCode::Down))
-                        || self.prev_down.contains(&ButtonId::Key(KeyCode::S))
-                }
-                ButtonId::A => {
-                    self.prev_down.contains(&ButtonId::Key(KeyCode::Z))
-                        || self.prev_down.contains(&ButtonId::Key(KeyCode::Space))
-                }
-                ButtonId::B => {
-                    self.prev_down.contains(&ButtonId::Key(KeyCode::X))
-                        || self.prev_down.contains(&ButtonId::Key(KeyCode::Enter))
-                }
-                ButtonId::Key(KeyCode::Left) | ButtonId::Key(KeyCode::A) => {
-                    self.prev_down.contains(&ButtonId::Left)
-                }
-                ButtonId::Key(KeyCode::Right) | ButtonId::Key(KeyCode::D) => {
-                    self.prev_down.contains(&ButtonId::Right)
-                }
-                ButtonId::Key(KeyCode::Up) | ButtonId::Key(KeyCode::W) => {
-                    self.prev_down.contains(&ButtonId::Up)
-                }
-                ButtonId::Key(KeyCode::Down) | ButtonId::Key(KeyCode::S) => {
-                    self.prev_down.contains(&ButtonId::Down)
-                }
-                ButtonId::Key(KeyCode::Z) | ButtonId::Key(KeyCode::Space) => {
-                    self.prev_down.contains(&ButtonId::A)
-                }
-                ButtonId::Key(KeyCode::X) | ButtonId::Key(KeyCode::Enter) => {
-                    self.prev_down.contains(&ButtonId::B)
-                }
+                ButtonId::Left => list.contains(&ButtonId::Key(KeyCode::J)),
+                ButtonId::Right => list.contains(&ButtonId::Key(KeyCode::L)),
+                ButtonId::Up => list.contains(&ButtonId::Key(KeyCode::I)),
+                ButtonId::Down => list.contains(&ButtonId::Key(KeyCode::K)),
+                ButtonId::A => list.contains(&ButtonId::Key(KeyCode::U)),
+                ButtonId::B => list.contains(&ButtonId::Key(KeyCode::O)),
                 _ => false,
-            };
-        is_now && !was_before
+            }
+    }
+
+    pub fn is_down(&self, btn: ButtonId) -> bool {
+        Self::contains_button_alias(&self.current_down, btn)
+    }
+
+    pub fn is_pressed(&self, btn: ButtonId) -> bool {
+        Self::contains_button_alias(&self.current_down, btn)
+            && !Self::contains_button_alias(&self.prev_down, btn)
+    }
+
+    pub fn is_down_for_player(&self, btn: ButtonId, player: usize) -> bool {
+        if player == 0 {
+            self.is_down(btn)
+                || Self::contains_button_alias(&self.player_down[0], btn)
+                || self.gamepad.borrow().is_down(0, btn)
+        } else if player == 1 {
+            Self::contains_2p_button_alias(&self.player_down[1], btn)
+                || self.gamepad.borrow().is_down(1, btn)
+        } else if player < MAX_GAMEPADS {
+            self.player_down[player].contains(&btn) || self.gamepad.borrow().is_down(player, btn)
+        } else {
+            false
+        }
+    }
+
+    pub fn is_pressed_for_player(&self, btn: ButtonId, player: usize) -> bool {
+        if player == 0 {
+            let cur = self.is_down(btn)
+                || Self::contains_button_alias(&self.player_down[0], btn)
+                || self.gamepad.borrow().is_down(0, btn);
+            let prev = Self::contains_button_alias(&self.prev_down, btn)
+                || Self::contains_button_alias(&self.player_prev_down[0], btn)
+                || self.gamepad.borrow().is_down(0, btn)
+                    && !self.gamepad.borrow().is_pressed(0, btn);
+            cur && !prev
+        } else if player == 1 {
+            let cur = Self::contains_2p_button_alias(&self.player_down[1], btn)
+                || self.gamepad.borrow().is_down(1, btn);
+            let prev = Self::contains_2p_button_alias(&self.player_prev_down[1], btn)
+                || (self.gamepad.borrow().is_down(1, btn)
+                    && !self.gamepad.borrow().is_pressed(1, btn));
+            cur && !prev
+        } else if player < MAX_GAMEPADS {
+            let cur = self.player_down[player].contains(&btn)
+                || self.gamepad.borrow().is_down(player, btn);
+            let prev = self.player_prev_down[player].contains(&btn)
+                || (self.gamepad.borrow().is_down(player, btn)
+                    && !self.gamepad.borrow().is_pressed(player, btn));
+            cur && !prev
+        } else {
+            false
+        }
     }
 }
 
@@ -2539,6 +2581,46 @@ pub fn is_button_pressed(btn: ButtonId) -> bool {
         ButtonId::MouseRight => is_mouse_button_pressed(MouseButton::Right),
         ButtonId::MouseMiddle => is_mouse_button_pressed(MouseButton::Middle),
         ButtonId::Key(k) => is_key_pressed(k),
+    }
+}
+
+pub fn is_button_down_for_player(btn: ButtonId, player: usize, gamepad: &GamepadState) -> bool {
+    match player {
+        0 => is_button_down(btn) || gamepad.is_down(0, btn),
+        1 => {
+            let kb = match btn {
+                ButtonId::Left => is_key_down(KeyCode::J),
+                ButtonId::Right => is_key_down(KeyCode::L),
+                ButtonId::Up => is_key_down(KeyCode::I),
+                ButtonId::Down => is_key_down(KeyCode::K),
+                ButtonId::A => is_key_down(KeyCode::U),
+                ButtonId::B => is_key_down(KeyCode::O),
+                _ => false,
+            };
+            kb || gamepad.is_down(1, btn)
+        }
+        2 | 3 => gamepad.is_down(player, btn),
+        _ => false,
+    }
+}
+
+pub fn is_button_pressed_for_player(btn: ButtonId, player: usize, gamepad: &GamepadState) -> bool {
+    match player {
+        0 => is_button_pressed(btn) || gamepad.is_pressed(0, btn),
+        1 => {
+            let kb = match btn {
+                ButtonId::Left => is_key_pressed(KeyCode::J),
+                ButtonId::Right => is_key_pressed(KeyCode::L),
+                ButtonId::Up => is_key_pressed(KeyCode::I),
+                ButtonId::Down => is_key_pressed(KeyCode::K),
+                ButtonId::A => is_key_pressed(KeyCode::U),
+                ButtonId::B => is_key_pressed(KeyCode::O),
+                _ => false,
+            };
+            kb || gamepad.is_pressed(1, btn)
+        }
+        2 | 3 => gamepad.is_pressed(player, btn),
+        _ => false,
     }
 }
 
@@ -9802,16 +9884,20 @@ fn register_engine_api(
                 } else {
                     parse_button_arg(args, 0)
                 };
-                let pressed = btn
-                    .map(|b| {
+                let player = arg_i32(args, 1, 0);
+                let pressed = if player < 0 {
+                    false
+                } else {
+                    btn.map(|b| {
                         let st = input_state_for_btn.borrow();
                         if st.override_enabled {
-                            st.is_down(b)
+                            st.is_down_for_player(b, player as usize)
                         } else {
                             false
                         }
                     })
-                    .unwrap_or(false);
+                    .unwrap_or(false)
+                };
                 Ok(Rc::new(RObject::boolean(pressed)))
             }),
         );
@@ -9826,17 +9912,31 @@ fn register_engine_api(
                 } else {
                     parse_button_arg(args, 0)
                 };
-                let pressed = btn
-                    .map(|b| {
+                let player = arg_i32(args, 1, 0);
+                let pressed = if player < 0 {
+                    false
+                } else {
+                    btn.map(|b| {
                         let st = input_state_for_btnp.borrow();
                         if st.override_enabled {
-                            st.is_pressed(b)
+                            st.is_pressed_for_player(b, player as usize)
                         } else {
                             false
                         }
                     })
-                    .unwrap_or(false);
+                    .unwrap_or(false)
+                };
                 Ok(Rc::new(RObject::boolean(pressed)))
+            }),
+        );
+        let input_state_for_gp_cnt = input_state.clone();
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            "gamepad_count",
+            Box::new(move |_vm, _args| {
+                let cnt = input_state_for_gp_cnt.borrow().gamepad.borrow().connected_count();
+                Ok(Rc::new(RObject::integer(cnt as i64)))
             }),
         );
         mrb_define_cmethod(
@@ -9861,7 +9961,19 @@ fn register_engine_api(
             vm,
             obj_class.clone(),
             "show_mouse",
-            Box::new(|_vm, _args| Ok(Rc::new(RObject::nil()))),
+            Box::new(|_vm, args| {
+                let _ = arg_bool(args, 0, true);
+                Ok(Rc::new(RObject::nil()))
+            }),
+        );
+        mrb_define_cmethod(
+            vm,
+            obj_class.clone(),
+            "show_cursor",
+            Box::new(|_vm, args| {
+                let _ = arg_bool(args, 0, true);
+                Ok(Rc::new(RObject::nil()))
+            }),
         );
         mrb_define_cmethod(
             vm,
@@ -10793,7 +10905,7 @@ fn register_engine_api(
         }),
     );
 
-    // btn(id_or_sym): ボタン入力判定（キーボード: 0..5 または :left, :right, :up, :down, :z, :x / マウス: 6..8 または :mouse_l, :mouse_r, :mouse_m）
+    // btn(id_or_sym, player = 0): ボタン入力判定（1P/2Pキーボード・マウス・ゲームパッド対応）
     let input_state_for_btn = input_state.clone();
     mrb_define_cmethod(
         vm,
@@ -10805,21 +10917,26 @@ fn register_engine_api(
             } else {
                 parse_button_arg(args, 0)
             };
-            let pressed = btn
-                .map(|b| {
+            let player = arg_i32(args, 1, 0);
+            let pressed = if player < 0 {
+                false
+            } else {
+                btn.map(|b| {
                     let st = input_state_for_btn.borrow();
                     if st.override_enabled {
-                        st.is_down(b)
+                        st.is_down_for_player(b, player as usize)
                     } else {
-                        is_button_down(b)
+                        let gp = st.gamepad.borrow();
+                        is_button_down_for_player(b, player as usize, &gp)
                     }
                 })
-                .unwrap_or(false);
+                .unwrap_or(false)
+            };
             Ok(Rc::new(RObject::boolean(pressed)))
         }),
     );
 
-    // btnp(id_or_sym): ボタンがこのフレームで押された瞬間か判定
+    // btnp(id_or_sym, player = 0): ボタンがこのフレームで押された瞬間か判定
     let input_state_for_btnp = input_state.clone();
     mrb_define_cmethod(
         vm,
@@ -10831,17 +10948,34 @@ fn register_engine_api(
             } else {
                 parse_button_arg(args, 0)
             };
-            let pressed = btn
-                .map(|b| {
+            let player = arg_i32(args, 1, 0);
+            let pressed = if player < 0 {
+                false
+            } else {
+                btn.map(|b| {
                     let st = input_state_for_btnp.borrow();
                     if st.override_enabled {
-                        st.is_pressed(b)
+                        st.is_pressed_for_player(b, player as usize)
                     } else {
-                        is_button_pressed(b)
+                        let gp = st.gamepad.borrow();
+                        is_button_pressed_for_player(b, player as usize, &gp)
                     }
                 })
-                .unwrap_or(false);
+                .unwrap_or(false)
+            };
             Ok(Rc::new(RObject::boolean(pressed)))
+        }),
+    );
+
+    // gamepad_count: 接続中の物理ゲームパッド台数を返す
+    let input_state_for_gp_cnt = input_state.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "gamepad_count",
+        Box::new(move |_vm, _args| {
+            let cnt = input_state_for_gp_cnt.borrow().gamepad.borrow().connected_count();
+            Ok(Rc::new(RObject::integer(cnt as i64)))
         }),
     );
 
@@ -10882,11 +11016,21 @@ fn register_engine_api(
         }),
     );
 
-    // show_mouse(visible = true): OS マウスカーソルの表示/非表示を切り替え
+    // show_mouse(visible = true) / show_cursor(visible = true): OS マウスカーソルの表示/非表示を切り替え
     mrb_define_cmethod(
         vm,
         obj_class.clone(),
         "show_mouse",
+        Box::new(|_vm, args| {
+            let visible = arg_bool(args, 0, true);
+            show_mouse(visible);
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "show_cursor",
         Box::new(|_vm, args| {
             let visible = arg_bool(args, 0, true);
             show_mouse(visible);
@@ -11465,7 +11609,7 @@ impl GameRuntime {
         let save_store = Rc::new(RefCell::new(save::SaveStore::new(headless)));
         let config = Rc::new(RefCell::new(AppConfig::default()));
         let restart_requested = Rc::new(RefCell::new(false));
-        let input_state = Rc::new(RefCell::new(InputState::new()));
+        let input_state = Rc::new(RefCell::new(InputState::new_with_headless(headless)));
         let sprite_names = Rc::new(RefCell::new(sprite_names_map));
         let map_aliases = Rc::new(RefCell::new(map_aliases_map));
         let next_scene = Rc::new(RefCell::new(None));
@@ -11817,6 +11961,7 @@ impl GameRuntime {
 
     pub fn call_update_result(&mut self) -> Result<(), ScriptError> {
         self.apply_pending_scene_transition();
+        self.input_state.borrow().gamepad.borrow_mut().poll();
         let res = if let Some(ref scene) = self.current_scene {
             if object_has_method(scene, "update") {
                 mrb_funcall(&mut self.vm, Some(scene.clone()), "update", &[])
