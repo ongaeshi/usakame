@@ -5514,6 +5514,20 @@ fn rebind_object_to_vm(obj: &Rc<RObject>, vm: &VM) -> Rc<RObject> {
     }
 }
 
+fn compile_tail_from_rb_file(p: &Path) -> String {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        cli::compile_ruby_script_file(p)
+            .map(|(_, t, _)| t)
+            .unwrap_or_default()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = p;
+        String::new()
+    }
+}
+
 fn register_engine_api(
     vm: &mut VM,
     sprites: Rc<RefCell<HashMap<i32, SpriteData>>>,
@@ -6169,9 +6183,7 @@ fn register_engine_api(
 
             let p = std::path::Path::new(&path_str);
             let tail = if p.extension().and_then(|s| s.to_str()) == Some("rb") {
-                cli::compile_ruby_script_file(p)
-                    .map(|(_, t, _)| t)
-                    .unwrap_or_default()
+                compile_tail_from_rb_file(p)
             } else if p.is_file() {
                 std::fs::read_to_string(p).unwrap_or_default()
             } else {
@@ -6280,9 +6292,7 @@ fn register_engine_api(
             }
 
             let tail = if p.extension().and_then(|s| s.to_str()) == Some("rb") {
-                cli::compile_ruby_script_file(p)
-                    .map(|(_, t, _)| t)
-                    .unwrap_or_default()
+                compile_tail_from_rb_file(p)
             } else if p.is_file() {
                 std::fs::read_to_string(p).unwrap_or_default()
             } else {
@@ -6331,9 +6341,7 @@ fn register_engine_api(
                 .unwrap_or_default();
             let p = std::path::Path::new(&path_str);
             let tail = if p.extension().and_then(|s| s.to_str()) == Some("rb") {
-                cli::compile_ruby_script_file(p)
-                    .map(|(_, t, _)| t)
-                    .unwrap_or_default()
+                compile_tail_from_rb_file(p)
             } else if p.is_file() {
                 let content = std::fs::read_to_string(p).unwrap_or_default();
                 if p.extension().and_then(|s| s.to_str()) == Some("map") {
@@ -6385,9 +6393,7 @@ fn register_engine_api(
             let p = std::path::Path::new(&path_str);
             let base_dir = p.parent();
             let tail = if p.extension().and_then(|s| s.to_str()) == Some("rb") {
-                cli::compile_ruby_script_file(p)
-                    .map(|(_, t, _)| t)
-                    .unwrap_or_default()
+                compile_tail_from_rb_file(p)
             } else if p.is_file() {
                 let content = std::fs::read_to_string(p).unwrap_or_default();
                 if p.extension().and_then(|s| s.to_str()) == Some("map") {
@@ -6467,9 +6473,7 @@ fn register_engine_api(
 
             // 2. スクリプトまたは外部リソースファイルからのパース
             let tail = if p.extension().and_then(|s| s.to_str()) == Some("rb") {
-                cli::compile_ruby_script_file(p)
-                    .map(|(_, t, _)| t)
-                    .unwrap_or_default()
+                compile_tail_from_rb_file(p)
             } else if p.is_file() {
                 let content = std::fs::read_to_string(p).unwrap_or_default();
                 if p.extension().and_then(|s| s.to_str()) == Some("map") {
@@ -6588,9 +6592,7 @@ fn register_engine_api(
 
             let p = std::path::Path::new(&path_str);
             let tail = if p.extension().and_then(|s| s.to_str()) == Some("rb") {
-                cli::compile_ruby_script_file(p)
-                    .map(|(_, t, _)| t)
-                    .unwrap_or_default()
+                compile_tail_from_rb_file(p)
             } else if p.is_file() {
                 std::fs::read_to_string(p).unwrap_or_default()
             } else {
@@ -6645,9 +6647,7 @@ fn register_engine_api(
             }
             let p = std::path::Path::new(&path_str);
             let tail = if p.extension().and_then(|s| s.to_str()) == Some("rb") {
-                cli::compile_ruby_script_file(p)
-                    .map(|(_, t, _)| t)
-                    .unwrap_or_default()
+                compile_tail_from_rb_file(p)
             } else if p.is_file() {
                 std::fs::read_to_string(p).unwrap_or_default()
             } else {
@@ -6690,9 +6690,7 @@ fn register_engine_api(
 
             let p = std::path::Path::new(&path_str);
             let tail = if p.extension().and_then(|s| s.to_str()) == Some("rb") {
-                cli::compile_ruby_script_file(p)
-                    .map(|(_, t, _)| t)
-                    .unwrap_or_default()
+                compile_tail_from_rb_file(p)
             } else if p.is_file() {
                 std::fs::read_to_string(p).unwrap_or_default()
             } else {
@@ -11133,6 +11131,20 @@ fn format_val_for_inspector(obj: &RObject) -> String {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+fn sub_game_load_internal(script_path: &Path, _headless: bool) -> Result<bool, mrubyedge::Error> {
+    SUB_GAME_MGR.with(|mgr_cell| {
+        let mut mgr = mgr_cell.borrow_mut();
+        mgr.active_game = None;
+        mgr.last_error = Some(format!(
+            "sub_game_load({}) is not supported in WASM",
+            script_path.display()
+        ));
+    });
+    Ok(false)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn sub_game_load_internal(script_path: &Path, headless: bool) -> Result<bool, mrubyedge::Error> {
     if !script_path.exists() {
         SUB_GAME_MGR.with(|mgr_cell| {
