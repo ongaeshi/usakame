@@ -4753,11 +4753,27 @@ fn register_save_api(vm: &mut VM, save_store: Rc<RefCell<save::SaveStore>>) {
     );
 }
 
-/// サウンド API (`sfx`, `stop_sfx`, `music`, `stop_music`) を登録する
+fn arg_waveform(args: &[Rc<RObject>], index: usize) -> sound::Waveform {
+    let Some(obj) = args.get(index) else {
+        return sound::Waveform::Square;
+    };
+    match &obj.value {
+        RValue::Symbol(sym) => sound::Waveform::from_name(&sym.name).unwrap_or_default(),
+        RValue::String(_, _) => String::try_from(obj.as_ref())
+            .ok()
+            .and_then(|s| sound::Waveform::from_name(&s))
+            .unwrap_or_default(),
+        RValue::Integer(v) => sound::Waveform::from_name(&v.to_string()).unwrap_or_default(),
+        RValue::Float(v) => sound::Waveform::from_name(&(*v as i32).to_string()).unwrap_or_default(),
+        _ => sound::Waveform::Square,
+    }
+}
+
+/// サウンド API (`sfx`, `tone`, `stop_sfx`, `music`, `stop_music`, `master_vol`, `sfx_vol`, `music_vol`) を登録する
 fn register_sound_api(vm: &mut VM, sound_bank: Rc<RefCell<sound::SoundBank>>) {
     let obj_class = vm.object_class.clone();
 
-    // sfx(id_or_spec, channel = -1, volume = 1.0):
+    // sfx(id_or_spec, channel = -1, volume = 1.0, pitch = 1.0):
     //   整数: `@SFX` 定義番号 / シンボル: プリセット (`:jump` 等) / 文字列: インラインMML (`"square c3 e3 g3"`)
     //   id が -1 の場合は該当チャンネル（-1なら全チャンネル）を停止
     let bank_for_sfx = sound_bank.clone();
@@ -4768,12 +4784,33 @@ fn register_sound_api(vm: &mut VM, sound_bank: Rc<RefCell<sound::SoundBank>>) {
         Box::new(move |_vm, args| {
             let channel = arg_i32(args, 1, -1);
             let volume = arg_f32(args, 2, 1.0);
+            let pitch = arg_f32(args, 3, 1.0);
             let mut bank = bank_for_sfx.borrow_mut();
             match arg_sfx(args, 0) {
-                Some(SfxArg::Id(id)) => bank.queue_play_sfx_id(id, channel, volume),
-                Some(SfxArg::Spec(spec)) => bank.queue_play_sfx_inline(&spec, channel, volume),
+                Some(SfxArg::Id(id)) => bank.queue_play_sfx_id(id, channel, volume, pitch),
+                Some(SfxArg::Spec(spec)) => bank.queue_play_sfx_inline(&spec, channel, volume, pitch),
                 None => {}
             }
+            Ok(Rc::new(RObject::nil()))
+        }),
+    );
+
+    // tone(freq, dur = 0.1, wave = :square, vol = 0.5, slide = 0.0):
+    //   周波数と長さを直接指定して単音を鳴らす
+    let bank_for_tone = sound_bank.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "tone",
+        Box::new(move |_vm, args| {
+            let freq = arg_f32(args, 0, 440.0);
+            let dur = arg_f32(args, 1, 0.1);
+            let wave = arg_waveform(args, 2);
+            let vol = arg_f32(args, 3, 0.5);
+            let slide = arg_f32(args, 4, 0.0);
+            bank_for_tone
+                .borrow_mut()
+                .queue_play_tone(freq, dur, wave, vol, slide);
             Ok(Rc::new(RObject::nil()))
         }),
     );
@@ -4791,30 +4828,95 @@ fn register_sound_api(vm: &mut VM, sound_bank: Rc<RefCell<sound::SoundBank>>) {
         }),
     );
 
-    // music(id, loop = true, volume = 1.0): `@MUSIC` 定義の BGM を再生（id が -1 なら停止）
+    // music(id, loop = true, volume = 1.0): `@MUSIC` 定義の BGM を再生（nil または -1 で停止）
     let bank_for_music = sound_bank.clone();
     mrb_define_cmethod(
         vm,
         obj_class.clone(),
         "music",
         Box::new(move |_vm, args| {
-            let id = arg_i32(args, 0, 0);
-            let looped = arg_bool(args, 1, true);
-            let volume = arg_f32(args, 2, 1.0);
-            bank_for_music.borrow_mut().queue_play_music(id, looped, volume);
+            let id_opt = match args.first().map(|v| &v.value) {
+                None | Some(RValue::Nil) => None,
+                _ => Some(arg_i32(args, 0, -1)),
+            };
+            match id_opt {
+                None => bank_for_music.borrow_mut().queue_stop_music(),
+                Some(id) => {
+                    let looped = arg_bool(args, 1, true);
+                    let volume = arg_f32(args, 2, 1.0);
+                    bank_for_music.borrow_mut().queue_play_music(id, looped, volume);
+                }
+            }
             Ok(Rc::new(RObject::nil()))
         }),
     );
 
     // stop_music(): BGM を停止
-    let bank_for_stop_music = sound_bank;
+    let bank_for_stop_music = sound_bank.clone();
     mrb_define_cmethod(
         vm,
-        obj_class,
+        obj_class.clone(),
         "stop_music",
         Box::new(move |_vm, _args| {
             bank_for_stop_music.borrow_mut().queue_stop_music();
             Ok(Rc::new(RObject::nil()))
+        }),
+    );
+
+    // master_vol(v = nil): 全体音量の取得・設定 (0.0..=1.0)
+    let bank_for_master_vol = sound_bank.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "master_vol",
+        Box::new(move |_vm, args| {
+            let mut bank = bank_for_master_vol.borrow_mut();
+            let val = match args.first().map(|v| &v.value) {
+                None | Some(RValue::Nil) => bank.master_volume,
+                _ => {
+                    let v = arg_f32(args, 0, bank.master_volume);
+                    bank.set_master_volume(v)
+                }
+            };
+            Ok(Rc::new(RObject::float(val as f64)))
+        }),
+    );
+
+    // sfx_vol(v = nil): SFX カテゴリの音量取得・設定 (0.0..=1.0)
+    let bank_for_sfx_vol = sound_bank.clone();
+    mrb_define_cmethod(
+        vm,
+        obj_class.clone(),
+        "sfx_vol",
+        Box::new(move |_vm, args| {
+            let mut bank = bank_for_sfx_vol.borrow_mut();
+            let val = match args.first().map(|v| &v.value) {
+                None | Some(RValue::Nil) => bank.sfx_volume,
+                _ => {
+                    let v = arg_f32(args, 0, bank.sfx_volume);
+                    bank.set_sfx_volume(v)
+                }
+            };
+            Ok(Rc::new(RObject::float(val as f64)))
+        }),
+    );
+
+    // music_vol(v = nil): BGM カテゴリの音量取得・設定 (0.0..=1.0)
+    let bank_for_music_vol = sound_bank;
+    mrb_define_cmethod(
+        vm,
+        obj_class,
+        "music_vol",
+        Box::new(move |_vm, args| {
+            let mut bank = bank_for_music_vol.borrow_mut();
+            let val = match args.first().map(|v| &v.value) {
+                None | Some(RValue::Nil) => bank.music_volume,
+                _ => {
+                    let v = arg_f32(args, 0, bank.music_volume);
+                    bank.set_music_volume(v)
+                }
+            };
+            Ok(Rc::new(RObject::float(val as f64)))
         }),
     );
 }
@@ -11878,6 +11980,9 @@ pub struct GameRuntime {
 impl Drop for GameRuntime {
     fn drop(&mut self) {
         self.save_store.borrow_mut().flush_if_dirty();
+        if !self.headless {
+            self.sound_bank.borrow_mut().stop_all_audio();
+        }
     }
 }
 
@@ -12170,18 +12275,58 @@ impl GameRuntime {
         sound::parse_ruby_sounds_globals(&new_vm, &mut new_sfx_map, &mut new_music_map);
         {
             let mut bank = self.sound_bank.borrow_mut();
-            // トップレベル実行中に積まれたサウンドコマンドは破棄し、BGM 状態を復元
-            bank.pending_commands.truncate(prev_pending_len);
+            let top_level_cmds: Vec<sound::AudioCommand> =
+                bank.pending_commands.drain(prev_pending_len..).collect();
             bank.current_music_id = prev_music_id;
             bank.update_definitions(new_sfx_map, new_music_map);
-            // 再生中 BGM の定義が書き換わっていたら新しい内容で再生し直す
-            if let Some(id) = prev_music_id {
-                let new_spec = bank.music.get(&id).map(|m| m.spec.clone());
-                if new_spec != prev_music_spec {
-                    if new_spec.is_some() {
-                        bank.queue_play_music(id, true, 1.0);
-                    } else {
+
+            // リロード時に鳴りっぱなしのループ/長尺 SFX を停止する
+            bank.queue_stop_sfx(-1);
+
+            // トップレベルで music(...) / stop_music が呼ばれた場合はその変更を反映し、
+            // 同じ BGM ID かつ定義変更なしなら途切れず継続する
+            let mut top_music_cmd: Option<(Option<i32>, bool, f32)> = None;
+            for cmd in top_level_cmds {
+                match cmd {
+                    sound::AudioCommand::PlayMusic { id, looped, volume } => {
+                        top_music_cmd = Some((Some(id), looped, volume));
+                    }
+                    sound::AudioCommand::StopMusic => {
+                        top_music_cmd = Some((None, false, 1.0));
+                    }
+                    _ => {}
+                }
+            }
+
+            match top_music_cmd {
+                Some((Some(new_id), looped, volume)) => {
+                    let new_spec = bank.music.get(&new_id).map(|m| m.spec.clone());
+                    let same_bgm = Some(new_id) == prev_music_id && new_spec == prev_music_spec;
+                    if !same_bgm {
+                        if new_spec.is_some() {
+                            bank.queue_play_music(new_id, looped, volume);
+                        } else {
+                            bank.queue_stop_music();
+                        }
+                    }
+                }
+                Some((None, _, _)) => {
+                    if prev_music_id.is_some() {
                         bank.queue_stop_music();
+                    }
+                }
+                None => {
+                    if let Some(id) = prev_music_id {
+                        let new_spec = bank.music.get(&id).map(|m| m.spec.clone());
+                        if new_spec != prev_music_spec {
+                            if new_spec.is_some() {
+                                let looped = bank.current_music_looped;
+                                let vol = bank.current_music_base_volume;
+                                bank.queue_play_music(id, looped, vol);
+                            } else {
+                                bank.queue_stop_music();
+                            }
+                        }
                     }
                 }
             }

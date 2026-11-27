@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::f32::consts::TAU;
 
 use macroquad::audio::{
-    PlaySoundParams, Sound, load_sound_from_bytes, play_sound, stop_sound,
+    PlaySoundParams, Sound, load_sound_from_bytes, play_sound, set_sound_volume, stop_sound,
 };
 use mrubyedge::yamrb::value::RValue;
 use mrubyedge::yamrb::vm::VM;
@@ -10,7 +10,8 @@ use mrubyedge::yamrb::vm::VM;
 use crate::decode_base64;
 
 pub const SAMPLE_RATE: u32 = 22050;
-pub const NUM_SFX_CHANNELS: usize = 4;
+pub const NUM_SFX_CHANNELS: usize = 8;
+pub const SFX_COOLDOWN_FRAMES: u64 = 2;
 
 /// 8-bit レトロシンセの波形種別
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -24,6 +25,7 @@ pub enum Waveform {
     Noise,
     Organ,
     Phaser,
+    Sine,
 }
 
 impl Waveform {
@@ -38,6 +40,7 @@ impl Waveform {
             "noise" | "n" | "5" => Some(Self::Noise),
             "organ" | "o" | "6" => Some(Self::Organ),
             "phaser" | "ph" | "7" => Some(Self::Phaser),
+            "sine" | "sin" | "8" => Some(Self::Sine),
             _ => None,
         }
     }
@@ -88,6 +91,7 @@ impl Waveform {
                 let sq2 = if p2 < 0.5 { 1.0 } else { -1.0 };
                 (sq1 + sq2) * 0.5
             }
+            Self::Sine => (p * TAU).sin(),
         }
     }
 }
@@ -271,6 +275,88 @@ pub fn synthesize_events_pcm(events: &[SynthEvent]) -> Vec<i16> {
         prev_freq = Some(ev.freq);
     }
 
+    out
+}
+
+/// 単音 `tone(freq, dur, wave, vol, slide)` 用の 16-bit PCM サンプル列を合成する
+pub fn synthesize_tone_pcm(freq: f32, dur: f32, wave: Waveform, slide: f32) -> Vec<i16> {
+    if !freq.is_finite() || !dur.is_finite() || freq <= 0.0 || dur <= 0.0 {
+        return Vec::new();
+    }
+    let sr = SAMPLE_RATE as f32;
+    let start_freq = freq.clamp(20.0, 20000.0);
+    let dur_sec = dur.clamp(0.005, 10.0);
+    let slide_hz = if slide.is_finite() { slide } else { 0.0 };
+    let end_freq = (start_freq + slide_hz).clamp(20.0, 20000.0);
+    let num_samples = ((dur_sec * sr).round() as usize).max(1);
+
+    let mut out = Vec::with_capacity(num_samples);
+    let mut phase = 0.0f32;
+    let mut phase2 = 0.0f32;
+    let mut lfsr: u16 = 0x7FFF;
+    let mut noise_phase = 0.0f32;
+    let mut noise_val = 0.5f32;
+
+    let attack_samples = (0.0025 * sr) as usize;
+    let release_samples = ((0.006 * sr) as usize).min(num_samples / 4);
+
+    for i in 0..num_samples {
+        let t = i as f32 / num_samples as f32;
+        let cur_freq = start_freq + (end_freq - start_freq) * t;
+
+        let mut env = if i < attack_samples {
+            i as f32 / attack_samples.max(1) as f32
+        } else if release_samples > 0 && i + release_samples >= num_samples {
+            (num_samples - i) as f32 / release_samples.max(1) as f32
+        } else {
+            1.0
+        };
+        env *= 1.0 - 0.18 * t;
+
+        noise_phase += (cur_freq * 8.0) / sr;
+        while noise_phase >= 1.0 {
+            noise_phase -= 1.0;
+            let bit = (lfsr ^ (lfsr >> 1)) & 1;
+            lfsr = (lfsr >> 1) | (bit << 14);
+            noise_val = if (lfsr & 1) != 0 { 0.85 } else { -0.85 };
+        }
+
+        let raw = wave.sample(phase, phase2, noise_val);
+        phase = (phase + cur_freq / sr).rem_euclid(1.0);
+        phase2 = (phase2 + (cur_freq * 1.008) / sr).rem_euclid(1.0);
+
+        let sample_f = (raw * env * 0.38).clamp(-1.0, 1.0);
+        out.push((sample_f * 32767.0) as i16);
+    }
+
+    out
+}
+
+/// 既存の 16-bit PCM サンプル列にピッチ倍率 (`0.25..=4.0`) を線形補間リサンプリングで適用する
+pub fn apply_pitch_to_pcm(pcm: &[i16], pitch: f32) -> Vec<i16> {
+    if pcm.is_empty() {
+        return Vec::new();
+    }
+    let p = if pitch.is_finite() {
+        pitch.clamp(0.25, 4.0)
+    } else {
+        1.0
+    };
+    if (p - 1.0).abs() < 0.001 {
+        return pcm.to_vec();
+    }
+    let out_len = ((pcm.len() as f32 / p).round() as usize).max(1);
+    let mut out = Vec::with_capacity(out_len);
+    let last_idx = pcm.len() - 1;
+    for i in 0..out_len {
+        let pos = i as f32 * p;
+        let idx = (pos.floor() as usize).min(last_idx);
+        let frac = pos - idx as f32;
+        let s0 = pcm[idx] as f32;
+        let s1 = pcm[(idx + 1).min(last_idx)] as f32;
+        let val = s0 + (s1 - s0) * frac;
+        out.push(val.round().clamp(-32768.0, 32767.0) as i16);
+    }
     out
 }
 
@@ -1267,11 +1353,13 @@ pub enum AudioCommand {
         id: i32,
         channel: i32,
         volume: f32,
+        pitch: f32,
     },
     PlaySfxInline {
         spec: String,
         channel: i32,
         volume: f32,
+        pitch: f32,
     },
     StopSfx {
         channel: i32,
@@ -1282,6 +1370,8 @@ pub enum AudioCommand {
         volume: f32,
     },
     StopMusic,
+    UpdateMusicVolume,
+    UpdateSfxVolume,
 }
 
 pub struct SoundBank {
@@ -1290,13 +1380,23 @@ pub struct SoundBank {
     pub inline_cache: HashMap<String, SfxData>,
     pub pending_commands: Vec<AudioCommand>,
     pub current_music_id: Option<i32>,
+    pub current_music_looped: bool,
+    pub current_music_base_volume: f32,
     pub last_played_sfx_id: Option<i32>,
     pub last_played_inline: Option<String>,
+    pub master_volume: f32,
+    pub sfx_volume: f32,
+    pub music_volume: f32,
+    pub frame_counter: u64,
     loaded_sfx_sounds: HashMap<String, Sound>,
     loaded_music_sounds: HashMap<String, Sound>,
     active_channel_keys: [Option<String>; NUM_SFX_CHANNELS],
+    active_channel_base_volumes: [f32; NUM_SFX_CHANNELS],
+    channel_start_frame: [u64; NUM_SFX_CHANNELS],
+    channel_end_frame: [u64; NUM_SFX_CHANNELS],
     active_music_key: Option<String>,
     next_rr_channel: usize,
+    last_sfx_frame: HashMap<String, u64>,
 }
 
 impl SoundBank {
@@ -1307,13 +1407,23 @@ impl SoundBank {
             inline_cache: HashMap::new(),
             pending_commands: Vec::new(),
             current_music_id: None,
+            current_music_looped: true,
+            current_music_base_volume: 1.0,
             last_played_sfx_id: None,
             last_played_inline: None,
+            master_volume: 1.0,
+            sfx_volume: 1.0,
+            music_volume: 1.0,
+            frame_counter: 0,
             loaded_sfx_sounds: HashMap::new(),
             loaded_music_sounds: HashMap::new(),
             active_channel_keys: Default::default(),
+            active_channel_base_volumes: [1.0; NUM_SFX_CHANNELS],
+            channel_start_frame: [0; NUM_SFX_CHANNELS],
+            channel_end_frame: [0; NUM_SFX_CHANNELS],
             active_music_key: None,
             next_rr_channel: 0,
+            last_sfx_frame: HashMap::new(),
         }
     }
 
@@ -1326,20 +1436,126 @@ impl SoundBank {
         self.music = new_music;
     }
 
-    pub fn queue_play_sfx_id(&mut self, id: i32, channel: i32, volume: f32) {
+    pub fn set_master_volume(&mut self, vol: f32) -> f32 {
+        let clamped = if vol.is_finite() {
+            vol.clamp(0.0, 1.0)
+        } else {
+            self.master_volume
+        };
+        self.master_volume = clamped;
+        self.pending_commands.push(AudioCommand::UpdateMusicVolume);
+        self.pending_commands.push(AudioCommand::UpdateSfxVolume);
+        clamped
+    }
+
+    pub fn set_sfx_volume(&mut self, vol: f32) -> f32 {
+        let clamped = if vol.is_finite() {
+            vol.clamp(0.0, 1.0)
+        } else {
+            self.sfx_volume
+        };
+        self.sfx_volume = clamped;
+        self.pending_commands.push(AudioCommand::UpdateSfxVolume);
+        clamped
+    }
+
+    pub fn set_music_volume(&mut self, vol: f32) -> f32 {
+        let clamped = if vol.is_finite() {
+            vol.clamp(0.0, 1.0)
+        } else {
+            self.music_volume
+        };
+        self.music_volume = clamped;
+        self.pending_commands.push(AudioCommand::UpdateMusicVolume);
+        clamped
+    }
+
+    #[inline]
+    pub fn effective_sfx_volume(&self, vol: f32) -> f32 {
+        (vol * self.sfx_volume * self.master_volume).clamp(0.0, 2.0)
+    }
+
+    #[inline]
+    pub fn effective_music_volume(&self, vol: f32) -> f32 {
+        (vol * self.music_volume * self.master_volume).clamp(0.0, 2.0)
+    }
+
+    pub fn advance_frame(&mut self) {
+        self.frame_counter = self.frame_counter.wrapping_add(1);
+    }
+
+    /// 同一 SFX キーが連続フレームで多重発音されるのを防ぐ（クールダウン判定）
+    pub fn should_skip_sfx_cooldown(&mut self, cooldown_key: &str) -> bool {
+        if let Some(&prev_frame) = self.last_sfx_frame.get(cooldown_key)
+            && self.frame_counter.saturating_sub(prev_frame) < SFX_COOLDOWN_FRAMES
+        {
+            return true;
+        }
+        self.last_sfx_frame
+            .insert(cooldown_key.to_string(), self.frame_counter);
+        false
+    }
+
+    /// SFX 再生チャンネルを割り当て、上書き／ボイススチール対象の旧キーを返す
+    pub fn allocate_sfx_channel(
+        &mut self,
+        channel: i32,
+        cache_key: &str,
+        base_volume: f32,
+        duration_sec: f32,
+    ) -> (usize, Option<String>) {
+        let ch_idx = if channel >= 0 && (channel as usize) < NUM_SFX_CHANNELS {
+            channel as usize
+        } else {
+            let mut chosen = None;
+            for offset in 0..NUM_SFX_CHANNELS {
+                let idx = (self.next_rr_channel + offset) % NUM_SFX_CHANNELS;
+                if self.active_channel_keys[idx].is_none()
+                    || self.frame_counter >= self.channel_end_frame[idx]
+                {
+                    chosen = Some(idx);
+                    break;
+                }
+            }
+            let idx = chosen.unwrap_or_else(|| {
+                // 全チャンネル使用中: 最も古い発音スロットをボイススチールする
+                (0..NUM_SFX_CHANNELS)
+                    .min_by_key(|&i| self.channel_start_frame[i])
+                    .unwrap_or(0)
+            });
+            self.next_rr_channel = (idx + 1) % NUM_SFX_CHANNELS;
+            idx
+        };
+
+        let prev_key = self.active_channel_keys[ch_idx].take();
+        self.active_channel_keys[ch_idx] = Some(cache_key.to_string());
+        self.active_channel_base_volumes[ch_idx] = base_volume;
+        self.channel_start_frame[ch_idx] = self.frame_counter;
+        let dur_frames = (duration_sec.max(0.05) * 60.0).ceil() as u64;
+        self.channel_end_frame[ch_idx] = self.frame_counter.saturating_add(dur_frames);
+        (ch_idx, prev_key)
+    }
+
+    pub fn queue_play_sfx_id(&mut self, id: i32, channel: i32, volume: f32, pitch: f32) {
         if id < 0 {
             self.queue_stop_sfx(channel);
             return;
         }
         self.last_played_sfx_id = Some(id);
+        let pitch_clamped = if pitch.is_finite() {
+            pitch.clamp(0.25, 4.0)
+        } else {
+            1.0
+        };
         self.pending_commands.push(AudioCommand::PlaySfxId {
             id,
             channel,
             volume: volume.clamp(0.0, 2.0),
+            pitch: pitch_clamped,
         });
     }
 
-    pub fn queue_play_sfx_inline(&mut self, spec: &str, channel: i32, volume: f32) {
+    pub fn queue_play_sfx_inline(&mut self, spec: &str, channel: i32, volume: f32, pitch: f32) {
         let key = spec.trim().to_string();
         if key.is_empty() {
             return;
@@ -1351,10 +1567,57 @@ impl SoundBank {
             }
         }
         self.last_played_inline = Some(key.clone());
+        let pitch_clamped = if pitch.is_finite() {
+            pitch.clamp(0.25, 4.0)
+        } else {
+            1.0
+        };
         self.pending_commands.push(AudioCommand::PlaySfxInline {
             spec: key,
             channel,
             volume: volume.clamp(0.0, 2.0),
+            pitch: pitch_clamped,
+        });
+    }
+
+    pub fn queue_play_tone(
+        &mut self,
+        freq: f32,
+        dur: f32,
+        wave: Waveform,
+        volume: f32,
+        slide: f32,
+    ) {
+        if !freq.is_finite() || !dur.is_finite() || freq <= 0.0 || dur <= 0.0 {
+            return;
+        }
+        let freq_c = freq.clamp(20.0, 20000.0);
+        let dur_c = dur.clamp(0.005, 10.0);
+        let slide_c = if slide.is_finite() { slide } else { 0.0 };
+        let key = format!(
+            "tone:{:.1}:{:.3}:{}:{:.1}",
+            freq_c, dur_c, wave as u8, slide_c
+        );
+        if !self.inline_cache.contains_key(&key) {
+            let pcm = synthesize_tone_pcm(freq_c, dur_c, wave, slide_c);
+            if !pcm.is_empty() {
+                let wav_bytes = pcm_to_wav_bytes(&pcm, SAMPLE_RATE);
+                self.inline_cache.insert(
+                    key.clone(),
+                    SfxData {
+                        spec: key.clone(),
+                        pcm,
+                        wav_bytes,
+                    },
+                );
+            }
+        }
+        self.last_played_inline = Some(key.clone());
+        self.pending_commands.push(AudioCommand::PlaySfxInline {
+            spec: key,
+            channel: -1,
+            volume: volume.clamp(0.0, 2.0),
+            pitch: 1.0,
         });
     }
 
@@ -1367,17 +1630,39 @@ impl SoundBank {
             self.queue_stop_music();
             return;
         }
+        let vol_c = volume.clamp(0.0, 2.0);
         self.current_music_id = Some(id);
+        self.current_music_looped = looped;
+        self.current_music_base_volume = vol_c;
         self.pending_commands.push(AudioCommand::PlayMusic {
             id,
             looped,
-            volume: volume.clamp(0.0, 2.0),
+            volume: vol_c,
         });
     }
 
     pub fn queue_stop_music(&mut self) {
         self.current_music_id = None;
         self.pending_commands.push(AudioCommand::StopMusic);
+    }
+
+    /// 再生中の BGM と全 SFX を即時停止する（再起動時などのクリーンアップ用）
+    pub fn stop_all_audio(&mut self) {
+        if let Some(prev_key) = self.active_music_key.take()
+            && let Some(prev_snd) = self.loaded_music_sounds.get(&prev_key)
+        {
+            stop_sound(prev_snd);
+        }
+        for idx in 0..NUM_SFX_CHANNELS {
+            if let Some(key) = self.active_channel_keys[idx].take()
+                && let Some(snd) = self.loaded_sfx_sounds.get(&key)
+            {
+                stop_sound(snd);
+            }
+            self.channel_end_frame[idx] = 0;
+        }
+        self.current_music_id = None;
+        self.pending_commands.clear();
     }
 
     /// 定義済み `@SFX` / `@MUSIC` や主要プリセットを事前ロードする（非ヘッドレス環境用）
@@ -1439,6 +1724,7 @@ impl SoundBank {
 
     /// フレームごとの保留オーディオコマンドを実行する（非ヘッドレス環境用）
     pub async fn process_audio(&mut self) {
+        self.advance_frame();
         if self.pending_commands.is_empty() {
             return;
         }
@@ -1450,49 +1736,88 @@ impl SoundBank {
                     id,
                     channel,
                     volume,
+                    pitch,
                 } => {
-                    let Some(sfx_data) = self.sfx.get(&id) else {
+                    let cooldown_key = format!("id:{}", id);
+                    if self.should_skip_sfx_cooldown(&cooldown_key) {
+                        continue;
+                    }
+                    let Some(sfx_data) = self.sfx.get(&id).cloned() else {
                         continue;
                     };
-                    let cache_key = format!("id:{}:{}", id, sfx_data.spec);
+                    let use_base = (pitch - 1.0).abs() < 0.001;
+                    let cache_key = if use_base {
+                        format!("id:{}:{}", id, sfx_data.spec)
+                    } else {
+                        let pitch_q = (pitch.clamp(0.25, 4.0) * 100.0).round() as i32;
+                        format!("id:{}:{}:p{}", id, sfx_data.spec, pitch_q)
+                    };
                     if !self.loaded_sfx_sounds.contains_key(&cache_key) {
-                        if let Ok(snd) = load_sound_from_bytes(&sfx_data.wav_bytes).await {
+                        let wav_bytes = if use_base {
+                            sfx_data.wav_bytes.clone()
+                        } else {
+                            let pitched = apply_pitch_to_pcm(&sfx_data.pcm, pitch);
+                            pcm_to_wav_bytes(&pitched, SAMPLE_RATE)
+                        };
+                        if let Ok(snd) = load_sound_from_bytes(&wav_bytes).await {
                             self.loaded_sfx_sounds.insert(cache_key.clone(), snd);
                         }
                     }
-                    self.play_cached_sfx_on_channel(&cache_key, channel, volume);
+                    let dur_sec = sfx_data.duration_sec() / pitch.clamp(0.25, 4.0);
+                    self.play_cached_sfx_on_channel(&cache_key, channel, volume, dur_sec);
                 }
                 AudioCommand::PlaySfxInline {
                     spec,
                     channel,
                     volume,
+                    pitch,
                 } => {
-                    let Some(sfx_data) = self.inline_cache.get(&spec) else {
+                    let cooldown_key = format!("in:{}", spec);
+                    if self.should_skip_sfx_cooldown(&cooldown_key) {
+                        continue;
+                    }
+                    let Some(sfx_data) = self.inline_cache.get(&spec).cloned() else {
                         continue;
                     };
-                    let cache_key = format!("in:{}", spec);
+                    let use_base = (pitch - 1.0).abs() < 0.001;
+                    let cache_key = if use_base {
+                        format!("in:{}", spec)
+                    } else {
+                        let pitch_q = (pitch.clamp(0.25, 4.0) * 100.0).round() as i32;
+                        format!("in:{}:p{}", spec, pitch_q)
+                    };
                     if !self.loaded_sfx_sounds.contains_key(&cache_key) {
-                        if let Ok(snd) = load_sound_from_bytes(&sfx_data.wav_bytes).await {
+                        let wav_bytes = if use_base {
+                            sfx_data.wav_bytes.clone()
+                        } else {
+                            let pitched = apply_pitch_to_pcm(&sfx_data.pcm, pitch);
+                            pcm_to_wav_bytes(&pitched, SAMPLE_RATE)
+                        };
+                        if let Ok(snd) = load_sound_from_bytes(&wav_bytes).await {
                             self.loaded_sfx_sounds.insert(cache_key.clone(), snd);
                         }
                     }
-                    self.play_cached_sfx_on_channel(&cache_key, channel, volume);
+                    let dur_sec = sfx_data.duration_sec() / pitch.clamp(0.25, 4.0);
+                    self.play_cached_sfx_on_channel(&cache_key, channel, volume, dur_sec);
                 }
                 AudioCommand::StopSfx { channel } => {
                     if channel < 0 {
-                        for slot in &mut self.active_channel_keys {
-                            if let Some(key) = slot.take()
+                        for idx in 0..NUM_SFX_CHANNELS {
+                            if let Some(key) = self.active_channel_keys[idx].take()
                                 && let Some(snd) = self.loaded_sfx_sounds.get(&key)
                             {
                                 stop_sound(snd);
                             }
+                            self.channel_end_frame[idx] = 0;
                         }
                     } else if (channel as usize) < NUM_SFX_CHANNELS {
-                        if let Some(key) = self.active_channel_keys[channel as usize].take()
+                        let idx = channel as usize;
+                        if let Some(key) = self.active_channel_keys[idx].take()
                             && let Some(snd) = self.loaded_sfx_sounds.get(&key)
                         {
                             stop_sound(snd);
                         }
+                        self.channel_end_frame[idx] = 0;
                     }
                 }
                 AudioCommand::PlayMusic { id, looped, volume } => {
@@ -1510,12 +1835,13 @@ impl SoundBank {
                             self.loaded_music_sounds.insert(cache_key.clone(), snd);
                         }
                     }
+                    let eff_vol = self.effective_music_volume(volume);
                     if let Some(snd) = self.loaded_music_sounds.get(&cache_key) {
                         play_sound(
                             snd,
                             PlaySoundParams {
                                 looped,
-                                volume,
+                                volume: eff_vol,
                             },
                         );
                         self.active_music_key = Some(cache_key);
@@ -1528,35 +1854,55 @@ impl SoundBank {
                         stop_sound(prev_snd);
                     }
                 }
+                AudioCommand::UpdateMusicVolume => {
+                    if let Some(ref key) = self.active_music_key
+                        && let Some(snd) = self.loaded_music_sounds.get(key)
+                    {
+                        let eff_vol = self.effective_music_volume(self.current_music_base_volume);
+                        set_sound_volume(snd, eff_vol);
+                    }
+                }
+                AudioCommand::UpdateSfxVolume => {
+                    for idx in 0..NUM_SFX_CHANNELS {
+                        if self.frame_counter < self.channel_end_frame[idx]
+                            && let Some(ref key) = self.active_channel_keys[idx]
+                            && let Some(snd) = self.loaded_sfx_sounds.get(key)
+                        {
+                            let eff_vol =
+                                self.effective_sfx_volume(self.active_channel_base_volumes[idx]);
+                            set_sound_volume(snd, eff_vol);
+                        }
+                    }
+                }
             }
         }
     }
 
-    fn play_cached_sfx_on_channel(&mut self, cache_key: &str, channel: i32, volume: f32) {
-        let ch_idx = if channel >= 0 && (channel as usize) < NUM_SFX_CHANNELS {
-            let idx = channel as usize;
-            if let Some(prev_key) = self.active_channel_keys[idx].take()
-                && let Some(prev_snd) = self.loaded_sfx_sounds.get(&prev_key)
-            {
-                stop_sound(prev_snd);
-            }
-            idx
-        } else {
-            let idx = self.next_rr_channel;
-            self.next_rr_channel = (self.next_rr_channel + 1) % NUM_SFX_CHANNELS;
-            idx
-        };
+    fn play_cached_sfx_on_channel(
+        &mut self,
+        cache_key: &str,
+        channel: i32,
+        base_volume: f32,
+        duration_sec: f32,
+    ) {
+        let (_ch_idx, prev_key_opt) =
+            self.allocate_sfx_channel(channel, cache_key, base_volume, duration_sec);
+        if let Some(prev_key) = prev_key_opt
+            && let Some(prev_snd) = self.loaded_sfx_sounds.get(&prev_key)
+        {
+            stop_sound(prev_snd);
+        }
 
+        let eff_vol = self.effective_sfx_volume(base_volume);
         if let Some(snd) = self.loaded_sfx_sounds.get(cache_key) {
             stop_sound(snd);
             play_sound(
                 snd,
                 PlaySoundParams {
                     looped: false,
-                    volume,
+                    volume: eff_vol,
                 },
             );
-            self.active_channel_keys[ch_idx] = Some(cache_key.to_string());
         }
     }
 }

@@ -40,6 +40,33 @@
 <body>
     <canvas id="glcanvas" tabindex="1"></canvas>
     <div id="status">Usakame Retro Engine (256x256) - Click canvas to focus</div>
+    <script>
+        (function () {
+            const audioContexts = [];
+            const OrigAC = window.AudioContext || window.webkitAudioContext;
+            if (OrigAC) {
+                const WrappedAC = function (...args) {
+                    const ctx = new OrigAC(...args);
+                    audioContexts.push(ctx);
+                    return ctx;
+                };
+                WrappedAC.prototype = OrigAC.prototype;
+                if (window.AudioContext) window.AudioContext = WrappedAC;
+                if (window.webkitAudioContext) window.webkitAudioContext = WrappedAC;
+            }
+            const resumeAudio = function () {
+                for (let i = 0; i < audioContexts.length; i++) {
+                    const ctx = audioContexts[i];
+                    if (ctx && ctx.state === "suspended") {
+                        ctx.resume().catch(() => {});
+                    }
+                }
+            };
+            ["keydown", "mousedown", "pointerdown", "touchstart", "click"].forEach((ev) => {
+                window.addEventListener(ev, resumeAudio, { capture: true, passive: true });
+            });
+        })();
+    </script>
     <script src="mq_js_bundle.js"></script>
     <script>
         (function () {

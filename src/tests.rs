@@ -1260,6 +1260,193 @@ fn test_sound_hot_reload_updates_definitions() {
 }
 
 #[test]
+fn test_sound_tone_and_pitch_and_music_nil() {
+    let src = r#"
+def update
+  tone(440, 0.1, :square, 0.5, 220.0)
+  tone(220, 0.05, :sine, 0.8)
+  sfx(:coin, -1, 0.8, 1.5)
+  sfx(0, 1, 0.9, 0.5)
+  music(0, true, 0.7)
+  music(nil)
+  music(0)
+  music(-1)
+end
+def draw; end
+__END__
+@SFX 0 c2 e2 g2
+@MUSIC 0
+ch0 T120 L4 O4 c d e f
+"#;
+    let (tail, mrb) = cli::compile_ruby_script_str(src).unwrap();
+    let mut runtime = GameRuntime::new(&tail, &mrb, true).unwrap();
+    runtime.call_update();
+
+    let bank = runtime.sound_bank.borrow();
+    use sound::AudioCommand::*;
+    assert_eq!(bank.pending_commands.len(), 8);
+    assert!(matches!(
+        &bank.pending_commands[0],
+        PlaySfxInline { spec, pitch, .. } if spec.starts_with("tone:440.0:") && (*pitch - 1.0).abs() < 0.01
+    ));
+    assert!(matches!(
+        &bank.pending_commands[1],
+        PlaySfxInline { spec, .. } if spec.starts_with("tone:220.0:")
+    ));
+    assert!(matches!(
+        &bank.pending_commands[2],
+        PlaySfxInline { spec, pitch, .. } if spec == "coin" && (*pitch - 1.5).abs() < 0.01
+    ));
+    assert!(matches!(
+        &bank.pending_commands[3],
+        PlaySfxId { id: 0, channel: 1, pitch, .. } if (*pitch - 0.5).abs() < 0.01
+    ));
+    assert!(matches!(&bank.pending_commands[4], PlayMusic { id: 0, .. }));
+    assert!(matches!(&bank.pending_commands[5], StopMusic));
+    assert!(matches!(&bank.pending_commands[6], PlayMusic { id: 0, .. }));
+    assert!(matches!(&bank.pending_commands[7], StopMusic));
+    assert_eq!(bank.current_music_id, None);
+}
+
+#[test]
+fn test_sound_volume_api_getter_setter_and_clamp() {
+    let src = r#"
+$m0 = master_vol
+$s0 = sfx_vol
+$b0 = music_vol
+$m1 = master_vol(1.5)
+$s1 = sfx_vol(-0.5)
+$b1 = music_vol(0.4)
+$m2 = master_vol(0.5)
+$s2 = sfx_vol(0.8)
+def update; end
+def draw; end
+"#;
+    let (tail, mrb) = cli::compile_ruby_script_str(src).unwrap();
+    let runtime = GameRuntime::new(&tail, &mrb, true).unwrap();
+
+    let get_f = |name: &str| -> f64 {
+        runtime.vm.globals.get(name).unwrap().as_ref().try_into().unwrap()
+    };
+    assert!((get_f("$m0") - 1.0).abs() < 1e-4);
+    assert!((get_f("$s0") - 1.0).abs() < 1e-4);
+    assert!((get_f("$b0") - 1.0).abs() < 1e-4);
+    assert!((get_f("$m1") - 1.0).abs() < 1e-4);
+    assert!((get_f("$s1") - 0.0).abs() < 1e-4);
+    assert!((get_f("$b1") - 0.4).abs() < 1e-4);
+    assert!((get_f("$m2") - 0.5).abs() < 1e-4);
+    assert!((get_f("$s2") - 0.8).abs() < 1e-4);
+
+    let bank = runtime.sound_bank.borrow();
+    assert!((bank.effective_sfx_volume(1.0) - 0.4).abs() < 1e-4);
+    assert!((bank.effective_music_volume(1.0) - 0.2).abs() < 1e-4);
+    assert!(bank.pending_commands.iter().any(|c| matches!(c, sound::AudioCommand::UpdateMusicVolume)));
+    assert!(bank.pending_commands.iter().any(|c| matches!(c, sound::AudioCommand::UpdateSfxVolume)));
+}
+
+#[test]
+fn test_sound_cooldown_and_voice_stealing() {
+    let mut bank = sound::SoundBank::new(Default::default(), Default::default());
+
+    // 同一フレーム・次フレームでは間引かれ、2フレーム後に再発音可能
+    assert!(!bank.should_skip_sfx_cooldown("id:0"));
+    assert!(bank.should_skip_sfx_cooldown("id:0"));
+    bank.advance_frame();
+    assert!(bank.should_skip_sfx_cooldown("id:0"));
+    bank.advance_frame();
+    assert!(!bank.should_skip_sfx_cooldown("id:0"));
+
+    // 全チャンネルが埋まった状態で新規発音すると最古のチャンネル (0) をボイススチールする
+    for i in 0..sound::NUM_SFX_CHANNELS {
+        bank.advance_frame();
+        let key = format!("k{}", i);
+        let (ch, stolen) = bank.allocate_sfx_channel(-1, &key, 1.0, 2.0);
+        assert_eq!(ch, i);
+        assert!(stolen.is_none());
+    }
+    bank.advance_frame();
+    let (ch, stolen) = bank.allocate_sfx_channel(-1, "overflow", 1.0, 2.0);
+    assert_eq!(ch, 0);
+    assert_eq!(stolen.as_deref(), Some("k0"));
+}
+
+#[test]
+fn test_sound_hot_reload_syncs_sfx_and_bgm() {
+    let v1 = r#"
+music(0)
+def update; end
+def draw; end
+__END__
+@MUSIC 0
+ch0 T120 L4 O4 c d e f
+@MUSIC 1
+ch0 T140 L4 O4 g a b c5
+"#;
+    let v2_same_bgm = r#"
+music(0)
+def update; $x = 1; end
+def draw; end
+__END__
+@MUSIC 0
+ch0 T120 L4 O4 c d e f
+@MUSIC 1
+ch0 T140 L4 O4 g a b c5
+"#;
+    let v3_switch_bgm = r#"
+music(1)
+def update; end
+def draw; end
+__END__
+@MUSIC 0
+ch0 T120 L4 O4 c d e f
+@MUSIC 1
+ch0 T140 L4 O4 g a b c5
+"#;
+    let (t1, m1) = cli::compile_ruby_script_str(v1).unwrap();
+    let (t2, m2) = cli::compile_ruby_script_str(v2_same_bgm).unwrap();
+    let (t3, m3) = cli::compile_ruby_script_str(v3_switch_bgm).unwrap();
+
+    let mut runtime = GameRuntime::new(&t1, &m1, true).unwrap();
+    runtime.sound_bank.borrow_mut().pending_commands.clear();
+
+    // 同じ BGM ID かつ定義不変 -> SFX 全停止のみ積まれ、BGM は途切れず継続
+    runtime.hot_reload(&t2, &m2).unwrap();
+    {
+        let bank = runtime.sound_bank.borrow();
+        assert_eq!(bank.current_music_id, Some(0));
+        assert!(bank.pending_commands.iter().any(|c| matches!(c, sound::AudioCommand::StopSfx { channel: -1 })));
+        assert!(!bank.pending_commands.iter().any(|c| matches!(c, sound::AudioCommand::PlayMusic { .. })));
+    }
+
+    // トップレベルの BGM ID を 1 に変更 -> 新しい BGM へ差し替え
+    runtime.sound_bank.borrow_mut().pending_commands.clear();
+    runtime.hot_reload(&t3, &m3).unwrap();
+    {
+        let bank = runtime.sound_bank.borrow();
+        assert_eq!(bank.current_music_id, Some(1));
+        assert!(bank.pending_commands.iter().any(|c| matches!(c, sound::AudioCommand::PlayMusic { id: 1, .. })));
+    }
+}
+
+#[test]
+fn test_sound_pcm_helpers() {
+    assert!(sound::synthesize_tone_pcm(0.0, 0.1, sound::Waveform::Square, 0.0).is_empty());
+    assert!(sound::synthesize_tone_pcm(440.0, 0.0, sound::Waveform::Square, 0.0).is_empty());
+
+    let pcm = sound::synthesize_tone_pcm(440.0, 0.1, sound::Waveform::Sine, 220.0);
+    assert_eq!(pcm.len(), (sound::SAMPLE_RATE as f32 * 0.1).round() as usize);
+
+    let same = sound::apply_pitch_to_pcm(&pcm, 1.0);
+    assert_eq!(same, pcm);
+
+    let up = sound::apply_pitch_to_pcm(&pcm, 2.0);
+    assert!((up.len() as i32 - (pcm.len() as i32 / 2)).abs() <= 2);
+
+    let down = sound::apply_pitch_to_pcm(&pcm, 0.5);
+    assert!((down.len() as i32 - (pcm.len() as i32 * 2)).abs() <= 2);
+}
+
+#[test]
 fn test_oval_and_ovalfill_rasterization() {
     // 負の半径は空
     assert!(rasterize_oval(10, 10, -1, 5).is_empty());
