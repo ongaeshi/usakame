@@ -4,6 +4,8 @@ pub mod bundle;
 pub mod cli;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod llm;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod preview;
 pub mod emoji;
 pub mod sound;
 pub mod save;
@@ -14566,6 +14568,40 @@ fn main() {
                     );
                     std::process::exit(1);
                 }
+            }
+        }
+        cli::CliAction::PreviewSpr {
+            script_path,
+            target,
+            output_path,
+            scale,
+        } => {
+            if let Err(err) = preview::cmd_preview_spr(
+                &script_path,
+                target.as_deref(),
+                output_path.as_deref(),
+                scale,
+            ) {
+                eprintln!("Error: {}", err);
+                std::process::exit(1);
+            }
+        }
+        cli::CliAction::PreviewSfx {
+            script_path,
+            target,
+            output_path,
+            play,
+            watch,
+        } => {
+            if let Err(err) = preview::cmd_preview_sfx(
+                script_path.as_deref(),
+                target.as_deref(),
+                output_path.as_deref(),
+                play,
+                watch,
+            ) {
+                eprintln!("Error: {}", err);
+                std::process::exit(1);
             }
         }
         cli::CliAction::Build {

@@ -129,6 +129,21 @@ pub enum CliAction {
         frames: u32,
         gacha: bool,
     },
+    /// `uk preview spr [script.rb] [target] [-s out.png] [--scale N]` / `uk spr ...`
+    PreviewSpr {
+        script_path: PathBuf,
+        target: Option<String>,
+        output_path: Option<PathBuf>,
+        scale: Option<usize>,
+    },
+    /// `uk preview sfx [script.rb] [target] [-s out.png] [--no-play] [--watch]` / `uk sfx ...`
+    PreviewSfx {
+        script_path: Option<PathBuf>,
+        target: Option<String>,
+        output_path: Option<PathBuf>,
+        play: Option<bool>,
+        watch: bool,
+    },
     /// ヘルプ表示
     Help,
     /// バージョン表示
@@ -162,6 +177,15 @@ USAGE:
     uk edit [spr|map|all] [script.rb]   Launch built-in Sprite / Tilemap Editor (default: spr)
     uk viewer [script.rb] [options]     Launch integrated Resource & Live Play Viewer (default: game.rb)
         -t, --tab <1..4>                Initial tab: 1:PLAY, 2:SPRITE, 3:MAP, 4:SOUND (default: 2)
+    uk preview <kind> [script] [opts]   Non-interactive asset preview & dump (spr, sfx)
+    uk spr [script.rb] [target] [opts]  Render sprites/animations to labeled PNG (alias: preview spr)
+        -s, -o, --output <out.png>      Output PNG path (default: screenshots/<stem>_sprites.png)
+        --scale <N>                     Integer pixel scale (default: 4 overview, 8 single)
+    uk sfx [script.rb] [target] [opts]  Preview/play SFX or MUSIC with numeric summary & waveform PNG
+        -s, -o, --output <out.png>      Save waveform/envelope or piano-roll PNG (implies --no-play)
+        --no-play                       Skip audio playback (headless/CI mode)
+        --play                          Force audio playback even with -s
+        -w, --watch                     Watch file for changes and re-preview automatically
     uk examples [dest_dir]              Extract bundled example scripts (default: ./examples)
     uk update-docs [dir]                Update AGENTS.md and docs/ in current or specified directory
     uk check [script.rb] [options]      Headless syntax and runtime verification (default: game.rb)
@@ -267,7 +291,9 @@ where
         "save-init" | "save_init" => parse_save_init_args(&rest[1..]),
         "edit" => parse_edit_args(&rest[1..], EditorKind::Sprite),
         "viewer" | "view" => parse_viewer_args(&rest[1..]),
-        "spr" => parse_edit_args(&rest[1..], EditorKind::Sprite),
+        "preview" => parse_preview_args(&rest[1..]),
+        "spr" => parse_preview_spr_args(&rest[1..]),
+        "sfx" => parse_preview_sfx_args(&rest[1..]),
         "map" => parse_edit_args(&rest[1..], EditorKind::Tilemap),
         "run-with-edit" | "run_with_edit" => parse_run_with_edit_args(&rest[1..]),
         "run" => parse_run_args(&rest[1..]),
@@ -914,6 +940,151 @@ fn parse_check_args(args: &[String]) -> Result<CliAction, String> {
         script_path: script_path.unwrap_or_else(|| PathBuf::from("game.rb")),
         frames,
         gacha,
+    })
+}
+
+fn parse_preview_args(args: &[String]) -> Result<CliAction, String> {
+    let Some(kind) = args.first() else {
+        return Err("Missing preview kind. Usage: `uk preview <spr|sfx> [script.rb] [target] [options]`".to_string());
+    };
+    match kind.to_ascii_lowercase().as_str() {
+        "spr" | "sprite" | "sprites" => parse_preview_spr_args(&args[1..]),
+        "sfx" | "sound" | "music" | "bgm" => parse_preview_sfx_args(&args[1..]),
+        "map" | "tilemap" => Err(
+            "`uk preview map` is not yet implemented. Use `uk edit map` or `uk viewer`.".to_string(),
+        ),
+        other => Err(format!(
+            "Unknown preview kind `{}` (expected `spr` or `sfx`).",
+            other
+        )),
+    }
+}
+
+fn parse_preview_spr_args(args: &[String]) -> Result<CliAction, String> {
+    let mut script_path: Option<PathBuf> = None;
+    let mut target: Option<String> = None;
+    let mut output_path: Option<PathBuf> = None;
+    let mut scale: Option<usize> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-s" | "--screenshot" | "-o" | "--output" => {
+                i += 1;
+                let s = args
+                    .get(i)
+                    .ok_or_else(|| "Missing argument for -s / -o / --output".to_string())?;
+                output_path = Some(PathBuf::from(s));
+            }
+            "--scale" | "-x" => {
+                i += 1;
+                let s = args
+                    .get(i)
+                    .ok_or_else(|| "Missing argument for --scale".to_string())?;
+                let parsed = s
+                    .parse::<usize>()
+                    .map_err(|_| format!("Invalid scale value: {}", s))?;
+                if parsed == 0 || parsed > 32 {
+                    return Err(format!("Scale must be between 1 and 32 (got {})", parsed));
+                }
+                scale = Some(parsed);
+            }
+            arg if arg.starts_with('-') => {
+                return Err(format!("Unknown option for `uk spr`: {}", arg));
+            }
+            arg => {
+                if script_path.is_none() {
+                    let looks_like_target =
+                        arg.starts_with(':') || arg.parse::<i32>().is_ok();
+                    if looks_like_target && !Path::new(arg).exists() {
+                        script_path = Some(PathBuf::from("game.rb"));
+                        target = Some(arg.to_string());
+                    } else {
+                        script_path = Some(PathBuf::from(arg));
+                    }
+                } else if target.is_none() {
+                    target = Some(arg.to_string());
+                } else {
+                    return Err(format!("Unexpected extra argument for `uk spr`: {}", arg));
+                }
+            }
+        }
+        i += 1;
+    }
+
+    Ok(CliAction::PreviewSpr {
+        script_path: script_path.unwrap_or_else(|| PathBuf::from("game.rb")),
+        target,
+        output_path,
+        scale,
+    })
+}
+
+fn is_sound_source_file_arg(arg: &str) -> bool {
+    let lower = arg.to_ascii_lowercase();
+    lower.ends_with(".rb")
+        || lower.ends_with(".sfx")
+        || lower.ends_with(".res")
+        || lower.ends_with(".txt")
+        || Path::new(arg).is_file()
+}
+
+fn parse_preview_sfx_args(args: &[String]) -> Result<CliAction, String> {
+    let mut script_path: Option<PathBuf> = None;
+    let mut target: Option<String> = None;
+    let mut output_path: Option<PathBuf> = None;
+    let mut play: Option<bool> = None;
+    let mut watch: bool = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-s" | "--screenshot" | "-o" | "--output" => {
+                i += 1;
+                let s = args
+                    .get(i)
+                    .ok_or_else(|| "Missing argument for -s / -o / --output".to_string())?;
+                output_path = Some(PathBuf::from(s));
+            }
+            "--no-play" | "--headless" | "--silent" => {
+                play = Some(false);
+            }
+            "--play" => {
+                play = Some(true);
+            }
+            "-w" | "--watch" => {
+                watch = true;
+            }
+            arg if arg.starts_with('-') => {
+                return Err(format!("Unknown option for `uk sfx`: {}", arg));
+            }
+            arg => {
+                if script_path.is_none() && target.is_none() {
+                    if is_sound_source_file_arg(arg) {
+                        script_path = Some(PathBuf::from(arg));
+                    } else {
+                        target = Some(arg.to_string());
+                    }
+                } else if target.is_none() {
+                    target = Some(arg.to_string());
+                } else {
+                    return Err(format!("Unexpected extra argument for `uk sfx`: {}", arg));
+                }
+            }
+        }
+        i += 1;
+    }
+
+    if script_path.is_none() && target.is_none() {
+        script_path = Some(PathBuf::from("game.rb"));
+    }
+
+    Ok(CliAction::PreviewSfx {
+        script_path,
+        target,
+        output_path,
+        play,
+        watch,
     })
 }
 

@@ -7116,3 +7116,212 @@ end
     assert!((opts[3].alpha - 0.5).abs() < 1e-4);
     assert_eq!(opts[3].blend_override, Some(BlendMode::Add));
 }
+
+#[test]
+fn test_cli_preview_spr_and_sfx_parsing() {
+    // 1. uk preview spr / uk spr
+    let act1 = cli::parse_cli_args(
+        ["uk", "preview", "spr", "game.rb", "-s", "out.png", "--scale", "6"].map(String::from),
+    )
+    .unwrap();
+    assert_eq!(
+        act1,
+        cli::CliAction::PreviewSpr {
+            script_path: std::path::PathBuf::from("game.rb"),
+            target: None,
+            output_path: Some(std::path::PathBuf::from("out.png")),
+            scale: Some(6),
+        }
+    );
+
+    let act2 = cli::parse_cli_args(
+        ["uk", "spr", "examples/demo.rb", ":golem", "-s", "tmp/golem.png"].map(String::from),
+    )
+    .unwrap();
+    assert_eq!(
+        act2,
+        cli::CliAction::PreviewSpr {
+            script_path: std::path::PathBuf::from("examples/demo.rb"),
+            target: Some(":golem".to_string()),
+            output_path: Some(std::path::PathBuf::from("tmp/golem.png")),
+            scale: None,
+        }
+    );
+
+    let act3 = cli::parse_cli_args(["uk", "spr", ":hero"].map(String::from)).unwrap();
+    assert_eq!(
+        act3,
+        cli::CliAction::PreviewSpr {
+            script_path: std::path::PathBuf::from("game.rb"),
+            target: Some(":hero".to_string()),
+            output_path: None,
+            scale: None,
+        }
+    );
+
+    // 2. uk preview sfx / uk sfx
+    let sfx1 = cli::parse_cli_args(
+        ["uk", "preview", "sfx", "game.rb", ":explode", "-s", "tmp/sfx.png"].map(String::from),
+    )
+    .unwrap();
+    assert_eq!(
+        sfx1,
+        cli::CliAction::PreviewSfx {
+            script_path: Some(std::path::PathBuf::from("game.rb")),
+            target: Some(":explode".to_string()),
+            output_path: Some(std::path::PathBuf::from("tmp/sfx.png")),
+            play: None,
+            watch: false,
+        }
+    );
+
+    let sfx2 = cli::parse_cli_args(
+        ["uk", "sfx", "wave:square freq:440->110 dur:0.2", "--no-play"].map(String::from),
+    )
+    .unwrap();
+    assert_eq!(
+        sfx2,
+        cli::CliAction::PreviewSfx {
+            script_path: None,
+            target: Some("wave:square freq:440->110 dur:0.2".to_string()),
+            output_path: None,
+            play: Some(false),
+            watch: false,
+        }
+    );
+
+    let sfx3 = cli::parse_cli_args(["uk", "sfx", "game.rb", "--watch"].map(String::from)).unwrap();
+    assert_eq!(
+        sfx3,
+        cli::CliAction::PreviewSfx {
+            script_path: Some(std::path::PathBuf::from("game.rb")),
+            target: None,
+            output_path: None,
+            play: None,
+            watch: true,
+        }
+    );
+
+    // 3. uk preview map returns helpful error, while uk edit / uk viewer stay intact
+    assert!(cli::parse_cli_args(["uk", "preview", "map"].map(String::from)).is_err());
+    assert_eq!(
+        cli::parse_cli_args(["uk", "edit", "spr", "game.rb"].map(String::from)).unwrap(),
+        cli::CliAction::Edit {
+            kind: cli::EditorKind::Sprite,
+            target_path: std::path::PathBuf::from("game.rb"),
+        }
+    );
+}
+
+#[test]
+fn test_preview_spr_png_generation() {
+    let tmp_dir = std::env::temp_dir().join("uk_test_preview_spr");
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    let rb_path = tmp_dir.join("test_spr.rb");
+    let script = r#"def draw; cls(0); end
+__END__
+@PALETTE 1
+1: #223344
+2: #FF8800
+
+@SPRITE :golem 4x4 pal:1
+1111
+1221
+1221
+1111
+---
+.11.
+1221
+1221
+.11.
+
+@SPRITE 10 4x4
+8888
+8..8
+8..8
+8888
+"#;
+    std::fs::write(&rb_path, script).unwrap();
+
+    let all_png = tmp_dir.join("all.png");
+    preview::cmd_preview_spr(&rb_path, None, Some(&all_png), Some(4)).unwrap();
+    assert!(all_png.exists());
+    let dec = png::Decoder::new(std::fs::File::open(&all_png).unwrap());
+    let reader = dec.read_info().unwrap();
+    assert!(reader.info().width >= 200);
+    assert!(reader.info().height >= 40);
+
+    let golem_png = tmp_dir.join("golem.png");
+    preview::cmd_preview_spr(&rb_path, Some(":golem"), Some(&golem_png), Some(8)).unwrap();
+    assert!(golem_png.exists());
+    let dec2 = png::Decoder::new(std::fs::File::open(&golem_png).unwrap());
+    let reader2 = dec2.read_info().unwrap();
+    assert!(reader2.info().width >= 64);
+    assert!(reader2.info().height >= 48);
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn test_preview_sfx_summary_and_waveform_png() {
+    // 1. analyze_pcm stats
+    let silent = preview::analyze_pcm(&[0i16; 100]);
+    assert!(silent.is_silent);
+    assert_eq!(silent.clipped_samples, 0);
+    assert_eq!(silent.peak, 0);
+
+    let clipped = preview::analyze_pcm(&[32767, -32767, 16384, -16384]);
+    assert!(!clipped.is_silent);
+    assert_eq!(clipped.clipped_samples, 2);
+    assert!(clipped.peak_norm > 0.99);
+    assert!(clipped.rms_norm > 0.5);
+
+    // 2. cmd_preview_sfx waveform & piano-roll PNG
+    let tmp_dir = std::env::temp_dir().join("uk_test_preview_sfx");
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    let rb_path = tmp_dir.join("test_sfx.rb");
+    let script = r#"def draw; cls(0); end
+__END__
+@SFX :boom
+wave:noise freq:220->60 dur:0.25 env:decay
+
+@MUSIC :theme
+ch0 wave=square vol=4 T140 L8 O4 c e g > c
+ch1 wave=tri vol=6 T140 L4 O3 c g
+"#;
+    std::fs::write(&rb_path, script).unwrap();
+
+    let boom_png = tmp_dir.join("boom.png");
+    preview::cmd_preview_sfx(Some(&rb_path), Some(":boom"), Some(&boom_png), Some(false), false)
+        .unwrap();
+    assert!(boom_png.exists());
+    let dec = png::Decoder::new(std::fs::File::open(&boom_png).unwrap());
+    let reader = dec.read_info().unwrap();
+    assert_eq!(reader.info().width, 640);
+
+    let theme_png = tmp_dir.join("theme.png");
+    preview::cmd_preview_sfx(Some(&rb_path), Some(":theme"), Some(&theme_png), None, false).unwrap();
+    assert!(theme_png.exists());
+    let dec2 = png::Decoder::new(std::fs::File::open(&theme_png).unwrap());
+    let reader2 = dec2.read_info().unwrap();
+    assert_eq!(reader2.info().width, 640);
+    assert!(reader2.info().height > reader.info().height);
+
+    // 3. inline spec headless
+    let inline_png = tmp_dir.join("inline.png");
+    preview::cmd_preview_sfx(
+        None,
+        Some("wave:square freq:440->110 dur:0.2"),
+        Some(&inline_png),
+        Some(false),
+        false,
+    )
+    .unwrap();
+    assert!(inline_png.exists());
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

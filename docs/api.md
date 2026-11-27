@@ -576,6 +576,9 @@ WWWWWW
   * **MML 風記法**: `wave=pulse speed=2 c3 e3 g3 c4:fade` 等も引き続き利用可能です。
 * **`@MUSIC <id_or_symbol>`**: 整数 ID（`@MUSIC 0`）またはシンボル名（`@MUSIC :boss_theme`）でマルチトラック BGM（`ch0`..`ch3`）や SFX パターン行を定義できます。
 * `uk check` 実行時は、`@SFX` / `@MUSIC` の構文エラーおよびコード内の未定義シンボル・ID 呼び出し（`sfx(:typo)` 等）が静的に検証されます。
+* **非対話アセット確認 CLI（`uk preview` / `uk spr` / `uk sfx`）**:
+  * `uk spr [game.rb] [target] [-s out.png] [--scale N]`: ゲームループを回さず、`__END__` や外部 `.spr` の全スプライト・全アニメーションフレームを市松背景・ラベル付き PNG として出力します（`target` に `:golem` や ID を指定すると単体拡大出力）。
+  * `uk sfx [game.rb] [target] [-s out.png] [--no-play] [--watch]`: `@SFX` / `@MUSIC` / プリセット / インライン仕様を即座に試聴し、再生時間・Peak・RMS・クリッピング有無・無音判定の数値サマリを出力します。`-s out.png` 指定時は波形／エンベロープ（`@MUSIC` はチャンネル別簡易ピアノロール付き）を PNG 出力し、無音で完走します。
 
 ---
 
