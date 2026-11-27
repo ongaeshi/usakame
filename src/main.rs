@@ -4528,9 +4528,10 @@ pub fn rasterize_polyfill(points: &[(i32, i32)]) -> Vec<PixelSpan> {
     merge_horizontal_spans(spans)
 }
 
-/// Ruby 引数から SFX 指定（整数ID / 文字列 / シンボル）を取り出す
+/// Ruby 引数から SFX 指定（整数ID / シンボル / インラインスペック文字列）を取り出す
 enum SfxArg {
     Id(i32),
+    Symbol(String),
     Spec(String),
 }
 
@@ -4539,7 +4540,7 @@ fn arg_sfx(args: &[Rc<RObject>], index: usize) -> Option<SfxArg> {
     match &obj.value {
         RValue::Integer(v) => Some(SfxArg::Id(*v as i32)),
         RValue::Float(v) => Some(SfxArg::Id(*v as i32)),
-        RValue::Symbol(sym) => Some(SfxArg::Spec(sym.name.clone())),
+        RValue::Symbol(sym) => Some(SfxArg::Symbol(sym.name.clone())),
         RValue::String(_, _) => String::try_from(obj.as_ref()).ok().map(SfxArg::Spec),
         _ => None,
     }
@@ -4788,7 +4789,21 @@ fn register_sound_api(vm: &mut VM, sound_bank: Rc<RefCell<sound::SoundBank>>) {
             let mut bank = bank_for_sfx.borrow_mut();
             match arg_sfx(args, 0) {
                 Some(SfxArg::Id(id)) => bank.queue_play_sfx_id(id, channel, volume, pitch),
-                Some(SfxArg::Spec(spec)) => bank.queue_play_sfx_inline(&spec, channel, volume, pitch),
+                Some(SfxArg::Symbol(sym)) => {
+                    bank.queue_play_sfx_symbol(&sym, channel, volume, pitch);
+                }
+                Some(SfxArg::Spec(spec)) => {
+                    let trimmed = spec.trim();
+                    // `":name"` のように単一の `:name` 文字列が渡された場合もユーザー定義優先で解決
+                    if let Some(rest) = trimmed.strip_prefix(':')
+                        && !rest.is_empty()
+                        && !rest.chars().any(char::is_whitespace)
+                    {
+                        bank.queue_play_sfx_symbol(rest, channel, volume, pitch);
+                    } else {
+                        bank.queue_play_sfx_inline(&spec, channel, volume, pitch);
+                    }
+                }
                 None => {}
             }
             Ok(Rc::new(RObject::nil()))
@@ -4828,23 +4843,47 @@ fn register_sound_api(vm: &mut VM, sound_bank: Rc<RefCell<sound::SoundBank>>) {
         }),
     );
 
-    // music(id, loop = true, volume = 1.0): `@MUSIC` 定義の BGM を再生（nil または -1 で停止）
+    // music(id_or_name, loop = true, volume = 1.0): `@MUSIC` 定義の BGM を再生（nil または -1 で停止）
     let bank_for_music = sound_bank.clone();
     mrb_define_cmethod(
         vm,
         obj_class.clone(),
         "music",
         Box::new(move |_vm, args| {
-            let id_opt = match args.first().map(|v| &v.value) {
+            let key_opt: Option<sound::SoundKey> = match args.first().map(|v| &v.value) {
                 None | Some(RValue::Nil) => None,
-                _ => Some(arg_i32(args, 0, -1)),
+                Some(RValue::Integer(i)) => {
+                    let id = *i as i32;
+                    if id < 0 { None } else { Some(sound::SoundKey::Id(id)) }
+                }
+                Some(RValue::Float(f)) => {
+                    let id = *f as i32;
+                    if id < 0 { None } else { Some(sound::SoundKey::Id(id)) }
+                }
+                Some(RValue::Symbol(sym)) => {
+                    let norm = sound::SoundKey::normalize_name(&sym.name);
+                    if norm.is_empty() { None } else { Some(sound::SoundKey::Name(norm)) }
+                }
+                Some(RValue::String(_, _)) => {
+                    if let Some(obj) = args.first()
+                        && let Ok(s) = String::try_from(obj.as_ref())
+                    {
+                        let norm = sound::SoundKey::normalize_name(&s);
+                        if norm.is_empty() { None } else { Some(sound::SoundKey::Name(norm)) }
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
             };
-            match id_opt {
+            match key_opt {
                 None => bank_for_music.borrow_mut().queue_stop_music(),
-                Some(id) => {
+                Some(key) => {
                     let looped = arg_bool(args, 1, true);
                     let volume = arg_f32(args, 2, 1.0);
-                    bank_for_music.borrow_mut().queue_play_music(id, looped, volume);
+                    bank_for_music
+                        .borrow_mut()
+                        .queue_play_music_key(key, looped, volume);
                 }
             }
             Ok(Rc::new(RObject::nil()))
@@ -12214,11 +12253,11 @@ impl GameRuntime {
         new_vm.globals.insert("$ARGV".to_string(), argv_obj);
 
         // リロード前に再生中だった BGM を記録（トップレベルの `music(...)` 呼び出しで再スタートさせないため）
-        let (prev_music_id, prev_music_spec, prev_pending_len) = {
+        let (prev_music_key, prev_music_spec, prev_pending_len) = {
             let bank = self.sound_bank.borrow();
-            let id = bank.current_music_id;
-            let spec = id.and_then(|i| bank.music.get(&i).map(|m| m.spec.clone()));
-            (id, spec, bank.pending_commands.len())
+            let key = bank.current_music_key.clone();
+            let spec = key.as_ref().and_then(|k| bank.music.get(k).map(|m| m.spec.clone()));
+            (key, spec, bank.pending_commands.len())
         };
 
         *self.is_hot_reloading.borrow_mut() = true;
@@ -12277,19 +12316,19 @@ impl GameRuntime {
             let mut bank = self.sound_bank.borrow_mut();
             let top_level_cmds: Vec<sound::AudioCommand> =
                 bank.pending_commands.drain(prev_pending_len..).collect();
-            bank.current_music_id = prev_music_id;
+            bank.current_music_key = prev_music_key.clone();
             bank.update_definitions(new_sfx_map, new_music_map);
 
             // リロード時に鳴りっぱなしのループ/長尺 SFX を停止する
             bank.queue_stop_sfx(-1);
 
             // トップレベルで music(...) / stop_music が呼ばれた場合はその変更を反映し、
-            // 同じ BGM ID かつ定義変更なしなら途切れず継続する
-            let mut top_music_cmd: Option<(Option<i32>, bool, f32)> = None;
+            // 同じ BGM キーかつ定義変更なしなら途切れず継続する
+            let mut top_music_cmd: Option<(Option<sound::SoundKey>, bool, f32)> = None;
             for cmd in top_level_cmds {
                 match cmd {
-                    sound::AudioCommand::PlayMusic { id, looped, volume } => {
-                        top_music_cmd = Some((Some(id), looped, volume));
+                    sound::AudioCommand::PlayMusic { key, looped, volume } => {
+                        top_music_cmd = Some((Some(key), looped, volume));
                     }
                     sound::AudioCommand::StopMusic => {
                         top_music_cmd = Some((None, false, 1.0));
@@ -12299,30 +12338,31 @@ impl GameRuntime {
             }
 
             match top_music_cmd {
-                Some((Some(new_id), looped, volume)) => {
-                    let new_spec = bank.music.get(&new_id).map(|m| m.spec.clone());
-                    let same_bgm = Some(new_id) == prev_music_id && new_spec == prev_music_spec;
+                Some((Some(new_key), looped, volume)) => {
+                    let new_spec = bank.music.get(&new_key).map(|m| m.spec.clone());
+                    let same_bgm = Some(&new_key) == prev_music_key.as_ref()
+                        && new_spec == prev_music_spec;
                     if !same_bgm {
                         if new_spec.is_some() {
-                            bank.queue_play_music(new_id, looped, volume);
+                            bank.queue_play_music_key(new_key, looped, volume);
                         } else {
                             bank.queue_stop_music();
                         }
                     }
                 }
                 Some((None, _, _)) => {
-                    if prev_music_id.is_some() {
+                    if prev_music_key.is_some() {
                         bank.queue_stop_music();
                     }
                 }
                 None => {
-                    if let Some(id) = prev_music_id {
-                        let new_spec = bank.music.get(&id).map(|m| m.spec.clone());
+                    if let Some(key) = prev_music_key {
+                        let new_spec = bank.music.get(&key).map(|m| m.spec.clone());
                         if new_spec != prev_music_spec {
                             if new_spec.is_some() {
                                 let looped = bank.current_music_looped;
                                 let vol = bank.current_music_base_volume;
-                                bank.queue_play_music(id, looped, vol);
+                                bank.queue_play_music_key(key, looped, vol);
                             } else {
                                 bank.queue_stop_music();
                             }
@@ -14224,6 +14264,39 @@ async fn run_embedded_game_with_args(
     }
 }
 
+/// `uk check` 時のサウンド定義構文・未定義シンボル/ID 静的検証を行う
+#[cfg(not(target_arch = "wasm32"))]
+fn verify_sound_definitions_and_calls(
+    full_source: &str,
+    tail_data: &str,
+    runtime: &GameRuntime,
+) -> Result<(), String> {
+    let (ruby_code, _) = bundle::split_ruby_source_and_tail(full_source);
+    let (defined_sfx, defined_music): (
+        std::collections::HashSet<sound::SoundKey>,
+        std::collections::HashSet<sound::SoundKey>,
+    ) = {
+        let bank = runtime.sound_bank.borrow();
+        (
+            bank.sfx.keys().cloned().collect(),
+            bank.music.keys().cloned().collect(),
+        )
+    };
+
+    let mut errors = sound::validate_tail_sounds(tail_data, &defined_sfx);
+    errors.extend(sound::validate_ruby_sound_calls(
+        ruby_code,
+        &defined_sfx,
+        &defined_music,
+    ));
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("Sound validation error(s):\n  - {}", errors.join("\n  - ")))
+    }
+}
+
 /// Ruby スクリプト文字列をコンパイルし、ヘッドレス環境で指定フレーム数だけ `update` / `draw` を実行して
 /// 構文エラーや `NoMethodError` 等の実行時例外が発生しないかを検証する（デフォルトでガチャキー入力検証を含む）。
 #[cfg(not(target_arch = "wasm32"))]
@@ -14243,6 +14316,7 @@ pub fn verify_ruby_script_headless_ex(
 
     let run_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), String> {
         let mut runtime = GameRuntime::new(&tail_data, &mrb_bytes, true).map_err(|e| e.full_message)?;
+        verify_sound_definitions_and_calls(full_source, &tail_data, &runtime)?;
         let mut fuzzer = InputFuzzer::new(0xdeadbeef);
         for frame in 1..=frames {
             let input_desc = if gacha {
@@ -14304,8 +14378,9 @@ pub fn verify_ruby_script_file_headless(
     if !path.exists() {
         return Err(format!("Target script '{}' not found.", path.display()));
     }
-    let (_source, tail_data, mrb_bytes) = cli::compile_ruby_script_file(path)?;
+    let (source, tail_data, mrb_bytes) = cli::compile_ruby_script_file(path)?;
     let mut runtime = GameRuntime::new(&tail_data, &mrb_bytes, true).map_err(|e| e.full_message)?;
+    verify_sound_definitions_and_calls(&source, &tail_data, &runtime)?;
     let mut fuzzer = InputFuzzer::new(0xdeadbeef);
     for frame in 1..=frames {
         let input_desc = if gacha {

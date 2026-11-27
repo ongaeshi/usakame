@@ -822,9 +822,10 @@ fn test_audio_wav_encode_and_parse() {
     assert!(block.contains("@WAV 42"));
 
     let (sfx_map, _) = sound::parse_tail_sounds(&block);
-    assert!(sfx_map.contains_key(&42));
-    assert!(!sfx_map[&42].pcm.is_empty());
-    assert_eq!(sfx_map[&42].wav_bytes, wav_bytes);
+    let k42 = sound::SoundKey::Id(42);
+    assert!(sfx_map.contains_key(&k42));
+    assert!(!sfx_map[&k42].pcm.is_empty());
+    assert_eq!(sfx_map[&k42].wav_bytes, wav_bytes);
 }
 
 #[test]
@@ -1113,12 +1114,14 @@ fn test_sound_example_script() {
     {
         let bank = runtime.sound_bank.borrow();
         for id in 0..4 {
-            assert!(bank.sfx.contains_key(&id), "@SFX {} should be parsed", id);
-            assert!(!bank.sfx[&id].pcm.is_empty());
+            let key = sound::SoundKey::Id(id);
+            assert!(bank.sfx.contains_key(&key), "@SFX {} should be parsed", id);
+            assert!(!bank.sfx[&key].pcm.is_empty());
         }
-        assert!(bank.music.contains_key(&0), "@MUSIC 0 should be parsed");
+        let m0 = sound::SoundKey::Id(0);
+        assert!(bank.music.contains_key(&m0), "@MUSIC 0 should be parsed");
         // 約 4 小節 (T140) 以上の長さ
-        assert!(bank.music[&0].pcm.len() > sound::SAMPLE_RATE as usize * 4);
+        assert!(bank.music[&m0].pcm.len() > sound::SAMPLE_RATE as usize * 4);
     }
     for _ in 0..5 {
         runtime.call_update();
@@ -1145,15 +1148,18 @@ ch0 T120 L4 O4 c d e f
 "#;
     let (tail, mrb) = cli::compile_ruby_script_str(src).unwrap();
     let mut runtime = GameRuntime::new(&tail, &mrb, true).unwrap();
-    assert!(runtime.sound_bank.borrow().sfx.contains_key(&0));
-    assert!(runtime.sound_bank.borrow().music.contains_key(&0));
+    assert!(runtime.sound_bank.borrow().sfx.contains_key(&sound::SoundKey::Id(0)));
+    assert!(runtime.sound_bank.borrow().music.contains_key(&sound::SoundKey::Id(0)));
 
     runtime.call_update();
     {
         let bank = runtime.sound_bank.borrow();
         use sound::AudioCommand::*;
         assert_eq!(bank.pending_commands.len(), 6);
-        assert!(matches!(bank.pending_commands[0], PlaySfxId { id: 0, channel: -1, .. }));
+        assert!(matches!(
+            &bank.pending_commands[0],
+            PlaySfxKey { key: sound::SoundKey::Id(0), channel: -1, .. }
+        ));
         assert!(matches!(
             &bank.pending_commands[1],
             PlaySfxInline { spec, channel: 2, .. } if spec == "jump"
@@ -1163,7 +1169,10 @@ ch0 T120 L4 O4 c d e f
             PlaySfxInline { spec, .. } if spec == "tri c3"
         ));
         assert!(matches!(bank.pending_commands[3], StopSfx { channel: 1 }));
-        assert!(matches!(bank.pending_commands[4], PlayMusic { id: 0, looped: false, .. }));
+        assert!(matches!(
+            &bank.pending_commands[4],
+            PlayMusic { key: sound::SoundKey::Id(0), looped: false, .. }
+        ));
         assert!(matches!(bank.pending_commands[5], StopMusic));
         assert!(bank.inline_cache.contains_key("jump"));
         assert!(bank.inline_cache.contains_key("tri c3"));
@@ -1175,7 +1184,10 @@ fn test_sound_api_callable_at_top_level() {
     let src = "$t = 0\nmusic(0)\nsfx(:jump)\ndef update\n  $t += 1\nend\ndef draw; end\n__END__\n@MUSIC 0\nch0 T120 L4 O4 c d e f\n";
     let (tail, mrb) = cli::compile_ruby_script_str(src).unwrap();
     let mut runtime = GameRuntime::new(&tail, &mrb, true).unwrap();
-    assert_eq!(runtime.sound_bank.borrow().current_music_id, Some(0));
+    assert_eq!(
+        runtime.sound_bank.borrow().current_music_key,
+        Some(sound::SoundKey::Id(0))
+    );
     runtime.call_update();
     let t: i32 = runtime.vm.globals.get("$t").unwrap().as_ref().try_into().unwrap();
     assert_eq!(t, 1);
@@ -1191,13 +1203,13 @@ fn test_game_script_sound_resources() {
     {
         let bank = runtime.sound_bank.borrow();
         for id in 0..=16 {
-            assert!(bank.sfx.contains_key(&id), "game.rb @SFX {} missing", id);
+            assert!(bank.sfx.contains_key(&sound::SoundKey::Id(id)), "game.rb @SFX {} missing", id);
         }
         for id in 0..=2 {
-            assert!(bank.music.contains_key(&id), "game.rb @MUSIC {} missing", id);
+            assert!(bank.music.contains_key(&sound::SoundKey::Id(id)), "game.rb @MUSIC {} missing", id);
         }
         // トップレベルでタイトル BGM を要求している
-        assert_eq!(bank.current_music_id, Some(0));
+        assert_eq!(bank.current_music_key, Some(sound::SoundKey::Id(0)));
     }
     runtime.call_update();
     runtime.call_draw();
@@ -1252,11 +1264,13 @@ fn test_sound_hot_reload_updates_definitions() {
     let (tail1, mrb1) = cli::compile_ruby_script_str(v1).unwrap();
     let (tail2, mrb2) = cli::compile_ruby_script_str(v2).unwrap();
     let mut runtime = GameRuntime::new(&tail1, &mrb1, true).unwrap();
-    let len1 = runtime.sound_bank.borrow().sfx[&0].pcm.len();
+    let k0 = sound::SoundKey::Id(0);
+    let k1 = sound::SoundKey::Id(1);
+    let len1 = runtime.sound_bank.borrow().sfx[&k0].pcm.len();
     runtime.hot_reload(&tail2, &mrb2).unwrap();
     let bank = runtime.sound_bank.borrow();
-    assert!(bank.sfx[&0].pcm.len() > len1);
-    assert!(bank.sfx.contains_key(&1));
+    assert!(bank.sfx[&k0].pcm.len() > len1);
+    assert!(bank.sfx.contains_key(&k1));
 }
 
 #[test]
@@ -1299,13 +1313,19 @@ ch0 T120 L4 O4 c d e f
     ));
     assert!(matches!(
         &bank.pending_commands[3],
-        PlaySfxId { id: 0, channel: 1, pitch, .. } if (*pitch - 0.5).abs() < 0.01
+        PlaySfxKey { key: sound::SoundKey::Id(0), channel: 1, pitch, .. } if (*pitch - 0.5).abs() < 0.01
     ));
-    assert!(matches!(&bank.pending_commands[4], PlayMusic { id: 0, .. }));
+    assert!(matches!(
+        &bank.pending_commands[4],
+        PlayMusic { key: sound::SoundKey::Id(0), .. }
+    ));
     assert!(matches!(&bank.pending_commands[5], StopMusic));
-    assert!(matches!(&bank.pending_commands[6], PlayMusic { id: 0, .. }));
+    assert!(matches!(
+        &bank.pending_commands[6],
+        PlayMusic { key: sound::SoundKey::Id(0), .. }
+    ));
     assert!(matches!(&bank.pending_commands[7], StopMusic));
-    assert_eq!(bank.current_music_id, None);
+    assert_eq!(bank.current_music_key, None);
 }
 
 #[test]
@@ -1413,7 +1433,7 @@ ch0 T140 L4 O4 g a b c5
     runtime.hot_reload(&t2, &m2).unwrap();
     {
         let bank = runtime.sound_bank.borrow();
-        assert_eq!(bank.current_music_id, Some(0));
+        assert_eq!(bank.current_music_key, Some(sound::SoundKey::Id(0)));
         assert!(bank.pending_commands.iter().any(|c| matches!(c, sound::AudioCommand::StopSfx { channel: -1 })));
         assert!(!bank.pending_commands.iter().any(|c| matches!(c, sound::AudioCommand::PlayMusic { .. })));
     }
@@ -1423,8 +1443,11 @@ ch0 T140 L4 O4 g a b c5
     runtime.hot_reload(&t3, &m3).unwrap();
     {
         let bank = runtime.sound_bank.borrow();
-        assert_eq!(bank.current_music_id, Some(1));
-        assert!(bank.pending_commands.iter().any(|c| matches!(c, sound::AudioCommand::PlayMusic { id: 1, .. })));
+        assert_eq!(bank.current_music_key, Some(sound::SoundKey::Id(1)));
+        assert!(bank.pending_commands.iter().any(|c| matches!(
+            c,
+            sound::AudioCommand::PlayMusic { key: sound::SoundKey::Id(1), .. }
+        )));
     }
 }
 
@@ -1444,6 +1467,199 @@ fn test_sound_pcm_helpers() {
 
     let down = sound::apply_pitch_to_pcm(&pcm, 0.5);
     assert!((down.len() as i32 - (pcm.len() as i32 * 2)).abs() <= 2);
+}
+
+#[test]
+fn test_named_sfx_music_and_preset_override() {
+    let src = r#"
+$SFX = { custom_hit: "wave:saw freq:220->90 dur:0.1 env:punch" }
+$MUSIC = { stage1: "ch0 T130 L8 O4 c e g c5" }
+def update
+  sfx(:explode)
+  sfx(:jump)
+  sfx(:custom_hit)
+  sfx(:confirm)
+  music(:boss_theme)
+  music(:stage1)
+end
+def draw; end
+__END__
+@SFX :explode
+wave:noise freq:240->60 dur:0.3 env:decay
+
+@SFX :jump
+wave:triangle freq:300->700 dur:0.12 env:decay
+
+@SFX :kick
+wave:noise freq:160->50 dur:0.08 env:punch
+
+@MUSIC :boss_theme
+:kick . :kick .
+
+@MUSIC :melody_theme
+ch0 T140 L8 O4 e g b > e
+"#;
+    let (tail, mrb) = cli::compile_ruby_script_str(src).unwrap();
+    let mut runtime = GameRuntime::new(&tail, &mrb, true).unwrap();
+    {
+        let bank = runtime.sound_bank.borrow();
+        assert!(bank.sfx.contains_key(&sound::SoundKey::Name("explode".to_string())));
+        assert!(bank.sfx.contains_key(&sound::SoundKey::Name("jump".to_string())));
+        assert!(bank.sfx.contains_key(&sound::SoundKey::Name("custom_hit".to_string())));
+        assert!(bank.music.contains_key(&sound::SoundKey::Name("boss_theme".to_string())));
+        assert!(bank.music.contains_key(&sound::SoundKey::Name("stage1".to_string())));
+        assert!(bank.music.contains_key(&sound::SoundKey::Name("melody_theme".to_string())));
+        assert!(!bank.music[&sound::SoundKey::Name("boss_theme".to_string())].pcm.is_empty());
+    }
+
+    runtime.call_update();
+    let bank = runtime.sound_bank.borrow();
+    use sound::AudioCommand::*;
+    assert_eq!(bank.pending_commands.len(), 6);
+    assert!(matches!(
+        &bank.pending_commands[0],
+        PlaySfxKey { key: sound::SoundKey::Name(n), .. } if n == "explode"
+    ));
+    // ユーザー定義 @SFX :jump が内蔵プリセット :jump を上書きして PlaySfxKey で呼ばれること
+    assert!(matches!(
+        &bank.pending_commands[1],
+        PlaySfxKey { key: sound::SoundKey::Name(n), .. } if n == "jump"
+    ));
+    assert!(matches!(
+        &bank.pending_commands[2],
+        PlaySfxKey { key: sound::SoundKey::Name(n), .. } if n == "custom_hit"
+    ));
+    // 未上書きの内蔵プリセット :confirm は PlaySfxInline で呼ばれること
+    assert!(matches!(
+        &bank.pending_commands[3],
+        PlaySfxInline { spec, .. } if spec == "confirm"
+    ));
+    assert!(matches!(
+        &bank.pending_commands[4],
+        PlayMusic { key: sound::SoundKey::Name(n), .. } if n == "boss_theme"
+    ));
+    assert!(matches!(
+        &bank.pending_commands[5],
+        PlayMusic { key: sound::SoundKey::Name(n), .. } if n == "stage1"
+    ));
+}
+
+#[test]
+fn test_synth_recipe_and_expanded_presets() {
+    let pcm = sound::parse_and_synthesize_sfx_pcm(
+        "wave:square freq:440->880 dur:0.15 env:decay vol:0.8",
+    );
+    let expected_len = (sound::SAMPLE_RATE as f32 * 0.15).round() as usize;
+    assert_eq!(pcm.len(), expected_len);
+    assert!(pcm.iter().any(|&s| s != 0));
+
+    let pcm_multi = sound::parse_and_synthesize_sfx_pcm(
+        "wave:pulse freq:330Hz->660Hz->440Hz dur:150ms env:punch",
+    );
+    assert_eq!(pcm_multi.len(), expected_len);
+    assert!(pcm_multi.iter().any(|&s| s != 0));
+
+    // 全内蔵プリセットが非空 PCM を生成できること
+    for &preset in sound::BUILTIN_SFX_PRESETS {
+        let p = sound::synthesize_preset_pcm(preset, 1.0, 1.0, 1.0)
+            .unwrap_or_else(|| panic!("Preset :{} should synthesize", preset));
+        assert!(!p.is_empty(), "Preset :{} PCM should not be empty", preset);
+    }
+    for alias in ["ok", "back", "sword", "water", "win", "recover", "buzzer", "boost", "chime", "walk", "boom"] {
+        assert!(
+            sound::synthesize_preset_pcm(alias, 1.0, 1.0, 1.0).is_some(),
+            "Alias :{} should synthesize",
+            alias
+        );
+    }
+}
+
+#[test]
+fn test_uk_check_sound_static_validation() {
+    // 1. 正常系: 名前付き @SFX/@MUSIC, シンセレシピ, プリセット, インライン文字列, コメント内は無視
+    let valid = r#"
+def update
+  sfx(:explode)
+  sfx(:confirm)
+  sfx("wave:square freq:440->880 dur:0.1 env:decay")
+  music(:theme)
+  # sfx(:should_be_ignored_in_comment)
+  msg = "sfx(:ignored_in_string)"
+end
+def draw; end
+__END__
+@SFX :explode wave:noise freq:200->60 dur:0.2 env:decay
+@MUSIC :theme
+ch0 T120 L8 O4 c d e g
+"#;
+    verify_ruby_script_headless(valid, 5).expect("Valid sound script should pass uk check");
+
+    // 2. 未定義シンボル sfx(:typo_name)
+    let undef_sfx = r#"
+def update
+  sfx(:typo_name)
+end
+def draw; end
+"#;
+    let err = verify_ruby_script_headless(undef_sfx, 5).unwrap_err();
+    assert!(err.contains(":typo_name"), "Expected :typo_name in error: {}", err);
+
+    // 3. 未定義 ID sfx(99) / music(:missing_bgm)
+    let undef_id_and_music = r#"
+def update
+  sfx(99)
+  music(:missing_bgm)
+end
+def draw; end
+"#;
+    let err2 = verify_ruby_script_headless(undef_id_and_music, 5).unwrap_err();
+    assert!(err2.contains("sfx(99)"), "Expected sfx(99) in error: {}", err2);
+    assert!(err2.contains(":missing_bgm"), "Expected :missing_bgm in error: {}", err2);
+
+    // 4. @SFX シンセレシピ構文エラー
+    let bad_recipe = r#"
+def update; end
+def draw; end
+__END__
+@SFX :bad
+wave:unknown_wave freq:440 dur:0.1
+"#;
+    let err3 = verify_ruby_script_headless(bad_recipe, 5).unwrap_err();
+    assert!(err3.contains("Unknown waveform"), "Expected Unknown waveform in error: {}", err3);
+
+    // 5. @MUSIC MML 構文エラー & インライン SFX 構文エラー
+    let bad_mml = r#"
+def update
+  sfx("wave:invalid_wave freq:440")
+end
+def draw; end
+__END__
+@MUSIC :bad_bgm
+ch0 xyz123
+"#;
+    let err4 = verify_ruby_script_headless(bad_mml, 5).unwrap_err();
+    assert!(err4.contains("@MUSIC :bad_bgm"), "Expected @MUSIC :bad_bgm in error: {}", err4);
+    assert!(err4.contains("Invalid inline SFX spec"), "Expected inline spec error: {}", err4);
+}
+
+#[test]
+fn test_bundle_unpack_and_external_sfx_with_named_directives() {
+    let tail = r#"
+@SPRITE :hero
+1111
+@SFX :explode
+wave:noise freq:200->50 dur:0.25 env:decay
+@MUSIC :boss_theme
+ch0 T140 L8 O4 e g b > e
+"#;
+    let (_spr, _map, sfx_opt) = bundle::unpack_tail_data_to_sections(tail);
+    let sfx_str = sfx_opt.expect("sfx section should exist");
+    assert!(sfx_str.contains("@SFX :explode"));
+    assert!(sfx_str.contains("@MUSIC :boss_theme"));
+
+    let (sfx_map, music_map) = sound::parse_tail_sounds(&sfx_str);
+    assert!(sfx_map.contains_key(&sound::SoundKey::Name("explode".to_string())));
+    assert!(music_map.contains_key(&sound::SoundKey::Name("boss_theme".to_string())));
 }
 
 #[test]

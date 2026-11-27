@@ -542,7 +542,9 @@ WWWWWW
 外部アセットファイル無しで `.rb` 1ファイル（および `uk build` の単一バイナリ）に完結できるよう、波形合成（チップチューン・シンセサイザー）を Rust 側で動的生成し、`macroquad::audio` で再生します。`uk check` などのヘッドレス実行時は音声デバイスを開かずに安全にノーオペレーションで動作します。
 
 * **`sfx(id_or_spec, channel = -1, volume = 1.0, pitch = 1.0)`**
-  * 効果音を再生します。`id_or_spec` には `@SFX` 番号（整数）、内蔵プリセットシンボル（`:jump`, `:coin`, `:laser`, `:explosion`, `:hit`, `:powerup`, `:select`, `:click`, `:gameover` 等）、またはインライン MML 文字列を指定できます。`-1` で停止します。
+  * 効果音を再生します。`id_or_spec` には `@SFX` の整数 ID・名前付きシンボル（`:explode` 等）、内蔵プリセットシンボル、またはインライン文字列（MML またはシンセレシピ `"wave:square freq:440->880 dur:0.15 env:decay"`）を指定できます。`-1` で停止します。
+  * ユーザー定義 `@SFX :name` と内蔵プリセットが同名のときは、ユーザー定義が優先されます（プリセットの上書きが可能）。
+  * 主な内蔵プリセット: `:jump`, `:coin`, `:laser`, `:shoot`, `:explode`, `:explosion`, `:hit`, `:powerup`, `:select`, `:confirm`, `:cancel`, `:click`, `:slash`, `:splash`, `:clear`, `:gameover`, `:heal`, `:miss`, `:pause`, `:dash`, `:bell`, `:step`。
   * `channel`: `-1` で自動割り当て（全 8 チャンネル使用時は最古のスロットをボイススチール）。`0..7` でチャンネル指定。
   * `volume`: 再生音量（`0.0..=2.0`）。
   * `pitch`: ピッチ倍率（`0.25..=4.0`）。コイン連続取得やコンボ時の音階上昇演出などに使用します。
@@ -556,12 +558,24 @@ WWWWWW
   * `slide`: 終了時までの周波数変化量 (Hz)。`0.0` で固定音程、正で上昇、負で下降します。
 * **`stop_sfx(channel = -1)`**
   * 指定チャンネル（`-1` または省略時は全チャンネル）の効果音を停止します。
-* **`music(id, loop = true, volume = 1.0)`**
-  * `@MUSIC` 定義の BGM を再生します。`id` に `nil` または `-1` を渡すと BGM を停止します。
+* **`music(id_or_name, loop = true, volume = 1.0)`**
+  * `@MUSIC` 定義の BGM（整数 ID または `:boss_theme` 等のシンボル名）を再生します。`id_or_name` に `nil` または `-1` を渡すと BGM を停止します。
 * **`stop_music()`**
   * 再生中の BGM を停止します。
 * **`master_vol(v = nil)` / `sfx_vol(v = nil)` / `music_vol(v = nil)`**
   * 全体音量・SFX 音量・BGM 音量の取得および設定（`0.0..=1.0` にクランプ）を行います。引数を省略または `nil` を渡すと現在の音量を `Float` で返します。設定値は再生中の BGM・SFX にも即座に反映されます。
+
+#### `__END__` セクションでの `@SFX` / `@MUSIC` 定義とシンセレシピ記法
+* **`@SFX <id_or_symbol>`**: 整数 ID（`@SFX 0`）またはシンボル名（`@SFX :explode`）で効果音を定義できます。
+  * **シンセレシピ記法（Key-Value）**: `wave:square freq:440->880 dur:0.15 env:decay vol:0.8`
+    * `wave:` (`square`, `pulse`, `pulse12`, `triangle`, `saw`, `noise`, `organ`, `phaser`, `sine`)
+    * `freq:` 単一周波数または `->` スイープ（例: `440`, `440->880`, `330->660->440`）
+    * `dur:` 長さ（秒、または `150ms`）
+    * `env:` エンベロープ（`decay`, `attack`, `flat`, `punch`, `drop`, `vibrato`, `arp`）
+    * `vol:` 音量（`0.0..=1.0`）、`slide:` 周波数変化量 (Hz)
+  * **MML 風記法**: `wave=pulse speed=2 c3 e3 g3 c4:fade` 等も引き続き利用可能です。
+* **`@MUSIC <id_or_symbol>`**: 整数 ID（`@MUSIC 0`）またはシンボル名（`@MUSIC :boss_theme`）でマルチトラック BGM（`ch0`..`ch3`）や SFX パターン行を定義できます。
+* `uk check` 実行時は、`@SFX` / `@MUSIC` の構文エラーおよびコード内の未定義シンボル・ID 呼び出し（`sfx(:typo)` 等）が静的に検証されます。
 
 ---
 
