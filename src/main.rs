@@ -2434,8 +2434,8 @@ pub fn parse_button_name(name: &str) -> Option<ButtonId> {
         "right" | "r" => Some(ButtonId::Right),
         "up" | "u" => Some(ButtonId::Up),
         "down" | "d" => Some(ButtonId::Down),
-        "z" | "space" | "btn_a" => Some(ButtonId::A),
-        "x" | "enter" | "return" | "btn_b" => Some(ButtonId::B),
+        "a" | "btn1" | "z" | "space" | "btn_a" => Some(ButtonId::A),
+        "b" | "btn2" | "x" | "enter" | "return" | "btn_b" => Some(ButtonId::B),
         "mouse_l" | "mouse_left" | "mouse_1" | "click" | "lclick" => Some(ButtonId::MouseLeft),
         "mouse_r" | "mouse_right" | "mouse_2" | "rclick" => Some(ButtonId::MouseRight),
         "mouse_m" | "mouse_middle" | "mouse_3" | "mclick" => Some(ButtonId::MouseMiddle),
@@ -2486,8 +2486,9 @@ pub fn parse_button_name(name: &str) -> Option<ButtonId> {
         "f12" => Some(ButtonId::Key(KeyCode::F12)),
 
         // --- アルファベット (個別キー) ---
-        "a" | "key_a" => Some(ButtonId::Key(KeyCode::A)),
-        "b" | "key_b" => Some(ButtonId::Key(KeyCode::B)),
+        // "a", "b" は ButtonId::A / ButtonId::B として使用するため、"key_a" / "key_b" で KeyCode::A / KeyCode::B を提供
+        "key_a" => Some(ButtonId::Key(KeyCode::A)),
+        "key_b" => Some(ButtonId::Key(KeyCode::B)),
         "c" | "key_c" => Some(ButtonId::Key(KeyCode::C)),
         // "d" は ButtonId::Down (KeyCode::Down || KeyCode::S) ではなく KeyCode::D (ButtonId::Right) だった点に注意
         // 既存の "d" は ButtonId::Down なので互換性を維持しつつ "key_d" は KeyCode::D を提供

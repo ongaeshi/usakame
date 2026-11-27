@@ -205,12 +205,18 @@ fn test_button_parsing_symbols_and_numbers() {
     assert_eq!(parse_button_name("u"), Some(ButtonId::Up));
     assert_eq!(parse_button_name("down"), Some(ButtonId::Down));
     assert_eq!(parse_button_name("d"), Some(ButtonId::Down));
+    assert_eq!(parse_button_name("a"), Some(ButtonId::A));
+    assert_eq!(parse_button_name("btn1"), Some(ButtonId::A));
     assert_eq!(parse_button_name("z"), Some(ButtonId::A));
     assert_eq!(parse_button_name("space"), Some(ButtonId::A));
     assert_eq!(parse_button_name("btn_a"), Some(ButtonId::A));
+    assert_eq!(parse_button_name("b"), Some(ButtonId::B));
+    assert_eq!(parse_button_name("btn2"), Some(ButtonId::B));
     assert_eq!(parse_button_name("x"), Some(ButtonId::B));
     assert_eq!(parse_button_name("enter"), Some(ButtonId::B));
     assert_eq!(parse_button_name("btn_b"), Some(ButtonId::B));
+    assert_eq!(parse_button_name("key_a"), Some(ButtonId::Key(macroquad::input::KeyCode::A)));
+    assert_eq!(parse_button_name("key_b"), Some(ButtonId::Key(macroquad::input::KeyCode::B)));
     assert_eq!(parse_button_name("mouse_l"), Some(ButtonId::MouseLeft));
     assert_eq!(parse_button_name("click"), Some(ButtonId::MouseLeft));
     assert_eq!(parse_button_name("mouse_r"), Some(ButtonId::MouseRight));
@@ -7324,4 +7330,53 @@ ch1 wave=tri vol=6 T140 L4 O3 c g
     assert!(inline_png.exists());
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn test_btnp_action_button_aliases() {
+    let script = r#"
+def update
+end
+
+def draw
+  $a = btnp(:a)
+  $btn1 = btnp(:btn1)
+  $z = btnp(:z)
+  $b = btnp(:b)
+  $btn2 = btnp(:btn2)
+  $x = btnp(:x)
+  $key_a = btnp(:key_a)
+  $key_b = btnp(:key_b)
+end
+"#;
+    let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
+    let mut rt = GameRuntime::new(&tail, &mrb, true).unwrap();
+
+    // Frame 1: Z (ButtonId::A) and X (ButtonId::B) pressed
+    rt.input_state
+        .borrow_mut()
+        .set_frame_buttons(vec![ButtonId::Key(KeyCode::Z), ButtonId::Key(KeyCode::X)]);
+    rt.call_draw_result().unwrap();
+
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$a").unwrap()), Some(true));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$btn1").unwrap()), Some(true));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$z").unwrap()), Some(true));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$b").unwrap()), Some(true));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$btn2").unwrap()), Some(true));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$x").unwrap()), Some(true));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$key_a").unwrap()), Some(false));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$key_b").unwrap()), Some(false));
+
+    // Frame 2: KeyCode::A / KeyCode::B pressed -> only :key_a / :key_b respond (and :left for A)
+    rt.input_state
+        .borrow_mut()
+        .set_frame_buttons(vec![ButtonId::Key(KeyCode::A), ButtonId::Key(KeyCode::B)]);
+    rt.call_draw_result().unwrap();
+
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$a").unwrap()), Some(false));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$btn1").unwrap()), Some(false));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$b").unwrap()), Some(false));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$btn2").unwrap()), Some(false));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$key_a").unwrap()), Some(true));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$key_b").unwrap()), Some(true));
 }
