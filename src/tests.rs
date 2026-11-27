@@ -6601,3 +6601,115 @@ end
     assert_eq!(robject_to_bool(rt.vm.globals.get("$p3_up").unwrap()), Some(true));
     assert_eq!(robject_to_bool(rt.vm.globals.get("$p3_upp").unwrap()), Some(false));
 }
+
+#[test]
+fn test_compute_surface_draw_params_scaling_and_rotation() {
+    // 80x48 サーフェスを (0, 24) に scale: 4.0 で描画 -> 左上 (0, 24) 基準で 320x192
+    let (dx, dy, params) =
+        compute_surface_draw_params(80.0, 48.0, 0.0, 24.0, false, false, 0.0, 4.0, 4.0)
+            .expect("Should compute surface draw params");
+    assert!((dx - 0.0).abs() < 1e-4);
+    assert!((dy - 24.0).abs() < 1e-4);
+    assert_eq!(params.dest_size, Some(vec2(320.0, 192.0)));
+    assert_eq!(params.pivot, Some(vec2(160.0, 120.0)));
+    assert!(!params.flip_x);
+    assert!(!params.flip_y);
+
+    // scale_x / scale_y 独立指定 + 回転
+    let (dx2, dy2, params2) =
+        compute_surface_draw_params(64.0, 48.0, 10.0, 20.0, false, false, 45.0, 2.0, 3.0)
+            .expect("Should compute surface draw params");
+    assert!((dx2 - 10.0).abs() < 1e-4);
+    assert!((dy2 - 20.0).abs() < 1e-4);
+    assert_eq!(params2.dest_size, Some(vec2(128.0, 144.0)));
+    assert_eq!(params2.pivot, Some(vec2(74.0, 92.0)));
+    assert!((params2.rotation - 45.0f32.to_radians()).abs() < 1e-5);
+
+    // 負の scale は反転として扱う
+    let (_, _, neg_params) =
+        compute_surface_draw_params(16.0, 16.0, 4.0, 8.0, false, true, 0.0, -2.0, -3.0).unwrap();
+    assert_eq!(neg_params.dest_size, Some(vec2(32.0, 48.0)));
+    assert!(neg_params.flip_x);
+    assert!(!neg_params.flip_y);
+
+    // scale = 0.0 は描画しない
+    assert!(
+        compute_surface_draw_params(16.0, 16.0, 0.0, 0.0, false, false, 0.0, 0.0, 1.0).is_none()
+    );
+}
+
+#[test]
+fn test_draw_surface_kwargs_parsing_pixel_and_gpu() {
+    let captured: Rc<RefCell<Vec<DrawSurfaceOptions>>> = Rc::new(RefCell::new(Vec::new()));
+    let script = r#"
+def update
+end
+
+def draw
+  pix = create_surface(80, 48, :pixel)
+  gpu = create_surface(64, 48, :gpu)
+
+  # 1. キーワード引数のみ（46_falling_sand_dx.rb で報告された形式）
+  capture_surf_opts(pix, 0, 24, scale: 4.0)
+  draw_surface(pix, 0, 24, scale: 4.0)
+
+  # 2. 位置引数 alpha, blend_mode + キーワード引数 scale:
+  capture_surf_opts(pix, 0, 24, 1.0, nil, scale: 4.0)
+  draw_surface(pix, 0, 24, 1.0, nil, scale: 4.0)
+
+  # 3. :gpu サーフェスでの scale_x / scale_y / rot / flip_x
+  capture_surf_opts(gpu, 10, 20, scale_x: 2.0, scale_y: 3.0, rot: 45.0, flip_x: true)
+  draw_surface(gpu, 10, 20, scale_x: 2.0, scale_y: 3.0, rot: 45.0, flip_x: true)
+
+  # 4. 明示的 Hash リテラル引数 + scale に対する scale_x 上書き
+  capture_surf_opts(gpu, 5, 6, { scale: 2.0, scale_x: 5.0, alpha: 0.5, blend: :add })
+  draw_surface(gpu, 5, 6, { scale: 2.0, scale_x: 5.0, alpha: 0.5, blend: :add })
+end
+"#;
+    let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
+    let mut rt = GameRuntime::new(&tail, &mrb, true).unwrap();
+    let cap_clone = captured.clone();
+    let obj_class = rt.vm.object_class.clone();
+    mrb_define_cmethod(
+        &mut rt.vm,
+        obj_class,
+        "capture_surf_opts",
+        Box::new(move |vm, args| {
+            cap_clone.borrow_mut().push(parse_draw_surface_options(vm, args));
+            Ok(RObject::nil_rc())
+        }),
+    );
+
+    rt.call_draw_result().unwrap();
+
+    let opts = captured.borrow();
+    assert_eq!(opts.len(), 4);
+
+    // 1. draw_surface(pix, 0, 24, scale: 4.0)
+    assert_eq!(opts[0].x, 0.0);
+    assert_eq!(opts[0].y, 24.0);
+    assert!((opts[0].scale_x - 4.0).abs() < 1e-4);
+    assert!((opts[0].scale_y - 4.0).abs() < 1e-4);
+
+    // 2. draw_surface(pix, 0, 24, 1.0, nil, scale: 4.0)
+    assert_eq!(opts[1].alpha, 1.0);
+    assert_eq!(opts[1].blend_override, None);
+    assert!((opts[1].scale_x - 4.0).abs() < 1e-4);
+    assert!((opts[1].scale_y - 4.0).abs() < 1e-4);
+
+    // 3. draw_surface(gpu, 10, 20, scale_x: 2.0, scale_y: 3.0, rot: 45.0, flip_x: true)
+    assert_eq!(opts[2].x, 10.0);
+    assert_eq!(opts[2].y, 20.0);
+    assert!((opts[2].scale_x - 2.0).abs() < 1e-4);
+    assert!((opts[2].scale_y - 3.0).abs() < 1e-4);
+    assert!((opts[2].rot - 45.0).abs() < 1e-4);
+    assert!(opts[2].flip_x);
+
+    // 4. Hash リテラル + scale_x 上書き
+    assert_eq!(opts[3].x, 5.0);
+    assert_eq!(opts[3].y, 6.0);
+    assert!((opts[3].scale_x - 5.0).abs() < 1e-4);
+    assert!((opts[3].scale_y - 2.0).abs() < 1e-4);
+    assert!((opts[3].alpha - 0.5).abs() < 1e-4);
+    assert_eq!(opts[3].blend_override, Some(BlendMode::Add));
+}

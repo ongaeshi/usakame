@@ -2749,6 +2749,229 @@ pub fn compute_sprite_draw_params_ext(
     ))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DrawSurfaceOptions {
+    pub id: i32,
+    pub x: f32,
+    pub y: f32,
+    pub alpha: f32,
+    pub blend_override: Option<BlendMode>,
+    pub u_opt: Option<i32>,
+    pub v_opt: Option<i32>,
+    pub w_opt: Option<i32>,
+    pub h_opt: Option<i32>,
+    pub scale_x: f32,
+    pub scale_y: f32,
+    pub rot: f32,
+    pub flip_x: bool,
+    pub flip_y: bool,
+    pub pal_override: Option<i32>,
+}
+
+fn apply_draw_surface_kv_option(
+    opts: &mut DrawSurfaceOptions,
+    scale_x_opt: &mut Option<f32>,
+    scale_y_opt: &mut Option<f32>,
+    scale_opt: &mut Option<f32>,
+    raw_key: &str,
+    v: &Rc<RObject>,
+) {
+    match raw_key.trim_start_matches(':') {
+        "x" => {
+            if let Some(val) = robject_to_f32(v) {
+                opts.x = val;
+            }
+        }
+        "y" => {
+            if let Some(val) = robject_to_f32(v) {
+                opts.y = val;
+            }
+        }
+        "alpha" => {
+            if let Some(val) = robject_to_f32(v) {
+                opts.alpha = val.clamp(0.0, 1.0);
+            }
+        }
+        "blend" => {
+            if !matches!(v.value, RValue::Nil) {
+                opts.blend_override = Some(parse_blend_mode(v));
+            }
+        }
+        "u" => opts.u_opt = robject_to_i32(v),
+        "v" => opts.v_opt = robject_to_i32(v),
+        "w" => opts.w_opt = robject_to_i32(v),
+        "h" => opts.h_opt = robject_to_i32(v),
+        "scale" => {
+            if let Some(val) = robject_to_f32(v) {
+                *scale_opt = Some(val);
+            }
+        }
+        "scale_x" => {
+            if let Some(val) = robject_to_f32(v) {
+                *scale_x_opt = Some(val);
+            }
+        }
+        "scale_y" => {
+            if let Some(val) = robject_to_f32(v) {
+                *scale_y_opt = Some(val);
+            }
+        }
+        "rot" => {
+            if let Some(val) = robject_to_f32(v) {
+                opts.rot = val;
+            }
+        }
+        "flip_x" => {
+            opts.flip_x = bool::try_from(v.as_ref()).unwrap_or(false);
+        }
+        "flip_y" => {
+            opts.flip_y = bool::try_from(v.as_ref()).unwrap_or(false);
+        }
+        "pal" => {
+            opts.pal_override = robject_to_i32(v);
+        }
+        _ => {}
+    }
+}
+
+pub fn parse_draw_surface_options(vm: &VM, args: &[Rc<RObject>]) -> DrawSurfaceOptions {
+    let (pos, opts_hash) = if let Some(last) = args.last()
+        && matches!(last.value, RValue::Hash(_))
+    {
+        (&args[..args.len() - 1], Some(last))
+    } else {
+        (args, None)
+    };
+    let mut opts = DrawSurfaceOptions {
+        id: arg_i32(pos, 0, 0),
+        x: arg_f32(pos, 1, 0.0),
+        y: arg_f32(pos, 2, 0.0),
+        alpha: arg_alpha(pos, 3),
+        blend_override: pos
+            .get(4)
+            .filter(|v| !matches!(v.value, RValue::Nil))
+            .map(parse_blend_mode),
+        u_opt: None,
+        v_opt: None,
+        w_opt: None,
+        h_opt: None,
+        scale_x: 1.0,
+        scale_y: 1.0,
+        rot: 0.0,
+        flip_x: false,
+        flip_y: false,
+        pal_override: None,
+    };
+    let mut scale_opt: Option<f32> = None;
+    let mut scale_x_opt: Option<f32> = None;
+    let mut scale_y_opt: Option<f32> = None;
+
+    if let Some(hash_obj) = opts_hash
+        && let RValue::Hash(ref hash_cell) = hash_obj.value
+    {
+        let hash = hash_cell.borrow();
+        for (_k_obj, (k, v)) in hash.iter() {
+            let key_str = match &k.value {
+                RValue::Symbol(s) => s.name.clone(),
+                RValue::String(s, _) => String::from_utf8_lossy(&s.borrow()).to_string(),
+                _ => continue,
+            };
+            apply_draw_surface_kv_option(
+                &mut opts,
+                &mut scale_x_opt,
+                &mut scale_y_opt,
+                &mut scale_opt,
+                &key_str,
+                v,
+            );
+        }
+    }
+    if let Some(kwargs) = vm.get_kwargs() {
+        for (k, v) in kwargs.iter() {
+            apply_draw_surface_kv_option(
+                &mut opts,
+                &mut scale_x_opt,
+                &mut scale_y_opt,
+                &mut scale_opt,
+                k,
+                v,
+            );
+        }
+    }
+    if let Some(ref kargs) = *vm.kargs.borrow() {
+        for (sym, v) in kargs.iter() {
+            apply_draw_surface_kv_option(
+                &mut opts,
+                &mut scale_x_opt,
+                &mut scale_y_opt,
+                &mut scale_opt,
+                &sym.name,
+                v,
+            );
+        }
+    }
+
+    opts.scale_x = scale_x_opt.or(scale_opt).unwrap_or(1.0);
+    opts.scale_y = scale_y_opt.or(scale_opt).unwrap_or(1.0);
+    opts
+}
+
+/// サーフェス描画パラメータ計算（左上座標 `(x, y)` 基準、回転時は描画矩形の中心ピボット）
+pub fn compute_surface_draw_params(
+    src_w: f32,
+    src_h: f32,
+    x: f32,
+    y: f32,
+    flip_x: bool,
+    flip_y: bool,
+    rotate_deg: f32,
+    scale_x: f32,
+    scale_y: f32,
+) -> Option<(f32, f32, DrawTextureParams)> {
+    if !scale_x.is_finite()
+        || !scale_y.is_finite()
+        || scale_x.abs() < f32::EPSILON
+        || scale_y.abs() < f32::EPSILON
+    {
+        return None;
+    }
+    let (sx, fx) = if scale_x < 0.0 {
+        (-scale_x, !flip_x)
+    } else {
+        (scale_x, flip_x)
+    };
+    let (sy, fy) = if scale_y < 0.0 {
+        (-scale_y, !flip_y)
+    } else {
+        (scale_y, flip_y)
+    };
+
+    let draw_x = x.floor();
+    let draw_y = y.floor();
+    let scaled_w = src_w * sx;
+    let scaled_h = src_h * sy;
+    let center_x = draw_x + scaled_w * 0.5;
+    let center_y = draw_y + scaled_h * 0.5;
+    let rotation = if rotate_deg.is_finite() {
+        rotate_deg.to_radians()
+    } else {
+        0.0
+    };
+
+    Some((
+        draw_x,
+        draw_y,
+        DrawTextureParams {
+            dest_size: Some(vec2(scaled_w, scaled_h)),
+            rotation,
+            flip_x: fx,
+            flip_y: fy,
+            pivot: Some(vec2(center_x, center_y)),
+            ..Default::default()
+        },
+    ))
+}
+
 fn draw_sprite_transformed(
     sprite: &SpriteData,
     state: &DrawState,
@@ -6546,6 +6769,229 @@ fn register_surface_api(
         }),
     );
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DrawSurfaceOptions {
+    pub id: i32,
+    pub x: f32,
+    pub y: f32,
+    pub alpha: f32,
+    pub blend_override: Option<BlendMode>,
+    pub u_opt: Option<i32>,
+    pub v_opt: Option<i32>,
+    pub w_opt: Option<i32>,
+    pub h_opt: Option<i32>,
+    pub scale_x: f32,
+    pub scale_y: f32,
+    pub rot: f32,
+    pub flip_x: bool,
+    pub flip_y: bool,
+    pub pal_override: Option<i32>,
+}
+
+fn apply_draw_surface_kv_option(
+    opts: &mut DrawSurfaceOptions,
+    scale_x_opt: &mut Option<f32>,
+    scale_y_opt: &mut Option<f32>,
+    scale_opt: &mut Option<f32>,
+    raw_key: &str,
+    v: &Rc<RObject>,
+) {
+    match raw_key.trim_start_matches(':') {
+        "x" => {
+            if let Some(val) = robject_to_f32(v) {
+                opts.x = val;
+            }
+        }
+        "y" => {
+            if let Some(val) = robject_to_f32(v) {
+                opts.y = val;
+            }
+        }
+        "alpha" => {
+            if let Some(val) = robject_to_f32(v) {
+                opts.alpha = val.clamp(0.0, 1.0);
+            }
+        }
+        "blend" => {
+            if !matches!(v.value, RValue::Nil) {
+                opts.blend_override = Some(parse_blend_mode(v));
+            }
+        }
+        "u" => opts.u_opt = robject_to_i32(v),
+        "v" => opts.v_opt = robject_to_i32(v),
+        "w" => opts.w_opt = robject_to_i32(v),
+        "h" => opts.h_opt = robject_to_i32(v),
+        "scale" => {
+            if let Some(val) = robject_to_f32(v) {
+                *scale_opt = Some(val);
+            }
+        }
+        "scale_x" => {
+            if let Some(val) = robject_to_f32(v) {
+                *scale_x_opt = Some(val);
+            }
+        }
+        "scale_y" => {
+            if let Some(val) = robject_to_f32(v) {
+                *scale_y_opt = Some(val);
+            }
+        }
+        "rot" => {
+            if let Some(val) = robject_to_f32(v) {
+                opts.rot = val;
+            }
+        }
+        "flip_x" => {
+            opts.flip_x = bool::try_from(v.as_ref()).unwrap_or(false);
+        }
+        "flip_y" => {
+            opts.flip_y = bool::try_from(v.as_ref()).unwrap_or(false);
+        }
+        "pal" => {
+            opts.pal_override = robject_to_i32(v);
+        }
+        _ => {}
+    }
+}
+
+pub fn parse_draw_surface_options(vm: &VM, args: &[Rc<RObject>]) -> DrawSurfaceOptions {
+    let (pos, opts_hash) = if let Some(last) = args.last()
+        && matches!(last.value, RValue::Hash(_))
+    {
+        (&args[..args.len() - 1], Some(last))
+    } else {
+        (args, None)
+    };
+    let mut opts = DrawSurfaceOptions {
+        id: arg_i32(pos, 0, 0),
+        x: arg_f32(pos, 1, 0.0),
+        y: arg_f32(pos, 2, 0.0),
+        alpha: arg_alpha(pos, 3),
+        blend_override: pos
+            .get(4)
+            .filter(|v| !matches!(v.value, RValue::Nil))
+            .map(parse_blend_mode),
+        u_opt: None,
+        v_opt: None,
+        w_opt: None,
+        h_opt: None,
+        scale_x: 1.0,
+        scale_y: 1.0,
+        rot: 0.0,
+        flip_x: false,
+        flip_y: false,
+        pal_override: None,
+    };
+    let mut scale_opt: Option<f32> = None;
+    let mut scale_x_opt: Option<f32> = None;
+    let mut scale_y_opt: Option<f32> = None;
+
+    if let Some(hash_obj) = opts_hash
+        && let RValue::Hash(ref hash_cell) = hash_obj.value
+    {
+        let hash = hash_cell.borrow();
+        for (_k_obj, (k, v)) in hash.iter() {
+            let key_str = match &k.value {
+                RValue::Symbol(s) => s.name.clone(),
+                RValue::String(s, _) => String::from_utf8_lossy(&s.borrow()).to_string(),
+                _ => continue,
+            };
+            apply_draw_surface_kv_option(
+                &mut opts,
+                &mut scale_x_opt,
+                &mut scale_y_opt,
+                &mut scale_opt,
+                &key_str,
+                v,
+            );
+        }
+    }
+    if let Some(kwargs) = vm.get_kwargs() {
+        for (k, v) in kwargs.iter() {
+            apply_draw_surface_kv_option(
+                &mut opts,
+                &mut scale_x_opt,
+                &mut scale_y_opt,
+                &mut scale_opt,
+                k,
+                v,
+            );
+        }
+    }
+    if let Some(ref kargs) = *vm.kargs.borrow() {
+        for (sym, v) in kargs.iter() {
+            apply_draw_surface_kv_option(
+                &mut opts,
+                &mut scale_x_opt,
+                &mut scale_y_opt,
+                &mut scale_opt,
+                &sym.name,
+                v,
+            );
+        }
+    }
+
+    opts.scale_x = scale_x_opt.or(scale_opt).unwrap_or(1.0);
+    opts.scale_y = scale_y_opt.or(scale_opt).unwrap_or(1.0);
+    opts
+}
+
+/// サーフェス描画パラメータ計算（左上座標 `(x, y)` 基準、回転時は描画矩形の中心ピボット）
+pub fn compute_surface_draw_params(
+    src_w: f32,
+    src_h: f32,
+    x: f32,
+    y: f32,
+    flip_x: bool,
+    flip_y: bool,
+    rotate_deg: f32,
+    scale_x: f32,
+    scale_y: f32,
+) -> Option<(f32, f32, DrawTextureParams)> {
+    if !scale_x.is_finite()
+        || !scale_y.is_finite()
+        || scale_x.abs() < f32::EPSILON
+        || scale_y.abs() < f32::EPSILON
+    {
+        return None;
+    }
+    let (sx, fx) = if scale_x < 0.0 {
+        (-scale_x, !flip_x)
+    } else {
+        (scale_x, flip_x)
+    };
+    let (sy, fy) = if scale_y < 0.0 {
+        (-scale_y, !flip_y)
+    } else {
+        (scale_y, flip_y)
+    };
+
+    let draw_x = x.floor();
+    let draw_y = y.floor();
+    let scaled_w = src_w * sx;
+    let scaled_h = src_h * sy;
+    let center_x = draw_x + scaled_w * 0.5;
+    let center_y = draw_y + scaled_h * 0.5;
+    let rotation = if rotate_deg.is_finite() {
+        rotate_deg.to_radians()
+    } else {
+        0.0
+    };
+
+    Some((
+        draw_x,
+        draw_y,
+        DrawTextureParams {
+            dest_size: Some(vec2(scaled_w, scaled_h)),
+            rotation,
+            flip_x: fx,
+            flip_y: fy,
+            pivot: Some(vec2(center_x, center_y)),
+            ..Default::default()
+        },
+    ))
+}
+
     // draw_surface(surf, x = 0, y = 0, alpha = 1.0, blend_mode = nil, **opts) -> nil
     let surfs_draw = surfaces.clone();
     let state_draw = draw_state.clone();
@@ -6554,115 +7000,20 @@ fn register_surface_api(
         vm,
         obj_class.clone(),
         "draw_surface",
-        Box::new(move |_vm, args| {
+        Box::new(move |vm, args| {
             if args.is_empty() {
                 return Ok(RObject::nil_rc());
             }
-            let (pos, opts_hash) = if let Some(last) = args.last()
-                && matches!(last.value, RValue::Hash(_))
-            {
-                (&args[..args.len() - 1], Some(last))
-            } else {
-                (args, None)
-            };
-            let id = arg_i32(pos, 0, 0);
-            let mut x = arg_f32(pos, 1, 0.0);
-            let mut y = arg_f32(pos, 2, 0.0);
-            let mut alpha = arg_alpha(pos, 3);
-            let mut blend_override: Option<BlendMode> = pos
-                .get(4)
-                .filter(|v| !matches!(v.value, RValue::Nil))
-                .map(parse_blend_mode);
-            let mut u_opt: Option<i32> = None;
-            let mut v_opt: Option<i32> = None;
-            let mut w_opt: Option<i32> = None;
-            let mut h_opt: Option<i32> = None;
-            let mut scale_x: f32 = 1.0;
-            let mut scale_y: f32 = 1.0;
-            let mut rot: f32 = 0.0;
-            let mut flip_x = false;
-            let mut flip_y = false;
-            let mut pal_override: Option<i32> = None;
-
-            if let Some(hash_obj) = opts_hash
-                && let RValue::Hash(ref hash_cell) = hash_obj.value
-            {
-                let hash = hash_cell.borrow();
-                for (_k_obj, (k, v)) in hash.iter() {
-                    let key_str = match &k.value {
-                        RValue::Symbol(s) => s.name.trim_start_matches(':').to_string(),
-                        RValue::String(s, _) => String::from_utf8_lossy(&s.borrow()).to_string(),
-                        _ => continue,
-                    };
-                    match key_str.as_str() {
-                        "x" => {
-                            if let Some(val) = robject_to_f32(v) {
-                                x = val;
-                            }
-                        }
-                        "y" => {
-                            if let Some(val) = robject_to_f32(v) {
-                                y = val;
-                            }
-                        }
-                        "alpha" => {
-                            if let Some(val) = robject_to_f32(v) {
-                                alpha = val.clamp(0.0, 1.0);
-                            }
-                        }
-                        "blend" => {
-                            if !matches!(v.value, RValue::Nil) {
-                                blend_override = Some(parse_blend_mode(v));
-                            }
-                        }
-                        "u" => u_opt = robject_to_i32(v),
-                        "v" => v_opt = robject_to_i32(v),
-                        "w" => w_opt = robject_to_i32(v),
-                        "h" => h_opt = robject_to_i32(v),
-                        "scale" => {
-                            if let Some(val) = robject_to_f32(v) {
-                                scale_x = val;
-                                scale_y = val;
-                            }
-                        }
-                        "scale_x" => {
-                            if let Some(val) = robject_to_f32(v) {
-                                scale_x = val;
-                            }
-                        }
-                        "scale_y" => {
-                            if let Some(val) = robject_to_f32(v) {
-                                scale_y = val;
-                            }
-                        }
-                        "rot" => {
-                            if let Some(val) = robject_to_f32(v) {
-                                rot = val;
-                            }
-                        }
-                        "flip_x" => {
-                            flip_x = bool::try_from(v.as_ref()).unwrap_or(false);
-                        }
-                        "flip_y" => {
-                            flip_y = bool::try_from(v.as_ref()).unwrap_or(false);
-                        }
-                        "pal" => {
-                            pal_override = robject_to_i32(v);
-                        }
-                        _ => {}
-                    }
-                }
-            }
-
-            if alpha <= 0.0 {
+            let opts = parse_draw_surface_options(vm, args);
+            if opts.alpha <= 0.0 {
                 return Ok(RObject::nil_rc());
             }
 
             let mut surfs_mut = surfs_draw.borrow_mut();
-            if surfs_mut.active_target() == surface::DrawTarget::Surface(id) {
+            if surfs_mut.active_target() == surface::DrawTarget::Surface(opts.id) {
                 eprintln!(
                     "Warning: draw_surface({}) skipped while rendering to the same surface",
-                    id
+                    opts.id
                 );
                 return Ok(RObject::nil_rc());
             }
@@ -6671,31 +7022,31 @@ fn register_surface_api(
             }
 
             let mut state = *state_draw.borrow();
-            if let Some(pid) = pal_override
+            if let Some(pid) = opts.pal_override
                 && let Some(target_pal) = pals_draw.borrow().get(&pid)
             {
                 state.palette_rgba = *target_pal;
             }
-            let Some(entry) = surfs_mut.entries.get_mut(&id) else {
+            let Some(entry) = surfs_mut.entries.get_mut(&opts.id) else {
                 return Ok(RObject::nil_rc());
             };
-            if let Some(bm) = blend_override {
+            if let Some(bm) = opts.blend_override {
                 apply_gl_blend(bm);
             }
+            let has_subrect = opts.u_opt.is_some()
+                || opts.v_opt.is_some()
+                || opts.w_opt.is_some()
+                || opts.h_opt.is_some();
             match entry {
                 surface::SurfaceEntry::Gpu(gpu) => {
                     if let Some(ref rt) = gpu.render_target {
                         let surf_w = gpu.width as i32;
                         let surf_h = gpu.height as i32;
-                        let u = u_opt.unwrap_or(0).clamp(0, surf_w);
-                        let v = v_opt.unwrap_or(0).clamp(0, surf_h);
-                        let src_w = w_opt.unwrap_or(surf_w - u).clamp(0, surf_w - u);
-                        let src_h = h_opt.unwrap_or(surf_h - v).clamp(0, surf_h - v);
+                        let u = opts.u_opt.unwrap_or(0).clamp(0, surf_w);
+                        let v = opts.v_opt.unwrap_or(0).clamp(0, surf_h);
+                        let src_w = opts.w_opt.unwrap_or(surf_w - u).clamp(0, surf_w - u);
+                        let src_h = opts.h_opt.unwrap_or(surf_h - v).clamp(0, surf_h - v);
                         if src_w > 0 && src_h > 0 {
-                            let has_subrect = u_opt.is_some()
-                                || v_opt.is_some()
-                                || w_opt.is_some()
-                                || h_opt.is_some();
                             let src_rect = if has_subrect {
                                 Some(Rect::new(
                                     u as f32,
@@ -6707,16 +7058,16 @@ fn register_surface_api(
                                 None
                             };
                             if let Some((draw_x, draw_y, mut params)) =
-                                compute_sprite_draw_params_ext(
+                                compute_surface_draw_params(
                                     src_w as f32,
                                     src_h as f32,
-                                    x - state.cam_x,
-                                    y - state.cam_y,
-                                    flip_x,
-                                    !flip_y,
-                                    rot,
-                                    scale_x,
-                                    scale_y,
+                                    opts.x - state.cam_x,
+                                    opts.y - state.cam_y,
+                                    opts.flip_x,
+                                    !opts.flip_y,
+                                    opts.rot,
+                                    opts.scale_x,
+                                    opts.scale_y,
                                 )
                             {
                                 params.source = src_rect;
@@ -6724,7 +7075,7 @@ fn register_surface_api(
                                     &rt.texture,
                                     draw_x,
                                     draw_y,
-                                    Color::new(1.0, 1.0, 1.0, alpha),
+                                    Color::new(1.0, 1.0, 1.0, opts.alpha),
                                     params,
                                 );
                             }
@@ -6737,31 +7088,27 @@ fn register_surface_api(
                     if let Some(tex) =
                         pix.sync_texture(&state.pal_map, state.palt_mask, &state.palette_rgba)
                     {
-                        let u = u_opt.unwrap_or(0).clamp(0, surf_w);
-                        let v = v_opt.unwrap_or(0).clamp(0, surf_h);
-                        let src_w = w_opt.unwrap_or(surf_w - u).clamp(0, surf_w - u);
-                        let src_h = h_opt.unwrap_or(surf_h - v).clamp(0, surf_h - v);
+                        let u = opts.u_opt.unwrap_or(0).clamp(0, surf_w);
+                        let v = opts.v_opt.unwrap_or(0).clamp(0, surf_h);
+                        let src_w = opts.w_opt.unwrap_or(surf_w - u).clamp(0, surf_w - u);
+                        let src_h = opts.h_opt.unwrap_or(surf_h - v).clamp(0, surf_h - v);
                         if src_w > 0 && src_h > 0 {
-                            let has_subrect = u_opt.is_some()
-                                || v_opt.is_some()
-                                || w_opt.is_some()
-                                || h_opt.is_some();
                             let src_rect = if has_subrect {
                                 Some(Rect::new(u as f32, v as f32, src_w as f32, src_h as f32))
                             } else {
                                 None
                             };
                             if let Some((draw_x, draw_y, mut params)) =
-                                compute_sprite_draw_params_ext(
+                                compute_surface_draw_params(
                                     src_w as f32,
                                     src_h as f32,
-                                    x - state.cam_x,
-                                    y - state.cam_y,
-                                    flip_x,
-                                    flip_y,
-                                    rot,
-                                    scale_x,
-                                    scale_y,
+                                    opts.x - state.cam_x,
+                                    opts.y - state.cam_y,
+                                    opts.flip_x,
+                                    opts.flip_y,
+                                    opts.rot,
+                                    opts.scale_x,
+                                    opts.scale_y,
                                 )
                             {
                                 params.source = src_rect;
@@ -6769,7 +7116,7 @@ fn register_surface_api(
                                     tex,
                                     draw_x,
                                     draw_y,
-                                    Color::new(1.0, 1.0, 1.0, alpha),
+                                    Color::new(1.0, 1.0, 1.0, opts.alpha),
                                     params,
                                 );
                             }
@@ -6777,7 +7124,7 @@ fn register_surface_api(
                     }
                 }
             }
-            if blend_override.is_some() {
+            if opts.blend_override.is_some() {
                 apply_gl_blend(state.blend);
             }
             Ok(RObject::nil_rc())

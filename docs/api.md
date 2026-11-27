@@ -327,7 +327,7 @@ config(
 | **`surface_size`** | `(surf)` | `[w, h]` / `nil` | サーフェスの `[幅, 高さ]` を返します（無効ID時は `nil`）。 |
 | **`render_to`** | `(surf) { ... }` | `nil` | ブロック内の描画出力先を `surf` に切り替えます（ネスト可・例外や `break` 発生時も元のターゲットと `camera` / `clip` / `blend` / `pal` を自動復元）。 |
 | **`set_target`** | `(surf = nil)` | `nil` | ブロックを使わずに描画先を切り替えます（`nil` でメイン仮想画面へ復帰、フレーム終了時にも自動リセット）。 |
-| **`draw_surface`** | `(surf, x = 0, y = 0, alpha = 1.0, blend_mode = nil, **opts)` | `nil` | サーフェスを座標 `(x, y)` に合成描画します。位置引数のほか末尾キーワード引数（`alpha:`, `blend:`, `u:`, `v:`, `w:`, `h:`, `scale:`, `scale_x:`, `scale_y:`, `rot:`, `flip_x:`, `flip_y:`, `pal:`）も指定可能です。 |
+| **`draw_surface`** | `(surf, x = 0, y = 0, alpha = 1.0, blend_mode = nil, **opts)` | `nil` | サーフェスを左上座標 `(x, y)` 基準で合成描画します（ニアレスト補間、`rot:` 指定時は描画矩形の中心ピボットで回転）。位置引数のほか末尾キーワード引数（`alpha:`, `blend:`, `u:`, `v:`, `w:`, `h:`, `scale:`, `scale_x:`, `scale_y:`, `rot:`, `flip_x:`, `flip_y:`, `pal:`）も指定可能です。 |
 
 #### ピクセル取得・破壊可能地形クエリ API（`:pixel` サーフェス向け）
 > 透明ピクセルおよび範囲外座標は `mget` と同じく **`nil`**、不透明ピクセルはパレット色番号 **`0`〜`15`** を返します（黒色 `0` も真として判定可能）。
