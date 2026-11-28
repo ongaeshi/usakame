@@ -12,9 +12,9 @@
 #   5. 王道レトロRPG風コマンド選択式ターンバトル UI
 #
 # 【操作方法】
-#   - 上下左右キー (WASD): カーソル移動
-#   - Z / Space: 決定・メッセージ送り・文字スキップ
-#   - X / Enter: キャンセル・タイトルへ戻る
+#   - 上下左右キー : カーソル移動
+#   - Z: 決定・メッセージ送り・文字スキップ
+#   - X: キャンセル・タイトルへ戻る
 # ==============================================================================
 
 config(
@@ -147,7 +147,7 @@ def update_dialogue
       sfx(2) if $dlg[:char_idx] % 3 == 0
     end
     # ボタン押下で一括表示スキップ
-    if btnp(:btn_a)
+    if btnp(1)
       $dlg[:char_idx] = total_chars
     end
   else
@@ -160,13 +160,13 @@ def update_dialogue
       elsif btnp(:down) || btnp(:right)
         $dlg[:choice_cursor] = ($dlg[:choice_cursor] + 1) % $dlg[:choices].size
         sfx(2)
-      elsif btnp(:btn_a)
+      elsif btnp(1)
         selected = $dlg[:choice_cursor]
         $dlg[:active] = false
         on_dialogue_choice(selected)
       end
     else
-      if btnp(:btn_a)
+      if btnp(1)
         if !is_last_page
           $dlg[:page_idx] += 1
           $dlg[:char_idx] = 0
@@ -239,12 +239,12 @@ def update_battle
     elsif btnp(:down)
       $btl[:cursor] = ($btl[:cursor] + 1) % 4
       sfx(2)
-    elsif btnp(:btn_a)
+    elsif btnp(1)
       execute_hero_command($btl[:cursor])
     end
   elsif $btl[:state] == :message
     $btl[:wait_timer] -= 1
-    if $btl[:wait_timer] <= 0 || btnp(:btn_a)
+    if $btl[:wait_timer] <= 0 || btnp(1)
       if $btl[:boss_hp] <= 0
         $btl[:win] = true
         start_scene_transition(:result)
@@ -263,7 +263,7 @@ def update_battle
     end
   elsif $btl[:state] == :enemy_turn
     $btl[:wait_timer] -= 1
-    if $btl[:wait_timer] <= 0 || btnp(:btn_a)
+    if $btl[:wait_timer] <= 0 || btnp(1)
       if $btl[:hero_hp] <= 0
         $btl[:win] = false
         start_scene_transition(:result)
@@ -339,7 +339,7 @@ def update
     elsif btnp(:down)
       $title_cursor = ($title_cursor + 1) % 2
       sfx(2)
-    elsif btnp(:btn_a)
+    elsif btnp(1)
       if $title_cursor == 0
         start_scene_transition(:dialogue)
       else
@@ -348,11 +348,11 @@ def update
     end
   elsif $scene == :dialogue
     update_dialogue
-    start_scene_transition(:title) if btnp(:btn_b)
+    start_scene_transition(:title) if btnp(2)
   elsif $scene == :battle
     update_battle
   elsif $scene == :result
-    if btnp(:btn_a) || btnp(:btn_b)
+    if btnp(1) || btnp(2)
       start_scene_transition(:title)
     end
   end
@@ -390,7 +390,7 @@ def draw_title_scene
   end
 
   if ($t / 20) % 2 == 0
-    print_text("- PRESS Z / SPACE TO SELECT -", 42, 216, 10)
+    print_text("- PRESS Z TO SELECT -", 42, 216, 10)
   end
 end
 

@@ -8,8 +8,8 @@
 #   マウス移動 / ドラッグ : 発射角度を狙う
 #   左クリック (離す)     : オーブ発射 / メニュー決定
 #   ← / → (A / D)        : 角度調整 / カード選択
-#   Z / Space            : オーブ発射 / メニュー決定
-#   X / Enter / 右クリック : 早送り (長押し3倍速) / 弾の強制回収
+#   Z            : オーブ発射 / メニュー決定
+#   X / 右クリック : 早送り (長押し3倍速) / 弾の強制回収
 # ==============================================================================
 
 config(
@@ -859,7 +859,7 @@ class TitleScene
       o[:vy] = -o[:vy].abs if o[:y] > 200
     end
 
-    if btnp(4) || btnp(:mouse_l)
+    if btnp(1) || btnp(:mouse_l)
       run BattleScene.new(RunState.new)
     end
   end
@@ -940,9 +940,9 @@ class UpgradeScene
   def update
     @frame += 1
 
-    if btnp(0)
+    if btnp(:left)
       @selected = (@selected + 2) % 3
-    elsif btnp(1)
+    elsif btnp(:right)
       @selected = (@selected + 1) % 3
     end
 
@@ -959,7 +959,7 @@ class UpgradeScene
       i += 1
     end
 
-    confirmed = btnp(4) || btnp(5) || (btnp(:mouse_l) && !hovered.nil?)
+    confirmed = btnp(1) || btnp(2) || (btnp(:mouse_l) && !hovered.nil?)
     if confirmed && @frame > 10
       chosen = @choices[@selected]
       @run.apply_upgrade(chosen)
@@ -1032,9 +1032,9 @@ class ResultScene
 
   def update
     @frame += 1
-    if @frame > 20 && (btnp(4) || btnp(:mouse_l))
+    if @frame > 20 && (btnp(1) || btnp(:mouse_l))
       run BattleScene.new(RunState.new)
-    elsif @frame > 20 && btnp(5)
+    elsif @frame > 20 && btnp(2)
       run TitleScene.new
     end
   end
@@ -1065,7 +1065,7 @@ class ResultScene
       r1 = "Z / CLICK : RETRY"
       draw_shadow_text(r1, center_text_x(r1), 198, 10)
     end
-    r2 = "X / ENTER : TITLE"
+    r2 = "X : TITLE"
     draw_shadow_text(r2, center_text_x(r2), 214, 6)
   end
 end
@@ -1256,10 +1256,10 @@ class BattleScene
 
   def update_aim
     # キーボード操作
-    if btn(0)
+    if btn(:left)
       @aim_ang -= 0.035
     end
-    if btn(1)
+    if btn(:right)
       @aim_ang += 0.035
     end
     @aim_ang = clamp_f(@aim_ang, AIM_MIN_ANG, AIM_MAX_ANG)
@@ -1282,7 +1282,7 @@ class BattleScene
       @mouse_dragging = true
     end
 
-    fire_now = btnp(4)
+    fire_now = btnp(1)
     if @mouse_dragging && !btn(:mouse_l)
       @mouse_dragging = false
       fire_now = true if my < BOTTOM_BAR_Y
@@ -1310,7 +1310,7 @@ class BattleScene
     @shot_timer += 1
 
     # 早送り倍率 (時間経過 or X / 右クリック)
-    fast = btn(5) || btn(:mouse_r)
+    fast = btn(2) || btn(:mouse_r)
     speed_mult = 1
     if fast
       speed_mult = 3
@@ -1325,7 +1325,7 @@ class BattleScene
     my = mouse_y
     rx, ry, rw, rh = recall_rect
     clicked_recall = btnp(:mouse_l) && mx >= rx && mx <= rx + rw && my >= ry && my <= ry + rh
-    if clicked_recall || (@shot_timer > 180 && (btnp(5) || btnp(:mouse_r)))
+    if clicked_recall || (@shot_timer > 180 && (btnp(2) || btnp(:mouse_r)))
       @fire_queue.clear
       @orbs.each { |o| o.returning = true }
     end

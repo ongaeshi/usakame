@@ -13,8 +13,8 @@
 #
 # 【操作方法】
 #   - 左右キー または マウス移動: 手札カードの選択
-#   - Z / Space または マウス左クリック: 選択中のカードを使用
-#   - X / Enter または [END TURN] クリック: ターン終了
+#   - Z または マウス左クリック: 選択中のカードを使用
+#   - X または [END TURN] クリック: ターン終了
 # ==============================================================================
 
 config(
@@ -368,13 +368,13 @@ def update
     end
 
     # カード使用またはターン終了
-    if btnp(:btn_a)
+    if btnp(1)
       if !$hand.empty?
         play_card_at($cursor)
       else
         end_player_turn
       end
-    elsif btnp(:btn_b)
+    elsif btnp(2)
       end_player_turn
     elsif btnp(:mouse_l)
       if hovered_idx
@@ -395,19 +395,19 @@ def update
       $reward_cursor = ($reward_cursor - 1) % 3
     elsif btnp(:right)
       $reward_cursor = ($reward_cursor + 1) % 3
-    elsif btnp(:btn_a) || btnp(:mouse_l)
+    elsif btnp(1) || btnp(:mouse_l)
       chosen = $reward_cards[$reward_cursor]
       $master_deck << chosen if chosen
       $floor += 1
       $hero[:hp] = ($hero[:hp] + 12).clamp(0, $hero[:max_hp])
       start_floor_battle
-    elsif btnp(:btn_b)
+    elsif btnp(2)
       $floor += 1
       start_floor_battle
     end
 
   elsif $state == :gameover
-    if btnp(:btn_a) || btnp(:mouse_l)
+    if btnp(1) || btnp(:mouse_l)
       init_run
     end
   end

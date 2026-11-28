@@ -14,9 +14,9 @@
 #   6. 幅優先探索（BFS）による最短経路探索 (find_shortest_path)
 #
 # 【操作方法】
-#   - 矢印キー (WASD): うさぎを手動で移動
-#   - Z / Space: 最短経路に沿って1歩進む（ゴール到達でガチャ宝箱オープン！）
-#   - X / Enter: 新しい迷路を自動生成 & ガチャを回す
+#   - 矢印キー: うさぎを手動で移動
+#   - Z: 最短経路に沿って1歩進む（ゴール到達でガチャ宝箱オープン！）
+#   - X: 新しい迷路を自動生成 & ガチャを回す
 #   - マウス左クリック: クリックした通路マスにゴール（🥕）を移動して経路を再計算
 # ==============================================================================
 
@@ -299,7 +299,7 @@ def update
   end
 
   # Zキー: BFS最短経路に沿って自動で1歩進む
-  if btnp(:btn_a)
+  if btnp(1)
     if $path.size >= 2
       next_step = $path[1]
       try_move_player(next_step[:x] - $player[:gx], next_step[:y] - $player[:gy])
@@ -307,7 +307,7 @@ def update
   end
 
   # Xキー: 迷路再生成＆ガチャ抽選
-  if btnp(:btn_b)
+  if btnp(2)
     generate_maze
     roll_gacha_loot
   end

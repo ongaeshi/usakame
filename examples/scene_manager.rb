@@ -23,9 +23,9 @@
 #    - メニューカーソル移動、ポーズ開閉、シーン遷移時のボタン押しっぱなし誤判定を防止。
 #
 # 【操作方法】
-#   - 方向キー (矢印 / WASD): メニュー選択 / プレイヤー移動
-#   - Z / Space (btn: 4): 決定 / アクション
-#   - X / Enter (btn: 5): ポーズ画面の開閉 (PlayScene中) / キャンセル
+#   - 方向キー (矢印キー): メニュー選択 / プレイヤー移動
+#   - Z: 決定 / アクション
+#   - X: ポーズ画面の開閉 (PlayScene中) / キャンセル
 # ==============================================================================
 
 config(
@@ -170,14 +170,14 @@ class TitleScene
     end
 
     # メニュー操作 (btnp で快適に1段ずつ移動)
-    if btnp(:up) || btnp(2)
+    if btnp(:up)
       @cursor = (@cursor - 1) % 3
-    elsif btnp(:down) || btnp(3)
+    elsif btnp(:down)
       @cursor = (@cursor + 1) % 3
     end
 
-    # 決定アクション (Z / Space)
-    if btnp(:a) || btnp(4)
+    # 決定アクション (Z)
+    if btnp(1)
       case @cursor
       when 0
         # ゲームスタート (トランジション付き)
@@ -270,10 +270,10 @@ class PlayScene
     # プレイヤー移動 (btn)
     dx = 0.0
     dy = 0.0
-    dx -= @speed if btn(:left)  || btn(0)
-    dx += @speed if btn(:right) || btn(1)
-    dy -= @speed if btn(:up)    || btn(2)
-    dy += @speed if btn(:down)  || btn(3)
+    dx -= @speed if btn(:left)
+    dx += @speed if btn(:right)
+    dy -= @speed if btn(:up)
+    dy += @speed if btn(:down)
 
     @flip_x = true if dx < 0
     @flip_x = false if dx > 0
@@ -321,9 +321,9 @@ class PlayScene
       return
     end
 
-    # ポーズ画面の起動 (X / Enter または btn: 5)
+    # ポーズ画面の起動 (X)
     # ※ btnp なので 1 回の押し下げで確実に 1 回だけ起動
-    if btnp(:b) || btnp(5)
+    if btnp(2)
       run PauseScene.new(self), reset_state: false
     end
   end
@@ -378,20 +378,20 @@ class PauseScene
 
   def update
     # カーソル移動 (btnp)
-    if btnp(:up) || btnp(2)
+    if btnp(:up)
       @cursor = (@cursor - 1) % 3
-    elsif btnp(:down) || btnp(3)
+    elsif btnp(:down)
       @cursor = (@cursor + 1) % 3
     end
 
-    # X / Enter をもう一度押しても即座にゲーム再開
-    if btnp(:b) || btnp(5)
+    # X をもう一度押しても即座にゲーム再開
+    if btnp(2)
       resume_game
       return
     end
 
-    # 決定 (Z / Space)
-    if btnp(:a) || btnp(4)
+    # 決定 (Z)
+    if btnp(1)
       case @cursor
       when 0
         resume_game
@@ -448,7 +448,7 @@ class HelpModalScene
 
   def update
     # Z または X で閉じて親シーンに戻る
-    if btnp(:a) || btnp(:b) || btnp(4) || btnp(5)
+    if btnp(1) || btnp(2)
       run @parent_scene, reset_state: false
     end
   end
@@ -461,10 +461,10 @@ class HelpModalScene
     print_text("HOW TO PLAY", 96, 60, 10)
     line(40, 72, 216, 72, 11)
 
-    print_text("- ARROW / WASD : MOVE RABBIT", 40, 84, 7)
+    print_text("- ARROWS : MOVE RABBIT", 40, 84, 7)
     print_text("- COLLECT ALL 8 COINS TO WIN", 40, 102, 7)
-    print_text("- X / ENTER    : PAUSE GAME", 40, 120, 12)
-    print_text("- Z / SPACE    : CONFIRM / SELECT", 40, 138, 7)
+    print_text("- X    : PAUSE GAME", 40, 120, 12)
+    print_text("- Z    : CONFIRM / SELECT", 40, 138, 7)
 
     rectfill(52, 166, 152, 18, 2)
     rect(52, 166, 152, 18, 7)
@@ -502,7 +502,7 @@ class ClearScene
     end
 
     # Z または X でタイトルへ戻る
-    if btnp(:a) || btnp(4)
+    if btnp(1)
       style = TransitionScene::STYLES[@style_idx]
       TransitionScene.transition(self, TitleScene.new(@style_idx), style)
     end

@@ -1,7 +1,7 @@
 # Color Palette & Transparency Sample (pal / palt)
 # 矢印キー左右: 下部ミニシーンのパレットプリセット切替 (NORMAL / NIGHT / SUNSET / RETRO GB)
-# Z / Space: ダメージ白フラッシュ演出 (全色 -> 7:White)
-# X / Enter: palt デモの透過色切替
+# Z: ダメージ白フラッシュ演出 (全色 -> 7:White)
+# X: palt デモの透過色切替
 
 $t = 0
 $scene_mode = 0
@@ -24,8 +24,8 @@ $SCENE_NAMES = ["0:NORMAL", "1:NIGHT", "2:SUNSET", "3:MONO-GB"]
 def update
   $t += 1
 
-  left = btn(0)
-  right = btn(1)
+  left = btn(:left)
+  right = btn(:right)
   if left && ($prev_left == false)
     $scene_mode = ($scene_mode - 1) % 4
   elsif right && ($prev_right == false)
@@ -49,7 +49,7 @@ def draw
   print_text("1. SPRITE COLOR VARIANTS (pal)", 8, 18, 7)
   rect(6, 28, 244, 52, 5)
 
-  flash_all = btn(4) || (($t / 30) % 4 == 3 && ($t % 6 < 3))
+  flash_all = btn(1) || (($t / 30) % 4 == 3 && ($t % 6 < 3))
 
   # (A) 1P Default (Red)
   pal()
@@ -132,12 +132,12 @@ def draw
   # 右: palt(1, true) + palt(11, true) (または X ボタンで切替)
   palt()
   palt(1, true)
-  if btn(5) == false
+  if btn(2) == false
     palt(11, true)
   end
   spr(1, 196, 102, false, false, 0, 1.5)
   rectfill(174, 136, 72, 9, 0)
-  print_text(btn(5) ? "HOLD X:1" : "palt(1&11)", 178, 137, 11)
+  print_text(btn(2) ? "HOLD X:1" : "palt(1&11)", 178, 137, 11)
 
   pal()
 

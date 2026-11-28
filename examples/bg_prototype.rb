@@ -77,23 +77,23 @@ end
 def update
   $frame += 1
 
-  # Switch background with X / Enter (btnp 5)
-  if btnp(5)
+  # Switch background with X
+  if btnp(2)
     $bg_idx = ($bg_idx + 1) % BG_PRESETS.size
   end
 
   # Horizontal movement
   $vx = 0.0
-  if btn(0)
+  if btn(:left)
     $vx = -MOVE_SPEED
     $facing_left = true
-  elsif btn(1)
+  elsif btn(:right)
     $vx = MOVE_SPEED
     $facing_left = false
   end
 
   # Jump buffer & coyote time for responsive jumping
-  if btnp(4) || btnp(2)
+  if btnp(1) || btnp(:up)
     $jump_buffer = 6
   elsif $jump_buffer > 0
     $jump_buffer -= 1

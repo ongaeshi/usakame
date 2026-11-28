@@ -724,17 +724,17 @@ def update
 
   # --- キーボードショートカット ---
   # 保存: Ctrl+S (モーダル外)
-  if btn(:ctrl) && btnp(:s) && !$show_code_modal
+  if btn(:ctrl) && btnp(:key_s) && !$show_code_modal
     save_map_file
   end
 
   # アンドゥ: Ctrl+Z (モーダル外)
-  if btn(:ctrl) && btnp(:z) && !$show_code_modal
+  if btn(:ctrl) && btnp(:key_z) && !$show_code_modal
     perform_undo
   end
 
   # コピー: Ctrl+C (キャンバス上の hover 領域を取得)
-  if btn(:ctrl) && btnp(:c) && !$show_code_modal && $current_mode == :terrain
+  if btn(:ctrl) && btnp(:key_c) && !$show_code_modal && $current_mode == :terrain
     if mx >= VIEW_X && mx < VIEW_X + VIEW_W && my >= VIEW_Y && my < VIEW_Y + VIEW_H
       tx = $cam_x + ((mx - VIEW_X) / $cell_size).to_i
       ty = $cam_y + ((my - VIEW_Y) / $cell_size).to_i
@@ -755,7 +755,7 @@ def update
   end
 
   # ペースト: Ctrl+V (スタンプ準備)
-  if btn(:ctrl) && btnp(:v) && !$show_code_modal && $current_mode == :terrain
+  if btn(:ctrl) && btnp(:key_v) && !$show_code_modal && $current_mode == :terrain
     if $clipboard_tiles
       $current_tool = :pen
       sfx(:select)
@@ -764,12 +764,12 @@ def update
   end
 
   # M: マップサイズ循環切替 (16x16, 32x32, 64x32, 64x64, 128x32)
-  if btnp(:m) && !$show_code_modal
+  if btnp(:key_m) && !$show_code_modal
     cycle_map_size
   end
 
   # B: ブラシサイズ循環切替 (1x1, 1x2, 2x1, 2x2)
-  if btnp(:b) && !$show_code_modal
+  if btnp(:key_b) && !$show_code_modal
     cycle_brush_size
   end
 
@@ -798,12 +798,12 @@ def update
     $current_tool = :picker if btnp(:key_4)
   end
 
-  # スクロール (矢印キー / WASD)
+  # スクロール (矢印キー)
   scroll_speed = ($cell_size == 16) ? 1 : 2
-  $cam_x -= scroll_speed if btn(0) # left
-  $cam_x += scroll_speed if btn(1) # right
-  $cam_y -= scroll_speed if btn(2) # up
-  $cam_y += scroll_speed if btn(3) # down
+  $cam_x -= scroll_speed if btn(:left) # left
+  $cam_x += scroll_speed if btn(:right) # right
+  $cam_y -= scroll_speed if btn(:up) # up
+  $cam_y += scroll_speed if btn(:down) # down
 
   max_tiles_x = (VIEW_W / $cell_size).to_i
   max_tiles_y = (VIEW_H / $cell_size).to_i

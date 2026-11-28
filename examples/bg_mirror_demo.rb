@@ -15,20 +15,20 @@ $auto_scroll = 0.0
 $manual_offset = 0.0
 
 def update
-  # Toggle mirror_x with X / Enter
-  if btnp(5)
+  # Toggle mirror_x with X
+  if btnp(2)
     $mirror_on = !$mirror_on
   end
 
   # Switch backdrop with Down
-  if btnp(3)
+  if btnp(:down)
     $bg_idx = ($bg_idx + 1) % BG_IDS.size
   end
 
   # Auto-scroll + manual control with Left / Right
   $auto_scroll += 1.0
-  $manual_offset -= 2.5 if btn(0)
-  $manual_offset += 2.5 if btn(1)
+  $manual_offset -= 2.5 if btn(:left)
+  $manual_offset += 2.5 if btn(:right)
 end
 
 def draw

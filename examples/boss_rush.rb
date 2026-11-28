@@ -8,8 +8,8 @@
 #   ← / → (A / D)   : 移動
 #   ↑ (W)           : ジャンプ (2段ジャンプ可 / 離すと小ジャンプ)
 #   ↓ (S)           : 足場すり抜け降り
-#   Z / Space       : 剣攻撃 (地上3段コンボ / 空中下突きポゴ: ↓+Z / ピンク弾パリィ)
-#   X / Enter       : 無敵ステップ回避 (敵攻撃スレスレ回避で「JUST!」強化)
+#   Z       : 剣攻撃 (地上3段コンボ / 空中下突きポゴ: ↓+Z / ピンク弾パリィ)
+#   X       : 無敵ステップ回避 (敵攻撃スレスレ回避で「JUST!」強化)
 # ==============================================================================
 
 config(
@@ -947,30 +947,30 @@ class Player
     @sy = lerp_f(@sy, 1.0, 0.22)
 
     # 先行入力バッファ
-    if btnp(2)
+    if btnp(:up)
       @jump_buf_t = JUMP_BUFFER_FRAMES
     elsif @jump_buf_t > 0
       @jump_buf_t -= 1
     end
 
-    if btnp(4)
+    if btnp(1)
       @atk_buf_t = ATK_BUFFER_FRAMES
     elsif @atk_buf_t > 0
       @atk_buf_t -= 1
     end
 
     # 足場すり抜け
-    if @on_ground && @foot_y < GROUND_Y - 1.0 && btnp(3)
+    if @on_ground && @foot_y < GROUND_Y - 1.0 && btnp(:down)
       @drop_through_t = 12
       @on_ground = false
       @foot_y += 1.5
     end
 
-    # ダッシュ発動 (X / Enter)
-    if btnp(5) && @dash_cd <= 0 && @dash_timer <= 0 && @hurt_timer <= 0
+    # ダッシュ発動 (X)
+    if btnp(2) && @dash_cd <= 0 && @dash_timer <= 0 && @hurt_timer <= 0
       dir = @facing
-      dir = -1 if btn(0)
-      dir = 1 if btn(1)
+      dir = -1 if btn(:left)
+      dir = 1 if btn(:right)
       @facing = dir
       @dash_dir = dir
       @dash_timer = DASH_FRAMES
@@ -985,14 +985,14 @@ class Player
       fx.spawn_dust(@foot_cx, @foot_y, 5)
     end
 
-    # 攻撃発動 (Z / Space)
+    # 攻撃発動 (Z)
     if @atk_buf_t > 0 && @dash_timer <= 0 && @hurt_timer <= 0
       can_start = @atk_timer <= 0 || (@atk_timer <= 3 && @atk_stage != 3 && @on_ground)
       if can_start
         @atk_buf_t = 0
         @atk_hit_done = false
         if !@on_ground
-          if btn(3)
+          if btn(:down)
             @atk_stage = :pogo
             @atk_total = 13
           else
@@ -1040,8 +1040,8 @@ class Player
     else
       # 通常左右移動
       move_dir = 0
-      move_dir -= 1 if btn(0)
-      move_dir += 1 if btn(1)
+      move_dir -= 1 if btn(:left)
+      move_dir += 1 if btn(:right)
 
       if @hurt_timer <= 0
         if move_dir != 0
@@ -1090,7 +1090,7 @@ class Player
       end
 
       # 可変ジャンプ（ボタン離しで上昇抑制）
-      if @vy < 0.0 && !btn(2)
+      if @vy < 0.0 && !btn(:up)
         @vy *= P_JUMP_CUT_MUL
       end
 
@@ -2390,19 +2390,19 @@ class TitleScene
   def update
     @frame += 1
 
-    if btnp(2) || btnp(3)
+    if btnp(:up) || btnp(:down)
       @menu_idx = 1 - @menu_idx
     end
 
     if @menu_idx == 1
-      if btnp(0)
+      if btnp(:left)
         @practice_stage = (@practice_stage - 1) % 4
-      elsif btnp(1)
+      elsif btnp(:right)
         @practice_stage = (@practice_stage + 1) % 4
       end
     end
 
-    if btnp(4)
+    if btnp(1)
       player = Player.new
       if @menu_idx == 0
         run StageIntroScene.new(:rush, 0, player, 0)
@@ -2487,7 +2487,7 @@ class StageIntroScene
 
   def update
     @frame += 1
-    if @frame >= 65 || (@frame > 10 && btnp(4))
+    if @frame >= 65 || (@frame > 10 && btnp(1))
       run BattleScene.new(@mode, @stage_idx, @player, @total_frames, @boss)
     end
   end
@@ -2973,7 +2973,7 @@ class ResultScene
     @frame += 1
     return if @frame < 20
 
-    if btnp(4)
+    if btnp(1)
       if @victory
         p = Player.new
         start_stage = (@mode == :rush) ? 0 : @stage_idx
@@ -2983,7 +2983,7 @@ class ResultScene
         p = Player.new
         run StageIntroScene.new(@mode, @stage_idx, p, 0)
       end
-    elsif btnp(5)
+    elsif btnp(2)
       run TitleScene.new
     end
   end

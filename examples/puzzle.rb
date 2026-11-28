@@ -13,9 +13,9 @@
 #
 # 【操作方法】
 #   - 左右キー (A/D): ブロック移動
-#   - Z / Space / 上キー (W): ブロック回転
+#   - Z / 上キー (W): ブロック回転
 #   - 下キー (S): 高速落下
-#   - X / Enter: ハードドロップ（一瞬で設置）
+#   - X: ハードドロップ（一瞬で設置）
 # ==============================================================================
 
 config(
@@ -240,7 +240,7 @@ def update
   $popups.reject! { |pop| pop[:age] >= pop[:max_age] }
 
   if $state == :gameover
-    if btnp(:btn_a)
+    if btnp(1)
       init_puzzle
     end
     return
@@ -257,7 +257,7 @@ def update
     end
 
     # 回転（壁蹴り補正付き）
-    if btnp(:btn_a) || btnp(:up)
+    if btnp(1) || btnp(:up)
       new_rot = ($piece[:rot] + 1) % 4
       if piece_valid?($piece[:x], $piece[:y], new_rot)
         $piece[:rot] = new_rot
@@ -274,7 +274,7 @@ def update
     end
 
     # ハードドロップ（Xボタン）
-    if btnp(:btn_b)
+    if btnp(2)
       while piece_valid?($piece[:x], $piece[:y] + 1, $piece[:rot])
         $piece[:y] += 1
         $score += 2

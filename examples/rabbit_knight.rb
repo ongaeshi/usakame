@@ -4,7 +4,7 @@
 # 実行コマンド: uk run examples/rabbit_knight.rb
 #
 # 仕様:
-#   - 操作: 矢印キー または WASD で四方向に歩行
+#   - 操作: 矢印キー で四方向に歩行
 #   - うさぎ剣士スプライト: 前12、上12、右12(左はflip)
 #   - 待機中も足踏みアニメーション(1, 2)を継続
 #   - タイルマップ配置された石壁にぶつかり通過不可
@@ -113,18 +113,18 @@ def update
   dx = 0
   dy = 0
 
-  if btn(0) # Left
+  if btn(:left) # Left
     dx -= 1
     $pdir = :left
-  elsif btn(1) # Right
+  elsif btn(:right) # Right
     dx += 1
     $pdir = :right
   end
 
-  if btn(2) # Up
+  if btn(:up) # Up
     dy -= 1
     $pdir = :up
-  elsif btn(3) # Down
+  elsif btn(:down) # Down
     dy += 1
     $pdir = :down
   end
@@ -302,7 +302,7 @@ def draw
   # 下部操作ガイド
   rectfill(0, 244, 256, 12, 1)
   line(0, 243, 255, 243, 5)
-  print_text("ARROWS/WASD: MOVE | WAIT: STEPPING | BUMP: WALL", 6, 246, 6)
+  print_text("ARROWS: MOVE | WAIT: STEPPING | BUMP: WALL", 6, 246, 6)
 end
 
 __END__

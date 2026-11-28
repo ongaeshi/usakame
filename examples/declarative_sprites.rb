@@ -11,9 +11,9 @@
 # - mget / mset(:symbol) / mset("W") によるシンボル・エイリアス対応タイルマップ操作
 #
 # 操作方法:
-#   矢印キー / WASD : プレイヤー (:hero) 移動 (移動時に Squash & Stretch)
-#   Z / Space       : 剣スラッシュ攻撃 (:slash の loop=false クランプ再生 & 敵ヒット)
-#   X / Enter       : 向いているマスの壁 ('W') を設置/撤去 + スライムの属性パレット切替
+#   矢印キー : プレイヤー (:hero) 移動 (移動時に Squash & Stretch)
+#   Z       : 剣スラッシュ攻撃 (:slash の loop=false クランプ再生 & 敵ヒット)
+#   X       : 向いているマスの壁 ('W') を設置/撤去 + スライムの属性パレット切替
 # ==============================================================================
 
 $t = 0
@@ -110,24 +110,24 @@ def update
   # --- 1. プレイヤー移動と Squash & Stretch ---
   dx = 0.0
   dy = 0.0
-  if btn(0)
+  if btn(:left)
     dx -= 1.0
     $flip_x = true
     $dir_x = -1
     $dir_y = 0
   end
-  if btn(1)
+  if btn(:right)
     dx += 1.0
     $flip_x = false
     $dir_x = 1
     $dir_y = 0
   end
-  if btn(2)
+  if btn(:up)
     dy -= 1.0
     $dir_x = 0
     $dir_y = -1
   end
-  if btn(3)
+  if btn(:down)
     dy += 1.0
     $dir_x = 0
     $dir_y = 1
@@ -174,8 +174,8 @@ def update
     spawn_sparks(cx * 16 + 4, cy * 16 + 4, 12, 4)
   end
 
-  # --- 3. Z / Space: 剣スラッシュ攻撃 (loop=false クランプ再生デモ) ---
-  b4 = btn(4)
+  # --- 3. Z: 剣スラッシュ攻撃 (loop=false クランプ再生デモ) ---
+  b4 = btn(1)
   if b4 && !$prev_btn4
     $slash_timer = 14
     $slash_frame = 0.0
@@ -216,8 +216,8 @@ def update
     $slash_y = $py
   end
 
-  # --- 4. X / Enter: 壁エイリアス 'W' の動的設置/撤去 + スライムパレット切替 ---
-  b5 = btn(5)
+  # --- 4. X: 壁エイリアス 'W' の動的設置/撤去 + スライムパレット切替 ---
+  b5 = btn(2)
   if b5 && !$prev_btn5
     # スライムのパレットを切り替え
     $slime_pal_idx = ($slime_pal_idx + 1) % $SLIME_PALS.size

@@ -3,7 +3,7 @@
 # 実行コマンド: uk run examples/demo.rb
 # ==============================================================================
 # 操作:
-#   Z / Space / Enter / 左クリック : メッセージ送り / リプレイ
+#   Z / Enter / 左クリック : メッセージ送り / リプレイ
 #   マウス移動 / クリック          : 「キーボードとマウス入力」シーンで反応
 # ==============================================================================
 
@@ -81,12 +81,12 @@ def update
   $t += 1
 
   # 入力判定 (Z, Space, Enter, 左クリック)
-  act_pressed = btn(4) || btn(5) || btn(6)
+  act_pressed = btn(1) || btn(2) || btn(:mouse_l)
   trigger_act = act_pressed && !$prev_act
   $prev_act = act_pressed
 
   # マウスクリックでの星エフェクト（いつでも可能）
-  if btn(6) && !$prev_click
+  if btn(:mouse_l) && !$prev_click
     i = 0
     while i < 6
       ang = (i * 60)
@@ -98,7 +98,7 @@ def update
     end
     sfx(0)
   end
-  $prev_click = btn(6)
+  $prev_click = btn(:mouse_l)
 
   # クリック星の更新
   i = 0
@@ -484,7 +484,7 @@ def draw
     rectfill(0, 0, 255, 255, 0)
     print_text("✨ DEMO FINISHED ✨", 64, 100, 10)
     print_text("usakame game engine", 68, 120, 7)
-    print_text("[Z / Space / Click] to Replay", 40, 150, 6)
+    print_text("[Z / Click] to Replay", 40, 150, 6)
   end
 end
 

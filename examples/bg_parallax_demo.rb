@@ -74,15 +74,15 @@ def update
   $frame += 1
 
   $vx = 0.0
-  if btn(0)
+  if btn(:left)
     $vx = -MOVE_SPEED
     $facing_left = true
-  elsif btn(1)
+  elsif btn(:right)
     $vx = MOVE_SPEED
     $facing_left = false
   end
 
-  if btnp(4) || btnp(2)
+  if btnp(1) || btnp(:up)
     $jump_buffer = 6
   elsif $jump_buffer > 0
     $jump_buffer -= 1

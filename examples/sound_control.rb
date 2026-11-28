@@ -1,8 +1,8 @@
 # Sound Control Demo (tone / pitch / music(nil) / volumes / cooldown)
 # UP/DOWN: Select action or volume bar
 # LEFT/RIGHT: Adjust volume or pitch
-# Z / Space: Trigger selected action
-# X / Enter: Toggle BGM (music(0) / music(nil))
+# Z: Trigger selected action
+# X: Toggle BGM (music(0) / music(nil))
 
 $cursor = 0
 $bgm_on = true
@@ -31,12 +31,12 @@ def update
   $t += 1
   $flash -= 1 if $flash > 0
 
-  up = btn(2)
-  down = btn(3)
-  left = btn(0)
-  right = btn(1)
-  z = btn(4)
-  x = btn(5)
+  up = btn(:up)
+  down = btn(:down)
+  left = btn(:left)
+  right = btn(:right)
+  z = btn(1)
+  x = btn(2)
 
   if up && !$prev_up
     $cursor = ($cursor - 1) % 7

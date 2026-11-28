@@ -5,9 +5,9 @@
 # 実行: cargo run --bin uk -- run examples/chrono_duel.rb
 #
 # 【操作方法】
-#   ↑ / ↓ / ← / → (WASD) : コマンド・スキル・報酬選択
-#   Z / Space              : 決定 / タイミング目押し / 連打 / ジャストガード
-#   X / Enter              : キャンセル・戻る / ジャストガード
+#   ↑ / ↓ / ← / → : コマンド・スキル・報酬選択
+#   Z              : 決定 / タイミング目押し / 連打 / ジャストガード
+#   X              : キャンセル・戻る / ジャストガード
 # ==============================================================================
 
 config(
@@ -619,7 +619,7 @@ class TitleScene
     if btnp(:up) || btnp(:down)
       @cursor = (@cursor + 1) % 2
     end
-    if btnp(4) || btnp(5) || btnp(:mouse_l)
+    if btnp(1) || btnp(2) || btnp(:mouse_l)
       if @cursor == 0
         run BattleScene.new(PlayerRun.new)
       else
@@ -663,7 +663,7 @@ class TitleScene
       draw_centered_text("BEST RECORD: RANK #{$best_rank} (#{$best_turns} TURNS)", 320, 416, C_GREEN, 8, true)
     else
       if (@frame / 25) % 2 == 0
-        draw_centered_text("PRESS [Z] OR [SPACE] TO START", 320, 416, C_YELLOW, 8, true)
+        draw_centered_text("PRESS [Z] TO START", 320, 416, C_YELLOW, 8, true)
       end
     end
   end
@@ -931,7 +931,7 @@ class BattleScene
         @menu_idx = (@menu_idx + 1) % 4
       end
 
-      if btnp(4)
+      if btnp(1)
         execute_main_menu(@menu_idx)
       end
 
@@ -941,9 +941,9 @@ class BattleScene
         @sub_idx = (@sub_idx - 1) % skills.size
       elsif btnp(:down)
         @sub_idx = (@sub_idx + 1) % skills.size
-      elsif btnp(5)
+      elsif btnp(2)
         @phase = :menu
-      elsif btnp(4)
+      elsif btnp(1)
         sk = SKILLS_DB[skills[@sub_idx]]
         if @run.sp >= sk[:cost]
           @run.sp -= sk[:cost]
@@ -992,9 +992,9 @@ class BattleScene
         @sub_idx = (@sub_idx - 1) % items.size
       elsif btnp(:down)
         @sub_idx = (@sub_idx + 1) % items.size
-      elsif btnp(5)
+      elsif btnp(2)
         @phase = :menu
-      elsif btnp(4)
+      elsif btnp(1)
         use_item(items[@sub_idx][:id])
       end
 
@@ -1008,7 +1008,7 @@ class BattleScene
         @timing_dir = 1.0
       end
 
-      if btnp(4)
+      if btnp(1)
         dist = (@timing_pos - 0.5).abs
         @run.timing_attempts += 1
         if dist <= perfect_half_width
@@ -1024,7 +1024,7 @@ class BattleScene
 
     when :player_mash
       @mash_timer -= 1
-      if btnp(4)
+      if btnp(1)
         @mash_count += 1
         @fx.spawn_burst(@p_x + 24.0, @p_y - 36.0, C_ORANGE, 4, 2.5, 0.05, 12)
       end
@@ -1051,7 +1051,7 @@ class BattleScene
     when :enemy_windup
       @phase_timer -= 1
       # ジャストガード受付判定
-      if !@enemy_guard_pressed && (btnp(4) || btnp(5))
+      if !@enemy_guard_pressed && (btnp(1) || btnp(2))
         @enemy_guard_pressed = true
         if @phase_timer <= @enemy_guard_window
           @enemy_guard_grade = :just
@@ -1727,7 +1727,7 @@ class RewardScene
       @cursor = (@cursor - 1) % @choices.size
     elsif btnp(:right)
       @cursor = (@cursor + 1) % @choices.size
-    elsif btnp(4)
+    elsif btnp(1)
       apply_choice(@choices[@cursor])
       @run.stage_idx += 1
       @run.sp = 2 if @run.sp < 2
@@ -1804,9 +1804,9 @@ class ResultScene
 
   def update
     @frame += 1
-    if btnp(4)
+    if btnp(1)
       run BattleScene.new(PlayerRun.new)
-    elsif btnp(5)
+    elsif btnp(2)
       run TitleScene.new
     end
   end

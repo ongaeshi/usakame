@@ -112,7 +112,7 @@ class DestructibleTerrainDemo
     end
 
     # クリックまたは Z で照準方向へ砲弾発射
-    if btnp(:mouse_l) || btnp(:z)
+    if btnp(:mouse_l) || btnp(:right)
       tx = btnp(:mouse_l) ? mouse_x : (@px + 60)
       ty = btnp(:mouse_l) ? mouse_y : (@py - 30)
       dx = tx - @px
@@ -123,7 +123,7 @@ class DestructibleTerrainDemo
     end
 
     # X で地形リセット
-    if btnp(:x)
+    if btnp(:up)
       build_terrain
       @py = 80.0
       @pvy = 0.0

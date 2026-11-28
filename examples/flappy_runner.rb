@@ -12,8 +12,8 @@
 #   5. メダル判定（🥉ブロンズ、🥈シルバー、🥇ゴールド）とハイスコア記録
 #
 # 【操作方法】
-#   - Z / Space / 上キー / マウス左クリック: はばたく（ジャンプ）
-#   - ゲームオーバー時: Z / Space / クリックで即リトライ
+#   - Z / 上キー / マウス左クリック: はばたく（ジャンプ）
+#   - ゲームオーバー時: Z / クリックで即リトライ
 # ==============================================================================
 
 config(
@@ -128,7 +128,7 @@ def update
   end
   $particles.reject! { |pt| pt[:age] >= pt[:max_age] }
 
-  action_pressed = btnp(:btn_a) || btnp(:up) || btnp(:mouse_l)
+  action_pressed = btnp(1) || btnp(:up) || btnp(:mouse_l)
 
   if $state == :get_ready
     # ふわふわ浮遊待機

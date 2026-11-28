@@ -7,7 +7,7 @@
 #   - show_cursor(false) with a custom in-game reticle
 #
 # Controls:
-#   1P : Arrows / WASD + Z(A) / X(B)  or Gamepad 1
+#   1P : Arrows + Z(A) / X(B)  or Gamepad 1
 #   2P : I/J/K/L       + U(A) / O(B)  or Gamepad 2
 #   Mouse Wheel : Cycle reticle color
 #   Right Click : Toggle OS cursor visibility (show_cursor)
@@ -30,7 +30,7 @@ class Input2PDemo
   end
 
   def move_player(p, player_id)
-    spd = btn(:x, player_id) ? 3.0 : 1.8
+    spd = btn(:up, player_id) ? 3.0 : 1.8
     p["x"] -= spd if btn(:left, player_id)
     p["x"] += spd if btn(:right, player_id)
     p["y"] -= spd if btn(:up, player_id)
@@ -45,7 +45,7 @@ class Input2PDemo
       p["flash"] -= 1
     end
 
-    if btnp(:z, player_id)
+    if btnp(:right, player_id)
       p["flash"] = 10
       @shots.push({
         "x" => p["x"],

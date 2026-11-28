@@ -12,9 +12,9 @@
 #   5. 巨大ボス戦（HPゲージ・弾幕フェーズ変化）
 #
 # 【操作方法】
-#   - 矢印キー (WASD): 自機移動
-#   - Z / Space (押しっぱなし可): ショット発射（ゲームオーバー時はリトライ）
-#   - X / Enter: ボム発動（敵弾を全消去して大ダメージ）
+#   - 矢印キー: 自機移動
+#   - Z (押しっぱなし可): ショット発射（ゲームオーバー時はリトライ）
+#   - X: ボム発動（敵弾を全消去して大ダメージ）
 # ==============================================================================
 
 config(
@@ -187,7 +187,7 @@ def update
   end
 
   if $state != :play
-    if btnp(:btn_a)
+    if btnp(1)
       init_game
     end
     return
@@ -204,7 +204,7 @@ def update
   $player[:inv_timer] -= 1 if $player[:inv_timer] > 0
 
   # 自機ショット（Zボタン押しっぱなし、またはデモ用自動連射）
-  if (btn(:btn_a) || ($t % 12 == 0)) && ($t % 5 == 0)
+  if (btn(1) || ($t % 12 == 0)) && ($t % 5 == 0)
     px = $player[:x] + 8.0
     py = $player[:y]
     sfx(0) if $t % 10 == 0
@@ -223,7 +223,7 @@ def update
   end
 
   # ボム発動（Xボタン）
-  if btnp(:btn_b) && $player[:bombs] > 0
+  if btnp(2) && $player[:bombs] > 0
     $player[:bombs] -= 1
     $player[:inv_timer] = 90
     $shake = 18

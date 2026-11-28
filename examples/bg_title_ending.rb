@@ -27,9 +27,9 @@ class TitleScene
   def update
     @frame += 1
 
-    if btnp(4)
+    if btnp(1)
       run PlayScene.new
-    elsif btnp(5)
+    elsif btnp(2)
       # Shortcut to preview ending directly
       run EndingScene.new
     end
@@ -87,11 +87,11 @@ class PlayScene
     @frame += 1
 
     spd = 2.0
-    if btn(0)
+    if btn(:left)
       @px -= spd
       @facing_left = true
     end
-    if btn(1)
+    if btn(:right)
       @px += spd
       @facing_left = false
     end
@@ -99,8 +99,8 @@ class PlayScene
     @px = 8.0 if @px < 8.0
     @px = 232.0 if @px > 232.0
 
-    # Jump with Z / Space / Up
-    if (btnp(4) || btnp(2)) && @on_ground
+    # Jump with Z / Up
+    if (btnp(1) || btnp(:up)) && @on_ground
       @vy = -4.2
       @on_ground = false
     end
@@ -128,7 +128,7 @@ class PlayScene
       i += 1
     end
 
-    if @collected >= @stars.size || btnp(5)
+    if @collected >= @stars.size || btnp(2)
       run EndingScene.new
     end
   end
@@ -188,7 +188,7 @@ class EndingScene
 
   def update
     @end_timer += 1
-    if btnp(4) && @end_timer > 30
+    if btnp(1) && @end_timer > 30
       run TitleScene.new
     end
   end

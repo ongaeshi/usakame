@@ -1,7 +1,7 @@
 # Tilemap Demo (map / mget / mset / @MAP)
-# 矢印キー / WASD: プレイヤー移動（mget による壁判定・コイン/カギ取得・扉解錠）
-# Z / Space: 向いている方向の目の前のマスを掘る / 土ブロック(2)を置く (mset)
-# X / Enter: ダンジョン暗視パレット切替 (pal)
+# 矢印キー: プレイヤー移動（mget による壁判定・コイン/カギ取得・扉解錠）
+# Z: 向いている方向の目の前のマスを掘る / 土ブロック(2)を置く (mset)
+# X: ダンジョン暗視パレット切替 (pal)
 
 $px = 32
 $py = 48
@@ -51,24 +51,24 @@ def update
 
   dx = 0
   dy = 0
-  if btn(0)
+  if btn(:left)
     dx -= 2
     $dir_x = -1
     $dir_y = 0
     $flip_x = true
   end
-  if btn(1)
+  if btn(:right)
     dx += 2
     $dir_x = 1
     $dir_y = 0
     $flip_x = false
   end
-  if btn(2)
+  if btn(:up)
     dy -= 2
     $dir_x = 0
     $dir_y = -1
   end
-  if btn(3)
+  if btn(:down)
     dy += 2
     $dir_x = 0
     $dir_y = 1
@@ -97,8 +97,8 @@ def update
     $cleared = true
   end
 
-  # Z / Space: 目の前のタイルを掘る(2->消去) または 空マスに土ブロックを置く(nil->2)
-  act = btn(4)
+  # Z: 目の前のタイルを掘る(2->消去) または 空マスに土ブロックを置く(nil->2)
+  act = btn(1)
   if act && ($prev_act == false)
     tx = cx + $dir_x
     ty = cy + $dir_y
@@ -111,8 +111,8 @@ def update
   end
   $prev_act = act
 
-  # X / Enter: パレット切替
-  xb = btn(5)
+  # X: パレット切替
+  xb = btn(2)
   if xb && ($prev_x_btn == false)
     $dark_mode = ($dark_mode == false)
   end

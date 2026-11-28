@@ -210,7 +210,7 @@ class PlayDemoScene
 
     if @hp <= 0
       @state = :dead
-      if btnp(4) || btnp(5)
+      if btnp(1) || btnp(2)
         sfx(:coin, -1, 0.35)
         reset_game
       end
@@ -220,10 +220,10 @@ class PlayDemoScene
     # Movement input (Pad 0..3)
     dx = 0.0
     dy = 0.0
-    dx -= 1.0 if btn(0)
-    dx += 1.0 if btn(1)
-    dy -= 1.0 if btn(2)
-    dy += 1.0 if btn(3)
+    dx -= 1.0 if btn(:left)
+    dx += 1.0 if btn(:right)
+    dy -= 1.0 if btn(:up)
+    dy += 1.0 if btn(:down)
 
     if dx != 0.0 && dy != 0.0
       dx *= 0.7071
@@ -244,7 +244,7 @@ class PlayDemoScene
     @y = 222.0 if @y > 222.0
 
     # Attack on Button A (4) or Button B (5)
-    if (btnp(4) || btnp(5)) && @atk_t == 0
+    if (btnp(1) || btnp(2)) && @atk_t == 0
       @atk_t = 12
       sfx(:hit, -1, 0.35)
       slash_x = @x + (@dir * 16)
@@ -456,7 +456,7 @@ class PlayDemoScene
       rectfill(48, 104, 160, 44, 0)
       rect(48, 104, 160, 44, 8)
       text("GAME OVER", 96, 114, 8)
-      text("Press Z / Space to Retry", 56, 130, 7)
+      text("Press Z to Retry", 56, 130, 7)
     end
   end
 end
@@ -2290,12 +2290,13 @@ class ResourceViewer
     rectfill(281, 240, 190, 12, 1)
     text("INPUT MONITOR", 286, 242, 12)
 
-    pad_names = ["L", "R", "U", "D", "A(Z)", "B(X)"]
+    pad_inputs = [:left, :right, :up, :down, 1, 2]
+    pad_names = ["L", "R", "U", "D", "1(Z)", "2(X)"]
     pad_xs = [286, 310, 334, 358, 384, 424]
     pad_ws = [20, 20, 20, 20, 36, 36]
     pi = 0
     while pi < 6
-      pressed = btn(pi)
+      pressed = btn(pad_inputs[pi])
       bx = pad_xs[pi]
       bw = pad_ws[pi]
       rectfill(bx, 256, bw, 14, pressed ? 11 : 0)

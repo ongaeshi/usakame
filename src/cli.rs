@@ -1867,7 +1867,7 @@ def update
     $py += dy
   end
 
-  if btnp(:z) || btnp(:space)
+  if btnp(1)
     sfx(0)
   end
 end

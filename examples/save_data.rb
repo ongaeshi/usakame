@@ -5,9 +5,9 @@
 #
 # Controls:
 #   Left / Right : Move basket
-#   Z / Space    : Start / Retry
+#   Z    : Start / Retry
 #   Up (W)       : Cycle background theme (saved in Hash)
-#   X / Enter    : Clear save data on Title/Result (press twice to confirm)
+#   X    : Clear save data on Title/Result (press twice to confirm)
 
 config(
   title: "Save Data Demo - Star Catcher",
@@ -100,14 +100,14 @@ class SaveDemoGame
     end
 
     # Theme toggle (Up / W key / button 2) - saved immediately into Hash
-    if btnp(2)
+    if btnp(:up)
       @theme_idx = (@theme_idx + 1) % THEMES.size
       save_set(:prefs, { "theme_idx" => @theme_idx })
       show_notice("THEME SAVED: " + THEMES[@theme_idx]["name"])
     end
 
-    # Clear save data (X / Enter on Title/Result) with 2-step confirmation
-    if (@state == :title || @state == :result) && btnp(5)
+    # Clear save data (X on Title/Result) with 2-step confirmation
+    if (@state == :title || @state == :result) && btnp(2)
       if @clear_confirm > 0
         save_clear
         load_save_data
@@ -120,15 +120,15 @@ class SaveDemoGame
     end
 
     if @state == :title || @state == :result
-      if btnp(4) || btnp(:mouse_l)
+      if btnp(1) || btnp(:mouse_l)
         start_round
       end
       return
     end
 
     # Playing state
-    @px -= 3.2 if btn(0)
-    @px += 3.2 if btn(1)
+    @px -= 3.2 if btn(:left)
+    @px += 3.2 if btn(:right)
     if btn(:mouse_l)
       @px = mouse_x - 8
     end

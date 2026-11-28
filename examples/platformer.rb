@@ -175,7 +175,7 @@ end
 def update
   $t += 1
 
-  if btnp(6) || btn(7) # R: リスタート
+  if btnp(:key_r) # R: リスタート
     reset
     return
   end
@@ -199,15 +199,15 @@ def update
 
   # 入力
   move_x = 0
-  move_x -= 1 if btn(0) # 左
-  move_x += 1 if btn(1) # 右
-  jump_btn = btn(4) || btn(2) # Z または 上
-  jump_press = btnp(4) || btnp(2)
-  $p[:crouch] = btn(3) && $p[:on_ground] # 下でしゃがみ
+  move_x -= 1 if btn(:left) # 左
+  move_x += 1 if btn(:right) # 右
+  jump_btn = btn(1) || btn(:up) # Z または 上
+  jump_press = btnp(1) || btnp(:up)
+  $p[:crouch] = btn(:down) && $p[:on_ground] # 下でしゃがみ
 
   if move_x != 0 && !$p[:crouch]
     $p[:vx] += move_x * WALK_ACCEL
-    max_s = btn(5) ? RUN_MAX : WALK_MAX # Xでダッシュ
+    max_s = btn(2) ? RUN_MAX : WALK_MAX # Xでダッシュ
     $p[:vx] = [[$p[:vx], -max_s].max, max_s].min
     $p[:flip_x] = (move_x < 0)
   else

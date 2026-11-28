@@ -2,8 +2,8 @@
 # Run: cargo run --bin uk -- run examples/bg_presets.rb
 #
 # Controls:
-#   [Z / Space] Switch Scroll Mode (Fixed / H-Scroll / H+V-Scroll / V-Scroll)
-#   [X / Enter] Switch Preset BG (8 presets)
+#   [Z] Switch Scroll Mode (Fixed / H-Scroll / H+V-Scroll / V-Scroll)
+#   [X] Switch Preset BG (8 presets)
 #   [Arrow]     Move foreground sprite
 
 config(
@@ -44,13 +44,13 @@ end
 def update
   $frame += 1
 
-  # Switch mode with Z / Space (btnp 4)
-  if btnp(4)
+  # Switch mode with Z
+  if btnp(1)
     $mode_idx = ($mode_idx + 1) % MODES.size
   end
 
-  # Switch preset with X / Enter (btnp 5)
-  if btnp(5)
+  # Switch preset with X
+  if btnp(2)
     $preset_idx = ($preset_idx + 1) % PRESETS.size
   end
 
@@ -66,18 +66,18 @@ def update
 
   # Move foreground sprite with Arrow keys
   spd = 2.0
-  if btn(0)
+  if btn(:left)
     $px -= spd
     $facing_left = true
   end
-  if btn(1)
+  if btn(:right)
     $px += spd
     $facing_left = false
   end
-  if btn(2)
+  if btn(:up)
     $py -= spd
   end
-  if btn(3)
+  if btn(:down)
     $py += spd
   end
   $px = 8.0 if $px < 8.0

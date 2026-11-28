@@ -15,9 +15,9 @@
 #   7. イージング関数 (lerp, ease_out_quad, ease_out_back)
 #
 # 【操作方法】
-#   - 矢印キー (WASD): うさぎを移動（残像トレイル発生）
-#   - Z / Space: コンボ攻撃（斬撃＋火花＋ダメージポップアップ＋ヒットストップ）
-#   - X / Enter: 大爆発マジック（衝撃波＋大シェイク＋大量パーティクル）
+#   - 矢印キー: うさぎを移動（残像トレイル発生）
+#   - Z: コンボ攻撃（斬撃＋火花＋ダメージポップアップ＋ヒットストップ）
+#   - X: 大爆発マジック（衝撃波＋大シェイク＋大量パーティクル）
 #   - マウス左クリック: クリック位置に花火バースト生成
 # ==============================================================================
 
@@ -324,10 +324,10 @@ def update
   $player[:slash_timer] -= 1 if $player[:slash_timer] > 0
 
   # アクション入力
-  if btnp(:btn_a)
+  if btnp(1)
     perform_slash_attack
   end
-  if btnp(:btn_b)
+  if btnp(2)
     perform_magic_blast($dummy[:x] + 8.0, $dummy[:y] + 8.0)
   end
   if btnp(:mouse_l)

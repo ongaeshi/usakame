@@ -1,7 +1,7 @@
 # Alpha Blending Demo (spr / circfill / rectfill / line / oval / print_text)
-# 矢印キー / WASD: うさぎを移動（半透明ゴースト残像つき）
-# Z / Space: ダッシュ（残像が濃く・長くなります）
-# X / Enter / クリック: 花火・光の波紋を発生
+# 矢印キー: うさぎを移動（半透明ゴースト残像つき）
+# Z: ダッシュ（残像が濃く・長くなります）
+# X / クリック: 花火・光の波紋を発生
 
 class AlphaDemoScene
   def initialize
@@ -60,25 +60,25 @@ class AlphaDemoScene
 
   def update
     @t += 1
-    dash = btn(4)
+    dash = btn(1)
     accel = dash ? 0.55 : 0.32
     moved = false
 
-    if btn(0)
+    if btn(:left)
       @vx -= accel
       @flip_x = true
       moved = true
     end
-    if btn(1)
+    if btn(:right)
       @vx += accel
       @flip_x = false
       moved = true
     end
-    if btn(2)
+    if btn(:up)
       @vy -= accel
       moved = true
     end
-    if btn(3)
+    if btn(:down)
       @vy += accel
       moved = true
     end
@@ -119,9 +119,9 @@ class AlphaDemoScene
     @trails.reject! { |tr| tr[:life] <= 0 }
 
     # X / クリック / 定期打ち上げで花火
-    if btnp(5) || btnp(6)
-      fx = btnp(6) ? mouse_x.to_f : (40.0 + rand(176))
-      fy = btnp(6) ? mouse_y.to_f : (44.0 + rand(68))
+    if btnp(2) || btnp(:mouse_l)
+      fx = btnp(:mouse_l) ? mouse_x.to_f : (40.0 + rand(176))
+      fy = btnp(:mouse_l) ? mouse_y.to_f : (44.0 + rand(68))
       spawn_firework(fx, fy)
     elsif @t % 95 == 0
       spawn_firework(48.0 + rand(160), 48.0 + rand(56))

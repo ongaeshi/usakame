@@ -13,19 +13,19 @@ $flip_x = false
 def update
   $t += 1
 
-  # 矢印キー / WASD で移動
-  if btn(0)
+  # 矢印キー で移動
+  if btn(:left)
     $x -= 2
     $flip_x = true
   end
-  if btn(1)
+  if btn(:right)
     $x += 2
     $flip_x = false
   end
-  if btn(2)
+  if btn(:up)
     $y -= 2
   end
-  if btn(3)
+  if btn(:down)
     $y += 2
   end
 
@@ -34,9 +34,9 @@ def update
   $y = 128 if $y < 128
   $y = 220 if $y > 220
 
-  # Z / Space キーでハイジャンプ、通常時はリズミカルに小ジャンプ
+  # Z キーでハイジャンプ、通常時はリズミカルに小ジャンプ
   if $jump_z <= 0.0
-    if btn(4)
+    if btn(1)
       $vy = 4.2
     else
       $vy = 1.8
@@ -115,7 +115,7 @@ def draw
   # ウサギ本体と周囲のバリアリング
   uy = $y - $jump_z.to_i
   spr(0, $x, uy, $flip_x, false)
-  if btn(4)
+  if btn(1)
     oval($x + 8, uy + 8, 14, 9, 10)
     oval($x + 8, uy + 8, 9, 14, 11)
   end

@@ -197,11 +197,12 @@ ch2 wave=noise  vol=2 T140 L8 O2 c r >>> c r <<<
 - `pal(c0, c1)` / `palt(col, transparent)` : パレット色置換 / 透過色設定
 
 ### 入力 & システム
-- `btn(id_or_sym)` : 押し続け判定
-  - 仮想パッド: `0: :left`, `1: :right`, `2: :up`, `3: :down`, `4: :z / :space / :btn_a`, `5: :x / :enter / :btn_b`
-  - マウス: `6: :mouse_l` (左クリック), `7: :mouse_r` (右クリック), `8: :mouse_m` (中クリック)
-  - フルキーボード: `:tab`, `:ctrl`, `:shift`, `:alt`, `:escape`, `:backspace`, `:del`, `:s`, `:c`, `:g`, `:key_1`..`:key_9`, `:f1`..`:f12` 等のシンボルに対応
-- `btnp(id_or_sym)` : このフレームで新たに押された瞬間判定（クリック検出や単発アクションに最適）
+- `btn(id, player = 0)` : 押し続け判定（未定義の指定で `ArgumentError`）
+  - 方向ボタン: `:left`, `:right`, `:up`, `:down`（矢印キー / ゲームパッド）
+  - アクションボタン: `1`（Z / パッドボタン1）, `2`（X / パッドボタン2）
+  - マウス: `:mouse_l` (左クリック), `:mouse_r` (右クリック), `:mouse_m` (中クリック)
+  - フルキーボード: `:tab`, `:ctrl`, `:shift`, `:alt`, `:space`, `:enter`, `:escape`, `:backspace`, `:del`, `:key_a`..`:key_z`, `:key_0`..`:key_9`, `:f1`..`:f12` 等のシンボルに対応
+- `btnp(id, player = 0)` : このフレームで新たに押された瞬間判定（クリック検出や単発アクションに最適）
 - `mouse_x` / `mouse_y` : 仮想画面（256x256）基準でのマウス座標（アスペクト比維持のレターボックス補正済み）
 - `mouse_wheel` : マウスホイールのスクロール量（上: 正、下: 負）
 - `show_mouse(visible = true)` : OS 標準マウスカーソルの表示 / 非表示切り替え

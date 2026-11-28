@@ -44,11 +44,18 @@ Ruby コードを生成・修正する前に、必ず以下のドキュメント
 * **タイルの消去**: 消去には **`mdel(x, y)`** または **`mset(x, y, nil)`** を使用してください。
   * ❌ `mset(x, y, -1)` などの負数を渡すと **`ArgumentError` 例外が発生** します。
 
-### ④ 数学関数・乱数
+### ④ 入力 API（`btn` / `btnp`）のルール
+* **方向ボタン（Symbol / String 専用）**: `:left`, `:right`, `:up`, `:down` の4種類のみを使用してください（旧整数 `0..3` や `:l, :r, :u, :d` は廃止）。
+* **アクションボタン（Integer `1`, `2` 専用）**: `1`（1ボタン: 1Pキーボード `Z` / パッド `South`）と `2`（2ボタン: 1Pキーボード `X` / パッド `East`）を使用してください。旧整数 `4, 5` や旧シンボル `:a, :b, :btn_a, :btn_b, :btn1, :btn2, :z, :x` はすべて廃止です（`WASD` / `Space` / `Enter` の補助割り当てもありません）。
+* **マウスボタン**: `:mouse_l`, `:mouse_r`, `:mouse_m`（または `:mouse_left`, `:click` 等のエイリアス）を使用してください（旧整数 `6..8` は廃止）。
+* **生キー指定（エディタ・デバッグ用途）**: 英字・数字の個別キーはすべて `:key_` プレフィックス必須（`:key_a`〜`:key_z`, `:key_0`〜`:key_9`）です。`:space` / `:key_space`, `:enter` / `:return` / `:key_enter` 等の特殊キーも利用可能です。
+* **不正な引数は `ArgumentError`**: 引数なし `btn()` / `btnp()`、旧番号（`0, 3, 4, 6` 等）、未定義シンボル（`:a, :b, :z` 等）を渡すと実行時に **`ArgumentError`** が発生します。
+
+### ⑤ 数学関数・乱数
 * Usakame エンジンでは `Math.sin(x)`, `Math.cos(x)`, `Math.sqrt(x)` のほか、トップレベル関数 `sin(x)`, `cos(x)`, `sqrt(x)` も直接呼び出し可能です。
 * 乱数は `rand()`（0.0...1.0）、`rand(max)`（0...max）、`rand(min..max)` が利用可能です。
 
-### ⑤ スプライト・カスタムパレット（`@PALETTE` / `@SPRITE`）の生成
+### ⑥ スプライト・カスタムパレット（`@PALETTE` / `@SPRITE`）の生成
 用途に応じて以下の2つのスキルを使い分けてください。
 * **高品質・リッチなスプライト（`/usakame-sprite`）**: 主人公やボスなど、標準16色だけでは表現しきれない固有色や滑らかな3〜4段階グラデーションが必要な場合は、**`@PALETTE <id>`（`id >= 1`、ベースパレットからのピンポイント差分定義）** と **`@SPRITE :name [WxH] pal:<id>`** をセットで定義してください（詳細は [.agents/skills/usakame-sprite/SKILL.md](.agents/skills/usakame-sprite/SKILL.md) を参照）。
 * **高速・大量生成（`/usakame-sprite-fast`）**: プロトタイプ作成や雑魚敵・アイテム・弾・タイル等の大量生成で速度を重視する場合は、`@PALETTE` 設計を省略して標準パレット（`pal:0`）＋フラット2〜3色塗り・`:name` 自動配置・`8x8` 小型サイズ・内蔵絵文字を活用してください（詳細は [.agents/skills/usakame-sprite-fast/SKILL.md](.agents/skills/usakame-sprite-fast/SKILL.md) を参照）。

@@ -90,28 +90,28 @@ end
 def update
   $frame += 1
 
-  # Switch effect preset (X / Enter)
-  if btnp(5)
+  # Switch effect preset (X)
+  if btnp(2)
     $fx_idx = ($fx_idx + 1) % EFFECT_PRESETS.size
   end
 
   # Switch backdrop image (Down)
-  if btnp(3)
+  if btnp(:down)
     $bg_idx = ($bg_idx + 1) % BG_IDS.size
   end
 
   # Horizontal movement
   $vx = 0.0
-  if btn(0)
+  if btn(:left)
     $vx = -MOVE_SPEED
     $facing_left = true
-  elsif btn(1)
+  elsif btn(:right)
     $vx = MOVE_SPEED
     $facing_left = false
   end
 
   # Jump with buffer & coyote time
-  if btnp(4) || btnp(2)
+  if btnp(1) || btnp(:up)
     $jump_buffer = 6
   elsif $jump_buffer > 0
     $jump_buffer -= 1

@@ -58,11 +58,11 @@ def update
     sfx(:select)
   end
 
-  if btnp(:a) || btnp(:enter) || btnp(:space)
+  if btnp(1) || btnp(:enter) || btnp(:space)
     play_selected
   end
 
-  if btnp(:b)
+  if btnp(2)
     toggle_bgm
   end
 end

@@ -7,7 +7,7 @@
 #   - 32x32 タイル (512x512 ピクセル) の広大なダンジョンマップ
 #   - プレイヤーが画面端 (マージン 72px) に近づくとカメラがスムーズにスクロール！
 #   - 右上にリアルタイム・ミニマップ (プレイヤー現在地レーダー付き)
-#   - 矢印キー または WASD で移動
+#   - 矢印キー で移動
 #   - 宝箱 (全9箇所) を開けてスコアを集めよう！
 #   - 徘徊するスライムとスケルトン
 #   - Z キー: 「ゲームモード」と「132タイル全一覧リファレンス」の切り替え
@@ -157,7 +157,7 @@ def add_sparkle(x, y, col = 10)
 end
 
 def update
-  if btnp(:mouse_r) || btnp(:z)
+  if btnp(:mouse_r) || btnp(:right)
     $mode = ($mode == :game) ? :viewer : :game
     sfx(:select)
   end
@@ -178,10 +178,10 @@ end
 def update_game
   dx = 0
   dy = 0
-  if btn(:left)  || btn(0); dx -= 1; $pdir = :left; end
-  if btn(:right) || btn(1); dx += 1; $pdir = :right; end
-  if btn(:up)    || btn(2); dy -= 1; end
-  if btn(:down)  || btn(3); dy += 1; end
+  if btn(:left);  dx -= 1; $pdir = :left; end
+  if btn(:right); dx += 1; $pdir = :right; end
+  if btn(:up);    dy -= 1; end
+  if btn(:down);  dy += 1; end
 
   # 移動処理
   if dx != 0 && can_walk?($px + dx, $py)

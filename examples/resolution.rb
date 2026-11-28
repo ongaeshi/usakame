@@ -58,7 +58,7 @@ def update
   $py = 310 if $py > 310
 
   # メッセージ送り (Space / Z / Click)
-  if btnp(4) || btnp(5) || btnp(:mouse_l)
+  if btnp(1) || btnp(2) || btnp(:mouse_l)
     $msg_page = ($msg_page + 1) % MESSAGES.size
     sfx(0) if respond_to?(:sfx)
   end

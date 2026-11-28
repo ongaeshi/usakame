@@ -7,8 +7,8 @@
 # 【操作方法】
 #   ← / → (A / D) : ジオラマ切替 (全5シーン)
 #   ↑ / ↓ (W / S) : ムード / 時間帯切替 (各4バリエーション・滑らか色変化)
-#   Z / Space     : シーン固有のマジック演出を発火！
-#   X / Enter     : UI表示切替 (PANEL → CINEMA黒帯 → CLEAN全画面)
+#   Z     : シーン固有のマジック演出を発火！
+#   X     : UI表示切替 (PANEL → CINEMA黒帯 → CLEAN全画面)
 # ==============================================================================
 
 config(
@@ -1182,24 +1182,24 @@ class DioramaScene
     @wipe_t -= 1 if @wipe_t > 0
     @toast_t -= 1 if @toast_t > 0
 
-    if btnp(0)
+    if btnp(:left)
       switch_world(-1)
-    elsif btnp(1)
+    elsif btnp(:right)
       switch_world(1)
     end
 
-    if btnp(2)
+    if btnp(:up)
       switch_mood(-1)
-    elsif btnp(3)
+    elsif btnp(:down)
       switch_mood(1)
     end
 
-    if btnp(4)
+    if btnp(1)
       current_world.trigger_magic
       show_toast(current_world.magic_label)
     end
 
-    if btnp(5)
+    if btnp(2)
       @ui_mode = (@ui_mode + 1) % UI_MODES.size
       mode_names = ["PANEL UI", "CINEMA MODE", "CLEAN VIEW"]
       show_toast(mode_names[@ui_mode])

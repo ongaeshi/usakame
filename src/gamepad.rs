@@ -6,8 +6,8 @@ pub const PAD_LEFT: u8 = 1 << 0;
 pub const PAD_RIGHT: u8 = 1 << 1;
 pub const PAD_UP: u8 = 1 << 2;
 pub const PAD_DOWN: u8 = 1 << 3;
-pub const PAD_A: u8 = 1 << 4;
-pub const PAD_B: u8 = 1 << 5;
+pub const PAD_B1: u8 = 1 << 4;
+pub const PAD_B2: u8 = 1 << 5;
 
 #[cfg(target_arch = "wasm32")]
 unsafe extern "C" {
@@ -102,10 +102,10 @@ impl GamepadState {
                         }
                     }
                     if gamepad.is_pressed(gilrs::Button::South) {
-                        mask |= PAD_A;
+                        mask |= PAD_B1;
                     }
                     if gamepad.is_pressed(gilrs::Button::East) {
-                        mask |= PAD_B;
+                        mask |= PAD_B2;
                     }
                     self.current_down[slot] = mask;
                     slot += 1;
@@ -140,8 +140,8 @@ impl GamepadState {
             ButtonId::Right => Some(PAD_RIGHT),
             ButtonId::Up => Some(PAD_UP),
             ButtonId::Down => Some(PAD_DOWN),
-            ButtonId::A => Some(PAD_A),
-            ButtonId::B => Some(PAD_B),
+            ButtonId::B1 => Some(PAD_B1),
+            ButtonId::B2 => Some(PAD_B2),
             _ => None,
         }
     }

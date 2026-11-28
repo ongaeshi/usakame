@@ -1,6 +1,6 @@
 # Sound Demo (sfx / music / @SFX / @MUSIC)
-# 上下キー: 効果音を選択   Z / Space: 再生
-# X / Enter: BGM 再生 / 停止
+# 上下キー: 効果音を選択   Z: 再生
+# X: BGM 再生 / 停止
 #
 # サウンドはすべてこのスクリプト内（__END__ 以降の @SFX / @MUSIC）で定義されています。
 
@@ -32,10 +32,10 @@ def update
   $t += 1
   $flash -= 1 if $flash > 0
 
-  up = btn(2)
-  down = btn(3)
-  z = btn(4)
-  x = btn(5)
+  up = btn(:up)
+  down = btn(:down)
+  z = btn(1)
+  x = btn(2)
 
   if up && !$prev_up
     $cursor = ($cursor - 1) % $items.size

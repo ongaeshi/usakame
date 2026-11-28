@@ -49,14 +49,14 @@ $msg_timer = 180
 music(0)
 
 def update
-  # --- プレイヤー移動 (矢印キー / WASD) ---
+  # --- プレイヤー移動 (矢印キー) ---
   dx = 0
   dy = 0
 
-  dx -= 2 if btn(0) # left
-  dx += 2 if btn(1) # right
-  dy -= 2 if btn(2) # up
-  dy += 2 if btn(3) # down
+  dx -= 2 if btn(:left) # left
+  dx += 2 if btn(:right) # right
+  dy -= 2 if btn(:up) # up
+  dy += 2 if btn(:down) # down
 
   if dx != 0 || dy != 0
     $pdir = (dx < 0) ? :left : :right if dx != 0
@@ -128,6 +128,6 @@ def draw
     print_text($msg, 8, 243, 10)
   else
     rectfill(0, 240, 256, 16, 1)
-    print_text("Move: Arrows/WASD | Hot-reload active!", 8, 244, 6)
+    print_text("Move: Arrows | Hot-reload active!", 8, 244, 6)
   end
 end

@@ -21,7 +21,7 @@ class LightmapDecalDemo
 
   def update
     @t += 1
-    @erase_mode = !@erase_mode if btnp(:z) || btnp(:mouse_l)
+    @erase_mode = !@erase_mode if btnp(:right) || btnp(:mouse_l)
 
     if btn(:left)
       @angle -= 0.06
@@ -60,7 +60,7 @@ class LightmapDecalDemo
       end
     end
 
-    if btnp(:x)
+    if btnp(:up)
       clear_surface(@decal)
     end
   end

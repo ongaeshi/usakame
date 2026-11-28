@@ -17,25 +17,25 @@ WORLD_H = 320
 def update
   $t += 1
 
-  # 矢印キー / WASD でワールド内 (0..512, 0..320) を移動
-  speed = btn(5) ? 4 : 2
-  if btn(0)
+  # 矢印キー でワールド内 (0..512, 0..320) を移動
+  speed = btn(2) ? 4 : 2
+  if btn(:left)
     $x -= speed
     $flip_x = true
   end
-  if btn(1)
+  if btn(:right)
     $x += speed
     $flip_x = false
   end
-  if btn(2)
+  if btn(:up)
     $y -= speed
   end
-  if btn(3)
+  if btn(:down)
     $y += speed
   end
 
-  # Z / Space キーで画面シェイク演出
-  if btn(4)
+  # Z キーで画面シェイク演出
+  if btn(1)
     $shake = 12
   elsif $shake > 0
     $shake -= 1

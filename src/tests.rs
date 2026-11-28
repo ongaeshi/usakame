@@ -198,42 +198,53 @@ fn test_screen_to_virtual_coordinates() {
 #[test]
 fn test_button_parsing_symbols_and_numbers() {
     assert_eq!(parse_button_name("left"), Some(ButtonId::Left));
-    assert_eq!(parse_button_name("l"), Some(ButtonId::Left));
     assert_eq!(parse_button_name("right"), Some(ButtonId::Right));
-    assert_eq!(parse_button_name("r"), Some(ButtonId::Right));
     assert_eq!(parse_button_name("up"), Some(ButtonId::Up));
-    assert_eq!(parse_button_name("u"), Some(ButtonId::Up));
     assert_eq!(parse_button_name("down"), Some(ButtonId::Down));
-    assert_eq!(parse_button_name("d"), Some(ButtonId::Down));
-    assert_eq!(parse_button_name("a"), Some(ButtonId::A));
-    assert_eq!(parse_button_name("btn1"), Some(ButtonId::A));
-    assert_eq!(parse_button_name("z"), Some(ButtonId::A));
-    assert_eq!(parse_button_name("space"), Some(ButtonId::A));
-    assert_eq!(parse_button_name("btn_a"), Some(ButtonId::A));
-    assert_eq!(parse_button_name("b"), Some(ButtonId::B));
-    assert_eq!(parse_button_name("btn2"), Some(ButtonId::B));
-    assert_eq!(parse_button_name("x"), Some(ButtonId::B));
-    assert_eq!(parse_button_name("enter"), Some(ButtonId::B));
-    assert_eq!(parse_button_name("btn_b"), Some(ButtonId::B));
-    assert_eq!(parse_button_name("key_a"), Some(ButtonId::Key(macroquad::input::KeyCode::A)));
-    assert_eq!(parse_button_name("key_b"), Some(ButtonId::Key(macroquad::input::KeyCode::B)));
+
+    // 旧短縮・旧アクションシンボルは廃止
+    assert_eq!(parse_button_name("l"), None);
+    assert_eq!(parse_button_name("r"), None);
+    assert_eq!(parse_button_name("u"), None);
+    assert_eq!(parse_button_name("d"), None);
+    assert_eq!(parse_button_name("a"), None);
+    assert_eq!(parse_button_name("btn1"), None);
+    assert_eq!(parse_button_name("z"), None);
+    assert_eq!(parse_button_name("btn_a"), None);
+    assert_eq!(parse_button_name("b"), None);
+    assert_eq!(parse_button_name("btn2"), None);
+    assert_eq!(parse_button_name("x"), None);
+    assert_eq!(parse_button_name("btn_b"), None);
+
+    // マウス
     assert_eq!(parse_button_name("mouse_l"), Some(ButtonId::MouseLeft));
     assert_eq!(parse_button_name("click"), Some(ButtonId::MouseLeft));
     assert_eq!(parse_button_name("mouse_r"), Some(ButtonId::MouseRight));
     assert_eq!(parse_button_name("mouse_m"), Some(ButtonId::MouseMiddle));
 
-    // フルキーボード対応テスト
+    // フルキーボード (:key_* 必須 + 特殊キー)
+    assert_eq!(parse_button_name("key_a"), Some(ButtonId::Key(macroquad::input::KeyCode::A)));
+    assert_eq!(parse_button_name("key_b"), Some(ButtonId::Key(macroquad::input::KeyCode::B)));
+    assert_eq!(parse_button_name("key_z"), Some(ButtonId::Key(macroquad::input::KeyCode::Z)));
+    assert_eq!(parse_button_name("key_0"), Some(ButtonId::Key(macroquad::input::KeyCode::Key0)));
+    assert_eq!(parse_button_name("key_1"), Some(ButtonId::Key(macroquad::input::KeyCode::Key1)));
+    assert_eq!(parse_button_name("key_9"), Some(ButtonId::Key(macroquad::input::KeyCode::Key9)));
+    assert_eq!(parse_button_name("space"), Some(ButtonId::Key(macroquad::input::KeyCode::Space)));
+    assert_eq!(parse_button_name("key_space"), Some(ButtonId::Key(macroquad::input::KeyCode::Space)));
+    assert_eq!(parse_button_name("enter"), Some(ButtonId::Key(macroquad::input::KeyCode::Enter)));
+    assert_eq!(parse_button_name("return"), Some(ButtonId::Key(macroquad::input::KeyCode::Enter)));
+    assert_eq!(parse_button_name("key_enter"), Some(ButtonId::Key(macroquad::input::KeyCode::Enter)));
     assert_eq!(parse_button_name("tab"), Some(ButtonId::Key(macroquad::input::KeyCode::Tab)));
     assert_eq!(parse_button_name("ctrl"), Some(ButtonId::Key(macroquad::input::KeyCode::LeftControl)));
-    assert_eq!(parse_button_name("s"), Some(ButtonId::Key(macroquad::input::KeyCode::S)));
-    assert_eq!(parse_button_name("g"), Some(ButtonId::Key(macroquad::input::KeyCode::G)));
-    assert_eq!(parse_button_name("c"), Some(ButtonId::Key(macroquad::input::KeyCode::C)));
-    assert_eq!(parse_button_name("e"), Some(ButtonId::Key(macroquad::input::KeyCode::E)));
-    assert_eq!(parse_button_name("f"), Some(ButtonId::Key(macroquad::input::KeyCode::F)));
-    assert_eq!(parse_button_name("key_1"), Some(ButtonId::Key(macroquad::input::KeyCode::Key1)));
-    assert_eq!(parse_button_name("1"), Some(ButtonId::Key(macroquad::input::KeyCode::Key1)));
     assert_eq!(parse_button_name("del"), Some(ButtonId::Key(macroquad::input::KeyCode::Delete)));
     assert_eq!(parse_button_name("backspace"), Some(ButtonId::Key(macroquad::input::KeyCode::Backspace)));
+
+    // 1文字英数字は廃止
+    assert_eq!(parse_button_name("s"), None);
+    assert_eq!(parse_button_name("g"), None);
+    assert_eq!(parse_button_name("c"), None);
+    assert_eq!(parse_button_name("0"), None);
+    assert_eq!(parse_button_name("1"), None);
 
     assert_eq!(parse_button_name("invalid_key_name"), None);
 }
@@ -4768,7 +4779,7 @@ end
     std::fs::write(
         &gacha_test_path,
         r#"def update
-  if btn(:left) || btn(:btn_a) || btn(4)
+  if btn(:left) || btn(1)
     [1, 2].sample
   end
 end
@@ -5176,9 +5187,9 @@ $pressed = []
 $default_pressed = []
 
 def update
-  $down << btn(4)
-  $pressed << btnp(4)
-  $default_pressed << btnp() # id=0 (Left)
+  $down << btn(1)
+  $pressed << btnp(1)
+  $default_pressed << btnp(:left)
 end
 
 def draw
@@ -5187,20 +5198,20 @@ end
     let (t, m) = cli::compile_ruby_script_str_with_filename(script, Some("test_btnp.rb")).unwrap();
     let mut rt = GameRuntime::new(&t, &m, true).expect("init should succeed");
 
-    // Frame 1: Button A (4) pressed
-    rt.input_state.borrow_mut().set_frame_buttons(vec![ButtonId::A]);
+    // Frame 1: Button 1 pressed
+    rt.input_state.borrow_mut().set_frame_buttons(vec![ButtonId::B1]);
     rt.call_update_result().unwrap();
 
-    // Frame 2: Button A (4) held down
-    rt.input_state.borrow_mut().set_frame_buttons(vec![ButtonId::A]);
+    // Frame 2: Button 1 held down
+    rt.input_state.borrow_mut().set_frame_buttons(vec![ButtonId::B1]);
     rt.call_update_result().unwrap();
 
-    // Frame 3: Button A released
+    // Frame 3: Button 1 released
     rt.input_state.borrow_mut().set_frame_buttons(vec![]);
     rt.call_update_result().unwrap();
 
-    // Frame 4: Button A pressed again, plus Button Left (0) pressed
-    rt.input_state.borrow_mut().set_frame_buttons(vec![ButtonId::A, ButtonId::Left]);
+    // Frame 4: Button 1 pressed again, plus Button Left pressed
+    rt.input_state.borrow_mut().set_frame_buttons(vec![ButtonId::B1, ButtonId::Left]);
     rt.call_update_result().unwrap();
 
     let down_arr = match &rt.vm.globals.get("$down").unwrap().value {
@@ -5303,7 +5314,7 @@ class PauseScene
   end
 
   def update
-    if btnp(4) # Aボタンで復帰
+    if btnp(1) # ボタン1で復帰
       run @prev_scene, reset_state: false
     end
   end
@@ -5323,7 +5334,7 @@ class GameScene
 
   def update
     @x += 1
-    if btnp(4) # Aボタンでポーズ
+    if btnp(1) # ボタン1でポーズ
       run PauseScene.new(self)
     end
     $game_x = @x
@@ -5346,25 +5357,25 @@ run GameScene.new
     rt.call_update_result().unwrap();
     assert_eq!(get_global_i64(&rt.vm, "$game_x"), Some(101));
 
-    // 2フレーム目: ボタンA (4) 押下 -> PauseScene へ遷移予約
-    rt.input_state.borrow_mut().set_frame_buttons(vec![ButtonId::A]);
+    // 2フレーム目: ボタン1 押下 -> PauseScene へ遷移予約
+    rt.input_state.borrow_mut().set_frame_buttons(vec![ButtonId::B1]);
     rt.call_update_result().unwrap();
     assert_eq!(get_global_i64(&rt.vm, "$game_x"), Some(102));
     assert!(rt.next_scene.borrow().is_some());
 
-    // 3フレーム目: ボタンA 押しっぱなし -> PauseScene に昇格するが btnp(4) は false なのでポーズ維持
-    rt.input_state.borrow_mut().set_frame_buttons(vec![ButtonId::A]);
+    // 3フレーム目: ボタン1 押しっぱなし -> PauseScene に昇格するが btnp(1) は false なのでポーズ維持
+    rt.input_state.borrow_mut().set_frame_buttons(vec![ButtonId::B1]);
     rt.call_update_result().unwrap();
     // ポーズ中なので GameScene の update は走らず $game_x は 102 のまま
     assert_eq!(get_global_i64(&rt.vm, "$game_x"), Some(102));
 
-    // 4フレーム目: ボタンA 離す
+    // 4フレーム目: ボタン1 離す
     rt.input_state.borrow_mut().set_frame_buttons(vec![]);
     rt.call_update_result().unwrap();
     assert_eq!(get_global_i64(&rt.vm, "$game_x"), Some(102));
 
-    // 5フレーム目: ボタンA 再押下 -> GameScene へ復帰予約
-    rt.input_state.borrow_mut().set_frame_buttons(vec![ButtonId::A]);
+    // 5フレーム目: ボタン1 再押下 -> GameScene へ復帰予約
+    rt.input_state.borrow_mut().set_frame_buttons(vec![ButtonId::B1]);
     rt.call_update_result().unwrap();
 
     // 6フレーム目: ボタンA 離して GameScene 復帰確認 (x が 103 に進む、score 50 も保持)
@@ -6956,8 +6967,8 @@ end
 def draw
   $p1_left = btn(:left, 0)
   $p2_right = btn(:right, 1)
-  $p2_a = btn(:z, 1)
-  $p2_ap = btnp(:z, 1)
+  $p2_a = btn(1, 1)
+  $p2_ap = btnp(1, 1)
   $p2_left = btn(:left, 1)
   $p3_up = btn(:up, 2)
   $p3_upp = btnp(:up, 2)
@@ -7328,50 +7339,251 @@ ch1 wave=tri vol=6 T140 L4 O3 c g
 }
 
 #[test]
-fn test_btnp_action_button_aliases() {
+fn test_btnp_action_buttons_and_raw_keys() {
     let script = r#"
 def update
 end
 
 def draw
-  $a = btnp(:a)
-  $btn1 = btnp(:btn1)
-  $z = btnp(:z)
-  $b = btnp(:b)
-  $btn2 = btnp(:btn2)
-  $x = btnp(:x)
+  $b1 = btnp(1)
+  $b2 = btnp(2)
+  $key_z = btnp(:key_z)
+  $key_x = btnp(:key_x)
   $key_a = btnp(:key_a)
   $key_b = btnp(:key_b)
+  $key_1 = btnp(:key_1)
+  $space = btnp(:space)
+  $key_space = btnp(:key_space)
+  $enter = btnp(:enter)
 end
 "#;
     let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
     let mut rt = GameRuntime::new(&tail, &mrb, true).unwrap();
 
-    // Frame 1: Z (ButtonId::A) and X (ButtonId::B) pressed
+    // Frame 1: Z (ButtonId::B1) and X (ButtonId::B2) pressed
     rt.input_state
         .borrow_mut()
         .set_frame_buttons(vec![ButtonId::Key(KeyCode::Z), ButtonId::Key(KeyCode::X)]);
     rt.call_draw_result().unwrap();
 
-    assert_eq!(robject_to_bool(rt.vm.globals.get("$a").unwrap()), Some(true));
-    assert_eq!(robject_to_bool(rt.vm.globals.get("$btn1").unwrap()), Some(true));
-    assert_eq!(robject_to_bool(rt.vm.globals.get("$z").unwrap()), Some(true));
-    assert_eq!(robject_to_bool(rt.vm.globals.get("$b").unwrap()), Some(true));
-    assert_eq!(robject_to_bool(rt.vm.globals.get("$btn2").unwrap()), Some(true));
-    assert_eq!(robject_to_bool(rt.vm.globals.get("$x").unwrap()), Some(true));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$b1").unwrap()), Some(true));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$b2").unwrap()), Some(true));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$key_z").unwrap()), Some(true));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$key_x").unwrap()), Some(true));
     assert_eq!(robject_to_bool(rt.vm.globals.get("$key_a").unwrap()), Some(false));
     assert_eq!(robject_to_bool(rt.vm.globals.get("$key_b").unwrap()), Some(false));
 
-    // Frame 2: KeyCode::A / KeyCode::B pressed -> only :key_a / :key_b respond (and :left for A)
-    rt.input_state
-        .borrow_mut()
-        .set_frame_buttons(vec![ButtonId::Key(KeyCode::A), ButtonId::Key(KeyCode::B)]);
+    // Frame 2: WASD, Space, Enter pressed -> must NOT trigger 1P direction or action 1/2
+    rt.input_state.borrow_mut().set_frame_buttons(vec![
+        ButtonId::Key(KeyCode::A),
+        ButtonId::Key(KeyCode::B),
+        ButtonId::Key(KeyCode::Key1),
+        ButtonId::Key(KeyCode::Space),
+        ButtonId::Key(KeyCode::Enter),
+    ]);
     rt.call_draw_result().unwrap();
 
-    assert_eq!(robject_to_bool(rt.vm.globals.get("$a").unwrap()), Some(false));
-    assert_eq!(robject_to_bool(rt.vm.globals.get("$btn1").unwrap()), Some(false));
-    assert_eq!(robject_to_bool(rt.vm.globals.get("$b").unwrap()), Some(false));
-    assert_eq!(robject_to_bool(rt.vm.globals.get("$btn2").unwrap()), Some(false));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$b1").unwrap()), Some(false));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$b2").unwrap()), Some(false));
     assert_eq!(robject_to_bool(rt.vm.globals.get("$key_a").unwrap()), Some(true));
     assert_eq!(robject_to_bool(rt.vm.globals.get("$key_b").unwrap()), Some(true));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$key_1").unwrap()), Some(true));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$space").unwrap()), Some(true));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$key_space").unwrap()), Some(true));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$enter").unwrap()), Some(true));
+}
+
+#[test]
+fn test_btn_btnp_argument_errors() {
+    let invalid_calls = [
+        "btn()",
+        "btnp()",
+        "btn(0)",
+        "btn(3)",
+        "btn(4)",
+        "btn(6)",
+        "btnp(0)",
+        "btn(:a)",
+        "btn(:b)",
+        "btn(:btn_a)",
+        "btn(:z)",
+        "btn(\"1\")",
+    ];
+
+    for call in invalid_calls {
+        let script = format!(
+            "def update\n  {}\nend\ndef draw\nend\n",
+            call
+        );
+        let (tail, mrb) = cli::compile_ruby_script_str(&script).unwrap();
+        let mut rt = GameRuntime::new(&tail, &mrb, true).unwrap();
+        let err = rt.call_update_result().expect_err(&format!("{} should raise ArgumentError", call));
+        let msg = format!("{:?}", err);
+        assert!(msg.contains("ArgumentError"), "{} raised unexpected error: {}", call, msg);
+    }
+}
+
+#[test]
+fn test_1p_ignores_wasd_space_enter() {
+    let script = r#"
+def update
+  $l = btn(:left)
+  $r = btn(:right)
+  $u = btn(:up)
+  $d = btn(:down)
+  $b1 = btn(1)
+  $b2 = btn(2)
+  $kw = btn(:key_w)
+  $sp = btn(:space)
+  $en = btn(:enter)
+end
+def draw
+end
+"#;
+    let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
+    let mut rt = GameRuntime::new(&tail, &mrb, true).unwrap();
+
+    rt.input_state.borrow_mut().set_frame_buttons(vec![
+        ButtonId::Key(KeyCode::W),
+        ButtonId::Key(KeyCode::A),
+        ButtonId::Key(KeyCode::S),
+        ButtonId::Key(KeyCode::D),
+        ButtonId::Key(KeyCode::Space),
+        ButtonId::Key(KeyCode::Enter),
+    ]);
+    rt.call_update_result().unwrap();
+
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$l").unwrap()), Some(false));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$r").unwrap()), Some(false));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$u").unwrap()), Some(false));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$d").unwrap()), Some(false));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$b1").unwrap()), Some(false));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$b2").unwrap()), Some(false));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$kw").unwrap()), Some(true));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$sp").unwrap()), Some(true));
+    assert_eq!(robject_to_bool(rt.vm.globals.get("$en").unwrap()), Some(true));
+}
+
+#[test]
+fn test_single_gamepad_auto_2p_split() {
+    // Case 1: 1P keyboard pressed first -> Gamepad 0 becomes player 1
+    {
+        let script = r#"
+def update
+end
+def draw
+  $p0_l = btn(:left, 0)
+  $p0_lp = btnp(:left, 0)
+  $p0_b1 = btn(1, 0)
+  $p1_r = btn(:right, 1)
+  $p1_rp = btnp(:right, 1)
+  $p1_b1 = btn(1, 1)
+end
+"#;
+        let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
+        let mut rt = GameRuntime::new(&tail, &mrb, true).unwrap();
+
+        // Frame 1: 1P keyboard Left pressed while 1 gamepad connected
+        {
+            let mut st = rt.input_state.borrow_mut();
+            st.set_frame_buttons(vec![ButtonId::Key(KeyCode::Left)]);
+            st.gamepad.borrow_mut().set_frame_masks([0, 0, 0, 0], 1);
+        }
+        rt.call_draw_result().unwrap();
+        assert_eq!(robject_to_bool(rt.vm.globals.get("$p0_l").unwrap()), Some(true));
+        assert_eq!(robject_to_bool(rt.vm.globals.get("$p0_lp").unwrap()), Some(true));
+        assert_eq!(robject_to_bool(rt.vm.globals.get("$p1_r").unwrap()), Some(false));
+
+        // Frame 2: Gamepad 0 Right + B1 pressed -> goes to player 1
+        {
+            let mut st = rt.input_state.borrow_mut();
+            st.set_frame_buttons(vec![ButtonId::Key(KeyCode::Left)]);
+            st.gamepad
+                .borrow_mut()
+                .set_frame_masks([gamepad::PAD_RIGHT | gamepad::PAD_B1, 0, 0, 0], 1);
+        }
+        rt.call_draw_result().unwrap();
+        assert_eq!(robject_to_bool(rt.vm.globals.get("$p0_l").unwrap()), Some(true));
+        assert_eq!(robject_to_bool(rt.vm.globals.get("$p0_lp").unwrap()), Some(false));
+        assert_eq!(robject_to_bool(rt.vm.globals.get("$p0_b1").unwrap()), Some(false));
+        assert_eq!(robject_to_bool(rt.vm.globals.get("$p1_r").unwrap()), Some(true));
+        assert_eq!(robject_to_bool(rt.vm.globals.get("$p1_rp").unwrap()), Some(true));
+        assert_eq!(robject_to_bool(rt.vm.globals.get("$p1_b1").unwrap()), Some(true));
+    }
+
+    // Case 2: Gamepad 0 pressed first -> 1P keyboard becomes player 1
+    {
+        let script = r#"
+def update
+end
+def draw
+  $p0_b1 = btn(1, 0)
+  $p0_l = btn(:left, 0)
+  $p1_l = btn(:left, 1)
+  $p1_lp = btnp(:left, 1)
+end
+"#;
+        let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
+        let mut rt = GameRuntime::new(&tail, &mrb, true).unwrap();
+
+        // Frame 1: Gamepad 0 B1 pressed first
+        {
+            let mut st = rt.input_state.borrow_mut();
+            st.set_frame_buttons(vec![]);
+            st.gamepad
+                .borrow_mut()
+                .set_frame_masks([gamepad::PAD_B1, 0, 0, 0], 1);
+        }
+        rt.call_draw_result().unwrap();
+        assert_eq!(robject_to_bool(rt.vm.globals.get("$p0_b1").unwrap()), Some(true));
+        assert_eq!(robject_to_bool(rt.vm.globals.get("$p1_l").unwrap()), Some(false));
+
+        // Frame 2: 1P keyboard Left pressed -> goes to player 1
+        {
+            let mut st = rt.input_state.borrow_mut();
+            st.set_frame_buttons(vec![ButtonId::Key(KeyCode::Left)]);
+            st.gamepad
+                .borrow_mut()
+                .set_frame_masks([gamepad::PAD_B1, 0, 0, 0], 1);
+        }
+        rt.call_draw_result().unwrap();
+        assert_eq!(robject_to_bool(rt.vm.globals.get("$p0_b1").unwrap()), Some(true));
+        assert_eq!(robject_to_bool(rt.vm.globals.get("$p0_l").unwrap()), Some(false));
+        assert_eq!(robject_to_bool(rt.vm.globals.get("$p1_l").unwrap()), Some(true));
+        assert_eq!(robject_to_bool(rt.vm.globals.get("$p1_lp").unwrap()), Some(true));
+    }
+
+    // Case 3: Single-player game (never calls player >= 1) -> both keyboard and gamepad 0 work on player 0
+    {
+        let script = r#"
+def update
+end
+def draw
+  $p0_l = btn(:left)
+  $p0_b1 = btn(1)
+end
+"#;
+        let (tail, mrb) = cli::compile_ruby_script_str(script).unwrap();
+        let mut rt = GameRuntime::new(&tail, &mrb, true).unwrap();
+
+        // Frame 1: 1P keyboard Left
+        {
+            let mut st = rt.input_state.borrow_mut();
+            st.set_frame_buttons(vec![ButtonId::Key(KeyCode::Left)]);
+            st.gamepad.borrow_mut().set_frame_masks([0, 0, 0, 0], 1);
+        }
+        rt.call_draw_result().unwrap();
+        assert_eq!(robject_to_bool(rt.vm.globals.get("$p0_l").unwrap()), Some(true));
+
+        // Frame 2: Switch to Gamepad 0 B1 -> still works on player 0
+        {
+            let mut st = rt.input_state.borrow_mut();
+            st.set_frame_buttons(vec![]);
+            st.gamepad
+                .borrow_mut()
+                .set_frame_masks([gamepad::PAD_B1, 0, 0, 0], 1);
+        }
+        rt.call_draw_result().unwrap();
+        assert_eq!(robject_to_bool(rt.vm.globals.get("$p0_b1").unwrap()), Some(true));
+    }
 }

@@ -1,7 +1,7 @@
 # Blend Mode Demo (blend :normal / :add / :mul)
-# 矢印キー / WASD: ランタンを持ったうさぎを移動
-# Z / Space: 夜の暗闇フィルター (:mul) の ON/OFF 切替
-# X / Enter / クリック: 加算合成 (:add) の魔法弾・光の爆発を発射
+# 矢印キー: ランタンを持ったうさぎを移動
+# Z: 夜の暗闇フィルター (:mul) の ON/OFF 切替
+# X / クリック: 加算合成 (:add) の魔法弾・光の爆発を発射
 
 class BlendDemoScene
   def initialize
@@ -56,21 +56,21 @@ class BlendDemoScene
     @t += 1
     spd = 1.8
     moved = false
-    if btn(0)
+    if btn(:left)
       @px -= spd
       @flip_x = true
       moved = true
     end
-    if btn(1)
+    if btn(:right)
       @px += spd
       @flip_x = false
       moved = true
     end
-    if btn(2)
+    if btn(:up)
       @py -= spd
       moved = true
     end
-    if btn(3)
+    if btn(:down)
       @py += spd
       moved = true
     end
@@ -86,14 +86,14 @@ class BlendDemoScene
     @py = 44.0 if @py < 44.0
     @py = 204.0 if @py > 204.0
 
-    # Z / Space: 乗算暗闇フィルター (:mul) の ON/OFF
-    if btnp(4)
+    # Z: 乗算暗闇フィルター (:mul) の ON/OFF
+    if btnp(1)
       @night_mode = !@night_mode
     end
 
     # X / クリック / 自動デモ: 加算合成 (:add) の魔法弾を発射
-    if btnp(5) || btnp(6)
-      if btnp(6)
+    if btnp(2) || btnp(:mouse_l)
+      if btnp(:mouse_l)
         dx = mouse_x.to_f - @px
         dy = mouse_y.to_f - @py
         len = sqrt(dx * dx + dy * dy)

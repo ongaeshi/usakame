@@ -7,8 +7,8 @@
 #
 # Controls:
 #   Left / Right : Cycle alignment (:left / :center / :right)
-#   Z / Space    : Toggle font size (8px / 16px)
-#   X / Enter    : Toggle decoration (Outline / Shadow / Both / None)
+#   Z    : Toggle font size (8px / 16px)
+#   X    : Toggle decoration (Outline / Shadow / Both / None)
 
 config(
   title: "Text Measure & Style Demo",
@@ -51,10 +51,10 @@ class TextStyleDemo
     if btnp(:down)
       @sample_idx = (@sample_idx + 1) % @samples.size
     end
-    if btnp(:a)
+    if btnp(1)
       @size = (@size == 8) ? 16 : 8
     end
-    if btnp(:b)
+    if btnp(2)
       @deco_idx = (@deco_idx + 1) % @decos.size
     end
   end

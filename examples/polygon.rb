@@ -21,9 +21,9 @@ class PolygonDemoScene
     @t += 1
 
     # 左右キーで3Dロードのカーブ操作
-    if btn(0)
+    if btn(:left)
       @steer -= 0.08
-    elsif btn(1)
+    elsif btn(:right)
       @steer += 0.08
     else
       @steer *= 0.90
@@ -32,12 +32,12 @@ class PolygonDemoScene
     @steer = 1.2 if @steer > 1.2
 
     # 上下キーで太さブースト調整
-    @width_boost += 1 if btnp(2) && @width_boost < 4
-    @width_boost -= 1 if btnp(3) && @width_boost > -1
+    @width_boost += 1 if btnp(:up) && @width_boost < 4
+    @width_boost -= 1 if btnp(:down) && @width_boost > -1
 
     # Zキーでフリッパー跳ね上げ & ネオンビーム太線化
-    target_l = btn(4) ? -0.65 : 0.35
-    target_r = btn(4) ? 0.65 : -0.35
+    target_l = btn(1) ? -0.65 : 0.35
+    target_r = btn(1) ? 0.65 : -0.35
     @flipper_l += (target_l - @flipper_l) * 0.35
     @flipper_r += (target_r - @flipper_r) * 0.35
   end
@@ -144,7 +144,7 @@ class PolygonDemoScene
 
     # 6. ピンボール風フリッパー（line with width: 丸端点カプセル）
     fl_len = 34
-    fl_w = btn(4) ? 7 + @width_boost : 5 + @width_boost
+    fl_w = btn(1) ? 7 + @width_boost : 5 + @width_boost
     lx1 = 76 + (cos(@flipper_l) * fl_len).to_i
     ly1 = 210 + (sin(@flipper_l) * fl_len).to_i
     rx1 = 180 - (cos(@flipper_r) * fl_len).to_i

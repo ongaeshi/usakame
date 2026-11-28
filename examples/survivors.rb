@@ -4,9 +4,9 @@
 # 実行コマンド: uk run game.rb  または  uk browser game.rb
 # ==============================================================================
 # 【操作方法 / CONTROLS】
-#   矢印キー / WASD : 移動 (Move)
-#   Z / Space (btn4): フォーム固有スキル (🐰ウサギ: 無敵ブリンク / 🐢カメ: 甲羅スピン粉砕)
-#   X / Enter (btn5): うさかめタッグ切替 (ゲージMAXで切替バースト衝撃波！)
+#   矢印キー : 移動 (Move)
+#   Z: フォーム固有スキル (🐰ウサギ: 無敵ブリンク / 🐢カメ: 甲羅スピン粉砕)
+#   X: うさかめタッグ切替 (ゲージMAXで切替バースト衝撃波！)
 # ==============================================================================
 
 # --- ゲーム状態定数 ---
@@ -187,12 +187,12 @@ def keep_last(arr, max_len)
 end
 
 def update_input_edges
-  b0 = btn(0)
-  b1 = btn(1)
-  b2 = btn(2)
-  b3 = btn(3)
-  b4 = btn(4)
-  b5 = btn(5)
+  b0 = btn(:left)
+  b1 = btn(:right)
+  b2 = btn(:up)
+  b3 = btn(:down)
+  b4 = btn(1)
+  b5 = btn(2)
 
   $btnp0 = b0 && ($prev_b0 == false)
   $btnp1 = b1 && ($prev_b1 == false)
@@ -1254,18 +1254,18 @@ def update
   # 移動入力 (ix10, iy10 は -10, 0, 10)
   ix10 = 0
   iy10 = 0
-  if btn(0)
+  if btn(:left)
     ix10 -= 10
     $flip_x = true
   end
-  if btn(1)
+  if btn(:right)
     ix10 += 10
     $flip_x = false
   end
-  if btn(2)
+  if btn(:up)
     iy10 -= 10
   end
-  if btn(3)
+  if btn(:down)
     iy10 += 10
   end
 
@@ -1658,9 +1658,9 @@ def draw_title_screen
   rectfill(26, 146, 204, 42, 0)
   rect(26, 146, 204, 42, 5)
   print_text("【CONTROLS / 操作方法】", 62, 150, 12)
-  print_text("ARROWS/WASD : 移動 (Move)", 42, 161, 7)
-  print_text("Z / SPACE   : スキル (Blink/Spin)", 42, 170, 7)
-  print_text("X / ENTER   : フォーム切替 (Tag)", 42, 179, 7)
+  print_text("ARROWS : 移動 (Move)", 42, 161, 7)
+  print_text("Z   : スキル (Blink/Spin)", 42, 170, 7)
+  print_text("X   : フォーム切替 (Tag)", 42, 179, 7)
 
   if $high_score > 0
     print_text("🏆HIGH SCORE: #{$high_score}", 64, 196, 10)
@@ -1671,7 +1671,7 @@ def draw_title_screen
   if (($t / 15) % 2) == 0
     rectfill(44, 212, 168, 16, 8)
     rect(44, 212, 168, 16, 10)
-    print_text("PRESS Z / SPACE TO START!", 52, 216, 7)
+    print_text("PRESS Z TO START!", 52, 216, 7)
   end
 end
 
@@ -1719,7 +1719,7 @@ def draw_levelup_modal
     print_text("#{$UPG_ICONS[b]}#{$upg_lv[b]}", bx, 202, ($upg_lv[b] > 0) ? 7 : 5)
     b += 1
   end
-  print_text("↑/↓:SELECT   Z/SPACE:CONFIRM", 44, 220, 10)
+  print_text("↑/↓:SELECT   Z:CONFIRM", 44, 220, 10)
 end
 
 def draw_result_modal(is_victory)
@@ -1759,11 +1759,11 @@ def draw_result_modal(is_victory)
   end
 
   if is_victory
-    print_text("Z / SPACE : 🔥エンドレスモード続行!", 34, 184, 10)
-    print_text("X / ENTER : タイトル画面へ戻る", 44, 198, 6)
+    print_text("Z : 🔥エンドレスモード続行!", 34, 184, 10)
+    print_text("X : タイトル画面へ戻る", 44, 198, 6)
   else
     if (($t / 15) % 2) == 0
-      print_text("PRESS Z / SPACE TO RETRY!", 54, 190, 10)
+      print_text("PRESS Z TO RETRY!", 54, 190, 10)
     end
   end
 end
