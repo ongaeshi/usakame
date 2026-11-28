@@ -160,7 +160,7 @@ USAGE:
         --minimal                       Generate minimal files only (skip AGENTS.md & docs/)
         --split                         Separate resources into game.spr, game.map, game.sfx
         --with-refs                     Extract sample games into refs/examples/ for AI/reference
-        -t, --template <name>           Template: default, minimal, split, platformer, shooter, puzzle, card, runner, rpg, survivors, dungeon
+        -t, --template <name>           Template: default, minimal, split, or examples/<name>
         -p, --prompt <text>             Generate initial game.rb from prompt via LLM API (with auto self-check)
         -m, --model <name>              LLM model name (default: gemini-3.8-flash)
         --api-key <key>                 LLM API key (or set GEMINI_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY)
@@ -2075,15 +2075,7 @@ Usakame のスクリプト実行環境は軽量 Ruby VM **mrubyedge** です。�
 fn resolve_example_template_stem(template_lower: &str) -> Option<&str> {
     match template_lower {
         "default" | "starter" | "minimal" | "empty" | "split" => None,
-        "rpg" | "knight" => Some("rabbit_knight"),
-        "shooter" | "stg" => Some("shooter"),
-        "survivors" | "vampire" => Some("survivors"),
-        "puzzle" | "match3" | "falling" => Some("puzzle"),
-        "card" | "deck" | "roguelite" => Some("card_roguelite"),
-        "runner" | "flappy" => Some("flappy_runner"),
-        "particles" | "effects" | "juicy" => Some("particles"),
-        "dungeon" => Some("tiny_dungeon"),
-        other => Some(other),
+        other => Some(other.strip_suffix(".rb").unwrap_or(other)),
     }
 }
 
@@ -2171,7 +2163,7 @@ where
 
         let Some((_, rb_bytes)) = found_rb else {
             return Err(format!(
-                "Unknown template `{}`. Available templates: default, minimal, split, platformer, shooter, puzzle, card, runner, rpg, survivors, dungeon, demo, sound",
+                "Unknown template `{}`. Available templates: default, minimal, split, or examples/<name>",
                 opts.template
             ));
         };

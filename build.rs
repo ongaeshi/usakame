@@ -32,7 +32,12 @@ fn main() {
             .expect("Failed to compile game.rb to bytecode in build.rs");
     }
 
-    build_examples_archive(Path::new("examples"), &Path::new(&out_dir).join("examples_archive.bin"));
+    build_manifest_archive(
+        Path::new("examples"),
+        "PROJECT_EXAMPLES",
+        "example",
+        &Path::new(&out_dir).join("examples_archive.bin"),
+    );
     build_skills_archive(
         Path::new(".agents").join("skills").as_path(),
         &Path::new(&out_dir).join("skills_archive.bin"),
@@ -103,17 +108,23 @@ fn write_compressed_archive(mut entries: Vec<(String, Vec<u8>)>, archive_out_pat
     fs::write(archive_out_path, compressed).expect("Failed to write archive");
 }
 
-/// `examples/PROJECT_EXAMPLES` に明示記載されたサンプルファイルのみをアーカイブに同梱する。
-fn build_examples_archive(examples_dir: &Path, archive_out_path: &Path) {
-    let manifest_path = examples_dir.join("PROJECT_EXAMPLES");
-    let names = read_manifest_entries(&manifest_path, "example");
+/// 指定されたマニフェストに明示記載されたファイルのみをアーカイブに同梱する。
+fn build_manifest_archive(
+    examples_dir: &Path,
+    manifest_name: &str,
+    kind_label: &str,
+    archive_out_path: &Path,
+) {
+    let manifest_path = examples_dir.join(manifest_name);
+    let names = read_manifest_entries(&manifest_path, kind_label);
     let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
 
     for name in names {
         let example_path = examples_dir.join(&name);
         if !example_path.is_file() {
             panic!(
-                "Example `{}` listed in `{}` does not exist as a file: `{}`",
+                "{} `{}` listed in `{}` does not exist as a file: `{}`",
+                kind_label,
                 name,
                 manifest_path.display(),
                 example_path.display()
@@ -121,7 +132,7 @@ fn build_examples_archive(examples_dir: &Path, archive_out_path: &Path) {
         }
         println!("cargo:rerun-if-changed={}", example_path.display());
         let bytes = fs::read(&example_path).unwrap_or_else(|e| {
-            panic!("Failed to read example file `{}`: {}", example_path.display(), e)
+            panic!("Failed to read {} file `{}`: {}", kind_label, example_path.display(), e)
         });
         entries.push((name, bytes));
     }
